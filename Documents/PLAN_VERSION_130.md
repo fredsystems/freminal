@@ -54,12 +54,12 @@ enriched stubs again and get re-decomposed at activation.
 | 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
 | 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
 | 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Complete      | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Pending merge | None                               |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Complete      | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
 | 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
 | 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete      | 149                                |
-| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | Planned       | 140                                |
+| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | In progress   | 140                                |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
@@ -11246,7 +11246,7 @@ under "Task 140 — Underline & SGR Parity" above.
 
 ---
 
-### Task 151 — Own TERM & Terminfo Distribution (stub, v0.13.0)
+### Task 151 — Own TERM & Terminfo Distribution (activated, v0.13.0)
 
 **Goal.** Programs running in freminal know they are in freminal, and get freminal's real
 capabilities from terminfo, not only from XTGETTCAP. Children get `TERM=xterm-freminal` by
@@ -11334,6 +11334,184 @@ was dropped under.
 - Windows (ConPTY): whether `TERM` is set at all today, and whether anything changes.
 - What freminal does if `[shell] term` names an entry it does not ship (pass through, with a
   warning).
+
+  All three are resolved below (151 decisions and 151.9).
+
+#### 151 Activation (2026-11-19)
+
+Activated and decomposed on 2026-11-19 on branch `task-151/own-term`, from `main` at
+`13f73832` (after PR #587), in the worktree `../freminal-151`. It runs alongside Task 147
+(`task-147/correctness-cleanup`) and has its own PR.
+
+**Packaging recon (2026-11-19).**
+
+- The entry is compiled by `freminal-terminal-emulator/build.rs` (`tic -x`) into
+  `res/terminfo.tar`. The tar holds two legacy-format (magic 0432) files in Linux letter
+  directories, `x/xterm-freminal` and `f/freminal`, with no hex (`78/`, `66/`) copies. The tar
+  is embedded in the binary (`freminal-common/src/terminfo.rs`).
+- Each PTY extracts it into a temp dir held by the PTY I/O object (deleted when the pane
+  closes). Children get `TERMINFO_DIRS=<tempdir>:` and `TERMINFO` is removed. On Windows
+  nothing is extracted, but `TERM` is still set. The Windows comment about symlinks in the
+  tar is stale.
+- No package installs the entry: not the cargo-bundle `.app`, `.deb` or AppImage
+  (`[package.metadata.bundle]` has no `resources`), not the rpm (`generate-rpm` `assets`),
+  and not the flake (`postInstall`). The flake has no NixOS module.
+- freminal has no notion of its own resource directory beyond `shell_integration_dir()`
+  (`FREMINAL_RESOURCES_DIR`, `XDG_DATA_DIRS`, per-user dir). `current_exe()` and `APPDIR`
+  are not used anywhere.
+- Release packaging is in `.github/workflows/deploy.yaml` and `nightly.yml`. The deb and
+  AppImage are repacked after `cargo bundle` by `assets/ci/fix-linux-icon-metadata.sh`.
+
+**Decisions (maintainer, 2026-11-19).**
+
+1. **147.22 moves to Task 151** (as 151.2), so Task 151 owns `lookup_termcap` and
+   `res/freminal.ti` outright and the table-of-truth check covers `indn` and `rin`. <!-- codespell:ignore rin -->
+2. **macOS `.app`: bundle copy plus fallback** (the kitty and Ghostty model). The entry ships
+   in `Contents/Resources/terminfo/` in both letter and hex layouts, signed with the app.
+   freminal finds it from `current_exe()` and puts it first on `TERMINFO_DIRS`. The raw
+   binary (no bundle) keeps the per-pane extraction. `sudo` (drops `TERMINFO_DIRS`) is a
+   known limit, as in kitty and Ghostty.
+3. **AppImage: per-pane extraction only.** Nothing extra ships in the AppImage. Users who
+   want the entry system-wide (sudo, detached tmux servers) install the deb, the rpm, the
+   flake `terminfo` package or the NixOS module option. The detached-process limit is
+   documented.
+
+**Decisions (orchestrator, recorded so they are not re-litigated).**
+
+- **Both directory layouts everywhere.** The embedded tar and the bundle copy carry letter
+  (`x/`, `f/`) and hex (`78/`, `66/`) directories. Apple's ncurses uses hex directories; the
+  extra copies cost about 5 KB and remove the need to know which one a given ncurses reads.
+- **The compiled tree is committed.** `build.rs` keeps a committed `res/terminfo/` tree (both
+  layouts, deterministic) in step with `res/freminal.ti`, as it already does for the tar, and
+  the tar is packed from that tree. cargo-bundle's `resources` and the rpm `assets` point at
+  the committed files, so packaging needs no `tic` at bundle time.
+- **`TERMINFO_DIRS` order** is: the `.app` bundle directory (macOS, when it exists), then the
+  per-pane temp dir (only when there is no bundle directory), then the system default (the
+  trailing empty entry). An installed system copy is found through the default.
+- **Windows keeps `xterm-256color` as its default.** There is no terminfo distribution path on
+  Windows, and MSYS2/Cygwin programs run under ConPTY read their own terminfo databases, which
+  do not have `xterm-freminal`. The `[shell] term` option is honoured on every platform.
+- **The configured `TERM` is passed through unchecked**, apart from validation that it is a
+  non-empty name with no control characters, `/` or whitespace. An invalid value falls back
+  to the platform default with a config warning. freminal does not check that the named entry
+  exists (it cannot see the remote side of an ssh session anyway).
+- **Precedence.** A layout or pane `env` `TERM` wins over `[shell] term`. The effective value
+  is computed once at spawn and is the single value used for the child's environment,
+  XTGETTCAP `TN` and the FREC `term` metadata.
+- **No new install command.** Task 92 stays dropped; remote copying stays with Task 86.
+
+#### 151 Subtasks
+
+Every subtask leaves `cargo xtask test` and
+`cargo clippy --all-targets --all-features -- -D warnings` green, and runs
+`cargo xtask check-windows` where it touches platform code. Standing prohibitions: no files
+outside scope, no commits, no plan-document edits, no next subtask; no `unwrap`/`expect`
+outside tests, no raw numeric `as` casts, no new `bool` fields or parameters, no
+`#[allow(dead_code)]`; no deleted or weakened assertion unless the subtask names the
+behaviour change. A `flake.nix` change that alters a dev shell stops for `nix develop`
+(`flake-dev-shell-discipline`).
+
+##### 151.1 — Terminfo entry audit (READ-ONLY)
+
+Every capability in `res/freminal.ti` is checked against what the parser and handler actually
+do (with the code location that implements it, or "missing"), and every name
+`lookup_termcap` answers is checked for presence and an identical value in the entry. The
+`xterm-256color` capabilities freminal does not implement, and the ones freminal implements
+that neither entry declares, are listed. Deliverable: the table, folded into this section as
+"151 Audit". No edits.
+
+##### 151.2 — XTGETTCAP answers `indn`, `rin` and `query-os-name` (moved from 147.22) <!-- codespell:ignore rin -->
+
+The 147.22 text applies unchanged (scope `terminal_handler/dcs.rs` `lookup_termcap` and its
+tests), plus: `indn` and `rin` are added to `res/freminal.ti` with the same strings, so the <!-- codespell:ignore rin -->
+two cannot disagree. `query-os-name` is XTGETTCAP-only (it is not a terminfo capability).
+
+##### 151.3 — Entry corrections and one table of truth
+
+Scope: `res/freminal.ti`, `lookup_termcap`, their tests. Fix every wrong or missing
+capability the 151.1 audit found (each fix cites its audit row). Replace the three-capability
+test from 140.4 with one that parses `res/freminal.ti` (`include_str!`) and checks, for every
+name `lookup_termcap` answers that is a terminfo capability, that the entry has the same
+value, and the reverse for every string capability in the entry that XTGETTCAP should answer.
+Names deliberately answered by only one side are listed in the test with a reason.
+
+##### 151.4 — Both layouts, and a committed compiled tree
+
+Scope: `freminal-terminal-emulator/build.rs`, `res/terminfo/` (new, generated),
+`res/terminfo.tar`, `freminal-common/src/terminfo.rs` (docs), the stale Windows comment in
+`io/pty.rs`, `.coderabbit.yaml` (exclude the new binary tree). `build.rs` writes the compiled
+entries into `res/terminfo/{x,f,78,66}/` deterministically (only when the bytes change) and
+packs the tar from that tree. A test checks that the tar holds all four paths with identical
+bytes, and that the tar's members equal the committed tree.
+
+##### 151.5 — `[shell] term`
+
+The full `freminal-config-options` checklist: `ShellConfig::term`, `ConfigPartial` /
+`apply_partial`, validation (as decided), the Settings modal, `config_example.toml`, the
+home-manager module. The default is resolved per platform (`xterm-freminal`; Windows
+`xterm-256color`). Tests: round trip, partial apply, defaults per platform (pure function
+over a platform enum), invalid values.
+
+##### 151.6 — The effective `TERM` reaches the child, XTGETTCAP and FREC
+
+Scope: `freminal-terminal-emulator/src/io/pty.rs` (`run_terminal`, the TERM comment),
+`interface.rs` and the handler (a typed effective-`TERM` value given at construction),
+`terminal_handler/dcs.rs` (`TN` reports it; the Task 76.6 regression test now checks that `TN`
+equals the child's `TERM`), `freminal/src/gui/pty.rs`, `tab_spawning.rs` and `layout_ops.rs`
+(computing the effective value with layout/pane `env` precedence), `freminal/src/main.rs`,
+`freminal/src/gui/recording.rs` and `freminal-terminal-emulator/src/recording.rs` (FREC
+`term`). Tests: config default, config override, pane `env` override, `TN` and FREC agree with
+the child's value in each case.
+
+##### 151.7 — macOS bundle terminfo
+
+Scope: `freminal/Cargo.toml` (cargo-bundle `resources`), `io/pty.rs` (a pure function from the
+executable path to an optional bundle terminfo directory, and the `TERMINFO_DIRS` order as
+decided), `flake.nix` (the Darwin `postInstall` copies the tree into
+`Freminal.app/Contents/Resources/terminfo`). Tests: the pure resolver on every platform
+(inside a `.app`, a raw binary, a symlinked `$out/bin/freminal`); the `TERMINFO_DIRS` builder
+for each case. The release workflow is checked by reading only; the macOS CI job compiles it.
+
+##### 151.8 — Linux and Nix packaging
+
+Scope: `freminal/Cargo.toml` (rpm `assets`: `/usr/share/terminfo/{x,f}/…`),
+`assets/ci/fix-linux-icon-metadata.sh` (add `usr/share/terminfo` to the repacked `.deb` only;
+the AppImage is unchanged, per decision 3), `flake.nix` (`packages.<system>.terminfo`, only
+`$out/share/terminfo`, no GUI dependencies; the main package installs the tree too;
+`nixosModules.default`), a new `nix/nixos-module.nix` (`programs.freminal.terminfo.enable`
+adds the terminfo package to `environment.systemPackages`). Verification adds `nixfmt`,
+`statix`, `deadnix`, `nix flake check` and `nix build .#terminfo`.
+
+##### 151.9 — A real child resolves the entry
+
+Scope: a new integration test in `freminal-terminal-emulator/tests/`. It spawns a real PTY
+child through the production spawn path, with the production environment, and runs
+`infocmp -x xterm-freminal` (and `tput Smulx 3`) in it, asserting that the entry resolves
+with the expected values. It runs on the Linux and macOS CI jobs, which settles the macOS
+open question; it is skipped with a visible message only when `infocmp` is not installed.
+Not on Windows.
+
+##### 151.10 — Documentation
+
+Scope: a new "TERM strategy" section in `DESIGN_DECISIONS.md` (the reversed decision and its
+reasons, the `TERMINFO_DIRS` order, the sudo and detached-process limits, and how to fix ssh:
+install the terminfo package, `infocmp -x xterm-freminal | ssh host tic -x -`, or set
+`[shell] term`), every sentence in the list above, COVERAGE/GAPS (XTGETTCAP rows from 151.2,
+`TN`), README, `FREC_FORMAT.md`.
+
+#### 151 Execution model
+
+Serial inside the worktree: 151.1, 151.2, 151.3, 151.4, 151.5, 151.6, 151.7, 151.8, 151.9,
+151.10. Each subtask is implemented by a sub-agent and reviewed in full by the orchestrator
+(whole diff, every new file read, compared with this section) before the orchestrator commits
+it. Then an adversarial review of `main...HEAD`; every finding, nit and above, becomes a
+`151.Cn` entry and is fixed before the PR, followed by a confirmation review. Files shared
+with Task 147 (`config.rs`, `settings.rs`, `config_example.toml`, the home-manager module,
+COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
+
+#### 151 Status notes
+
+(none yet)
 
 ---
 
