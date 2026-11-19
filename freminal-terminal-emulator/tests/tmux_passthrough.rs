@@ -668,6 +668,31 @@ fn inner_8bit_csi_set_in_the_same_read_matches_direct_delivery() {
 }
 
 #[test]
+fn payload_is_seeded_with_the_mode_at_its_position_not_the_end_of_the_read() {
+    // The payload comes before the S8C1T in the same read, so the 0x9B inside
+    // it is text.  The outer parser ends the read in 8-bit mode, so seeding
+    // the payload parser from it would wrongly execute the CSI.
+    let mut wire = tmux_wrap(INNER_WITH_8BIT_CSI);
+    wire.extend_from_slice(b"\x1b G");
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(&wire);
+
+    assert_eq!(replies(&rx), Vec::<Vec<u8>>::new());
+}
+
+#[test]
+fn s8c1t_inside_a_payload_governs_the_following_read() {
+    // The outer parser never emits an S8C1T that arrived inside a tmux
+    // payload, yet the terminal is in 8-bit mode afterwards, so the next
+    // read's 0x9B is a CSI.
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(&tmux_wrap(b"\x1b G"));
+    state.handle_incoming_data(b"\x9b5n");
+
+    assert_eq!(replies(&rx), vec![b"\x9b0n".to_vec()]);
+}
+
+#[test]
 fn inner_da1_reply_is_8bit_framed_after_s8c1t() {
     let (mut state, rx) = make_state();
     state.handle_incoming_data(b"\x1b G");
@@ -686,10 +711,11 @@ fn inner_da1_reply_is_8bit_framed_after_s8c1t() {
 #[test]
 fn inner_vt52_sequence_matches_direct_delivery() {
     // The outer parser cannot carry a DCS while in VT52 mode (VT52 has no
-    // DCS), and ANSI -> VT52 only takes effect after a read has been parsed.
-    // So the way to reach a VT52 payload is a read holding two payloads: the
-    // first enters VT52, the second is a VT52 sequence.  The fresh parser
-    // that handles the second must be seeded with VT52 mode.
+    // DCS), so a VT52 payload cannot follow a top-level `CSI ? 2 l` in the same
+    // read.  The way to reach one is a read holding two payloads: the first
+    // enters VT52 (the outer parser never emits that output itself), the
+    // second is a VT52 sequence.  The fresh parser that handles the second must
+    // be seeded with VT52 mode.
     //
     // `ESC Y` is direct cursor addressing: row 2, column 5 (zero-based) are
     // sent as byte + 0x20.

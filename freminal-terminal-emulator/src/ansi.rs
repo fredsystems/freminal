@@ -149,6 +149,31 @@ pub enum ParserInner {
     Vt52CursorAddress(Option<u8>),
 }
 
+/// Apply to `vt52_mode` / `s8c1t_mode` the change `output` makes to the
+/// parser's own mode, if any.
+///
+/// The parser calls this as it emits each output, so a mode change governs
+/// the very next byte of the same read.  `TerminalState` calls it again, in
+/// event order, to track the mode in force at each point of the byte stream
+/// (used to seed the tmux passthrough payload parser).
+pub(crate) const fn apply_parser_mode_change(
+    output: &TerminalOutput,
+    vt52_mode: &mut Decanm,
+    s8c1t_mode: &mut S8c1t,
+) {
+    match output {
+        TerminalOutput::EightBitControl => *s8c1t_mode = S8c1t::EightBit,
+        TerminalOutput::SevenBitControl => *s8c1t_mode = S8c1t::SevenBit,
+        TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52)) => *vt52_mode = Decanm::Vt52,
+        TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)) => *vt52_mode = Decanm::Ansi,
+        TerminalOutput::ResetDevice => {
+            *vt52_mode = Decanm::Ansi;
+            *s8c1t_mode = S8c1t::SevenBit;
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct FreminalAnsiParser {
     pub inner: ParserInner,
@@ -430,6 +455,7 @@ impl FreminalAnsiParser {
 
         for &b in incoming {
             self.seq_trace.push(b);
+            let emitted_from = output.len();
 
             match &mut self.inner {
                 ParserInner::Empty => {
@@ -587,6 +613,14 @@ impl FreminalAnsiParser {
                     }
                 }
             }
+
+            // A mode change (S8C1T/S7C1T, DECANM, RIS) must govern the next
+            // byte of this same read, not the next read, so the parser applies
+            // it here, as it emits the output.  The `continue` paths above
+            // emit only C0 / C1 controls, none of which change a mode.
+            for emitted in &output[emitted_from..] {
+                apply_parser_mode_change(emitted, &mut self.vt52_mode, &mut self.s8c1t_mode);
+            }
         }
 
         // Flush any accumulated data
@@ -696,16 +730,15 @@ impl FreminalAnsiParser {
             }
             // ESC < — Exit VT52 mode, return to ANSI mode
             //
-            // The parser's `vt52_mode` flag must be flipped immediately — not
-            // deferred to `sync_mode_flags()` — because any bytes remaining in
-            // the current `push()` buffer must be routed through the ANSI
-            // parser, not the VT52 parser.  vttest issues `ESC <` followed by
+            // `push()` flips `vt52_mode` as soon as this output is emitted
+            // (see `apply_parser_mode_change`), because any bytes remaining in
+            // the current buffer must be routed through the ANSI parser, not
+            // the VT52 parser.  vttest issues `ESC <` followed by
             // `ESC P … ESC \` (DECRQSS) in a single PTY read; without the
             // immediate flip the `ESC P` would be routed to `handle_vt52_escape`
             // which does not recognise `P` and the DCS payload would leak to the
             // display as literal text.
             b'<' => {
-                self.vt52_mode = Decanm::Ansi;
                 output.push(TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)));
                 self.inner = ParserInner::Empty;
             }
@@ -1524,6 +1557,136 @@ mod tests {
 
         // The parser should now be in ANSI mode
         assert_eq!(p.vt52_mode, Decanm::Ansi);
+    }
+
+    // -------------------------------------------------------------------------
+    // Parser mode changes take effect within the same push() (Task 147.2)
+    // -------------------------------------------------------------------------
+
+    /// `ESC SP G` then `0x9B 6 n` in one `push()`: the 0x9B is an 8-bit CSI.
+    /// Before 147.2 the parser switched mode only when `TerminalState` applied
+    /// the output, so the 0x9B was parsed as text.
+    #[test]
+    fn s8c1t_applies_to_the_rest_of_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b G\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::EightBitControl,
+                TerminalOutput::CursorReport
+            ]
+        );
+        assert_eq!(p.s8c1t_mode, S8c1t::EightBit);
+    }
+
+    /// `ESC SP F` then `0x9B 6 n` in one `push()`: the 0x9B is no longer a CSI
+    /// introducer, so it is plain text, as in any 7-bit read.
+    #[test]
+    fn s7c1t_applies_to_the_rest_of_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let result = p.push(b"\x1b F\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::SevenBitControl,
+                TerminalOutput::Data(b"\x9b6n".to_vec()),
+            ]
+        );
+        assert_eq!(p.s8c1t_mode, S8c1t::SevenBit);
+    }
+
+    /// With the parser already in 8-bit mode, RIS then `0x9B 6 n` in one
+    /// `push()`: RIS returns the parser to 7-bit at its position, so the 0x9B
+    /// is text.  Before 147.2 the parser stayed 8-bit for the whole read and
+    /// executed the CSI.
+    #[test]
+    fn ris_resets_parser_modes_within_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let result = p.push(b"\x1bc\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::ResetDevice,
+                TerminalOutput::Data(b"\x9b6n".to_vec()),
+            ]
+        );
+        assert_eq!(p.s8c1t_mode, S8c1t::SevenBit);
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
+    }
+
+    /// S8C1T, RIS, then S8C1T again in one `push()`: the mode changes apply in
+    /// order, so the final state is 8-bit and the trailing `0x9B` is a CSI.
+    #[test]
+    fn s8c1t_ris_s8c1t_apply_in_order_within_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b G\x1bc\x1b G\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::EightBitControl,
+                TerminalOutput::ResetDevice,
+                TerminalOutput::EightBitControl,
+                TerminalOutput::CursorReport,
+            ]
+        );
+    }
+
+    /// RIS resets DECANM too: a `ESC` after RIS goes to the ANSI escape state.
+    #[test]
+    fn ris_resets_vt52_mode_within_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let _ = p.push(b"\x1b[?2l");
+        assert_eq!(p.vt52_mode, Decanm::Vt52);
+        // In VT52 mode ESC c is not RIS, so seed the reset via the ANSI path.
+        let result = p.push(b"\x1b<\x1bc\x1b[1A");
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
+        assert!(
+            result.contains(&TerminalOutput::ResetDevice),
+            "RIS after leaving VT52 must parse as RIS: {result:?}"
+        );
+        assert_eq!(p.s8c1t_mode, S8c1t::SevenBit);
+    }
+
+    /// `CSI ? 2 l` then a VT52 `ESC A` in one `push()`: the `ESC A` is VT52
+    /// cursor-up, not an (invalid) ANSI escape.
+    #[test]
+    fn decanm_reset_applies_to_the_rest_of_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b[?2l\x1bA");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52)),
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                },
+            ]
+        );
+        assert_eq!(p.vt52_mode, Decanm::Vt52);
+    }
+
+    /// The reverse: `CSI ? 2 h` is not reachable from VT52 mode (CSI is not
+    /// recognised there), so `ESC <` is the way back, and the very next byte
+    /// of the same push is ANSI.
+    #[test]
+    fn vt52_exit_applies_to_the_rest_of_the_same_push() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1b<\x1b[1A");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)),
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                },
+            ]
+        );
     }
 
     #[test]

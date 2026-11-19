@@ -9,6 +9,9 @@
 //! The authoritative row list is the "131 Reset table" in
 //! `Documents/PLAN_VERSION_130.md`.
 
+use freminal_common::buffer_states::{
+    mode::Mode, modes::decanm::Decanm, terminal_output::TerminalOutput,
+};
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::ansi::FreminalAnsiParser;
@@ -569,17 +572,18 @@ fn decstr_on_the_alternate_screen_leaves_the_primary_saved_charset_alone() {
     );
 }
 
-/// The DECRQM status digit for DECANM (`?2`) after feeding `bytes` as one
-/// chunk, ending in the query.
+/// The DECRQM status digit for DECANM (`?2`) after the handler applies
+/// `outputs` followed by a DECRQM query.
 ///
-/// Once the parser is in VT52 mode it no longer parses `CSI ? 2 $ p`, so the
-/// whole sequence has to arrive in a single chunk, which the parser reads in
-/// ANSI mode before any mode sync.
-fn decanm_status_after(rig: &mut Rig, bytes: &[u8]) -> u8 {
+/// This drives the handler directly rather than through bytes: once the parser
+/// is in VT52 mode it no longer parses `CSI ? 2 $ p`, and `ESC c` is not RIS in
+/// VT52 mode either, so RIS-while-VT52 is reachable only as parsed outputs.
+fn decanm_status_after(rig: &mut Rig, outputs: &[TerminalOutput]) -> u8 {
     rig.drain();
-    let mut chunk = bytes.to_vec();
-    chunk.extend_from_slice(b"\x1b[?2$p");
-    rig.feed(&chunk);
+    rig.state.handler.process_outputs(outputs);
+    rig.state
+        .handler
+        .process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Query))]);
     let reply = rig.drain_bytes();
     let text = String::from_utf8_lossy(&reply).into_owned();
     text.strip_suffix("$y")
@@ -591,15 +595,16 @@ fn decanm_status_after(rig: &mut Rig, bytes: &[u8]) -> u8 {
 #[test]
 fn ris_resets_the_handlers_decanm_mirror_to_ansi() {
     // DECRQM ?2 reports 2 (reset) while in VT52 mode and 1 (set) in ANSI mode.
+    let vt52 = TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52));
     let mut rig = Rig::new(80, 24);
     assert_eq!(
-        decanm_status_after(&mut rig, b"\x1b[?2l"),
+        decanm_status_after(&mut rig, std::slice::from_ref(&vt52)),
         2,
         "sanity: DECANM reset means VT52"
     );
     let mut rig = Rig::new(80, 24);
     assert_eq!(
-        decanm_status_after(&mut rig, b"\x1b[?2l\x1bc"),
+        decanm_status_after(&mut rig, &[vt52, TerminalOutput::ResetDevice]),
         1,
         "RIS must return the handler's DECANM mirror to ANSI"
     );

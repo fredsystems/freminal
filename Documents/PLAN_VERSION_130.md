@@ -7774,6 +7774,18 @@ Stale stub text was corrected at the same time:
   reply comes from `Mode::report`, so `CSI 2 $ p` gets `CSI 2 ; 0 $ y` and `CSI ? 9999 $ p`
   keeps the `?` form, in both 7-bit and S8C1T framing. Five new tests (four fail on the old
   `?{digits}` format).
+- **147.2 (done).** `apply_parser_mode_change` (in `ansi.rs`) is the one rule: `push()`
+  applies it to each output a byte emits, so S8C1T/S7C1T, DECANM and RIS govern the next byte
+  of the same read. `TerminalState` no longer writes the parser's modes; it folds the same
+  function over the outputs in event order (`WireModes`) to seed each tmux payload parser
+  with the mode at its position, and writes the result back so a mode change inside a
+  payload still governs later reads. Changed test: `ris_resets_the_handlers_decanm_mirror_to_ansi`
+  (`reset_table.rs`) drove RIS and DECRQM through a VT52 read, which only worked under the old
+  per-read rule; it now drives the handler directly. The plan's "S8C1T, RIS, `0x9B`" case
+  cannot fail on the old code (that read was 7-bit throughout), so it became "already 8-bit,
+  RIS, `0x9B`". Benchmarks (quiet machine, vs `before_147_2`): `parser_push` −5.0%,
+  `parser_push_sgr` +2.4% / +1.4%, `parse_and_handle_80x24` −0.7%,
+  `handle_incoming_data_4096` −1.6%. The GAPS "per read" paragraph goes in 147.17.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
