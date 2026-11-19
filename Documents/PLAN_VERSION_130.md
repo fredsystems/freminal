@@ -11623,6 +11623,11 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   `infocmp`, `nix flake check --no-build`, a `nixosSystem` evaluation with and without the
   option, darwin `drvPath` evaluation. Not run locally: the full package build and a real
   rpm/deb.
+- **151.11 (done).** Both release jobs copy `res/freminal.ti` into `artifacts/` before the
+  upload (`deploy.yaml`'s release job gained a checkout). The `.ti` header records that the
+  path is public. `source_compiles_from_stdin_to_the_committed_entry` pipes the file through
+  `tic -x -o <tmp> -` and compares the result with the committed entry (skipped, with a
+  message, without `tic`). The raw `main` URL resolves once this branch merges.
 
 ---
 

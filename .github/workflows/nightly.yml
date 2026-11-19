@@ -354,6 +354,9 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Attach the terminfo source
+        run: cp res/freminal.ti artifacts/freminal.ti
+
       - name: Create nightly tag
         run: |
           # The tag is computed in check-changes with a ".N" suffix if a

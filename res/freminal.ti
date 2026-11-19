@@ -5,6 +5,11 @@
 #       (`lookup_termcap` in terminal_handler/dcs.rs) also answers must be identical
 #       to the one below; a test in that file enforces it.
 #
+#       This path is public.  The README links the file's raw URL on `main`,
+#       https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti,
+#       for `curl ... | tic -x -`, so it must not move or be renamed.  The file is
+#       also attached to every release and nightly as `freminal.ti`.
+#
 #       Deliberately absent because freminal does not implement them: `invis` and
 #       the SGR 8 part of `sgr` (conceal is parsed but ignored, see
 #       ESCAPE_SEQUENCE_GAPS.md) and `km` (Alt sends no 8th bit and there is no

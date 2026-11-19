@@ -109,6 +109,55 @@ fn letter_and_hex_copies_are_identical() {
     assert!(by_path("x/xterm-freminal") == by_path("f/freminal"));
 }
 
+/// The source file is a public URL (linked from the README) and a release asset;
+/// `include_str!` pins that the path exists.
+const SOURCE: &str = include_str!("../../res/freminal.ti");
+
+#[test]
+fn source_compiles_from_stdin_to_the_committed_entry() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut child = match Command::new("tic")
+        .args(["-x", "-o"])
+        .arg(dir.path())
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            eprintln!("SKIPPED: `tic` is not available ({err}); stdin compile not checked");
+            return;
+        }
+    };
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(SOURCE.as_bytes())
+        .expect("write the source to tic");
+    let output = child.wait_with_output().expect("wait for tic");
+    assert!(
+        output.status.success(),
+        "tic rejected res/freminal.ti on stdin: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let committed = include_bytes!("../../res/terminfo/x/xterm-freminal");
+    let compiled = ["x/xterm-freminal", "78/xterm-freminal"]
+        .iter()
+        .find_map(|rel| std::fs::read(dir.path().join(rel)).ok())
+        .expect("tic wrote the entry in the letter or the hex layout");
+    assert!(
+        compiled == committed,
+        "stdin compile differs from res/terminfo/x/xterm-freminal"
+    );
+}
+
 #[test]
 fn extraction_yields_the_four_files() {
     let dir = tempfile::tempdir().expect("temp dir");
