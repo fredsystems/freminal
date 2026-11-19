@@ -11,7 +11,10 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 ///
 /// **SCORC (SCO Restore Cursor Position):**
 /// Plain `CSI u` with no parameters restores the cursor to the position
-/// previously saved with `CSI s` (SCOSC).
+/// previously saved with `CSI s` (SCOSC).  Any parameter at all, including an
+/// explicit `0` (`CSI 0 u`, `CSI 1 u`, `CSI 1;2 u`), makes the sequence
+/// recognised but ignored, as in xterm, kitty and `WezTerm`: nothing is
+/// emitted.
 ///
 /// **Kitty keyboard protocol:**
 /// - `CSI ? u` — Query current keyboard mode flags.  Respond with
@@ -27,8 +30,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// - `>` prefix  → Kitty push
 /// - `<` prefix  → Kitty pop
 /// - `=` prefix  → Kitty set
-/// - Anything else with digits only → SCORC (numeric params are valid for
-///   some SCORC implementations, though rarely used)
+/// - Anything else (numeric params) → recognised and ignored
 pub fn ansi_parser_inner_csi_finished_scorc(params: &[u8], output: &mut Vec<TerminalOutput>) {
     match params.first() {
         None => {
@@ -58,9 +60,8 @@ pub fn ansi_parser_inner_csi_finished_scorc(params: &[u8], output: &mut Vec<Term
             output.push(TerminalOutput::KittyKeyboardSet { flags, mode });
         }
         Some(_) => {
-            // Numeric-only params: treat as SCORC (some terminals accept
-            // CSI Ps u as a parameterised restore, though this is rare).
-            output.push(TerminalOutput::RestoreCursor);
+            // CSI Ps u with any parameter is ignored (xterm, kitty, WezTerm).
+            tracing::debug!("CSI Ps u with parameters ignored");
         }
     }
 }
@@ -118,10 +119,43 @@ mod tests {
     }
 
     #[test]
-    fn numeric_params_are_scorc() {
+    fn explicit_zero_param_is_ignored() {
         let mut output = Vec::new();
-        ansi_parser_inner_csi_finished_scorc(b"1", &mut output);
-        assert_eq!(output, vec![TerminalOutput::RestoreCursor]);
+        ansi_parser_inner_csi_finished_scorc(b"0", &mut output);
+        assert!(output.is_empty(), "CSI 0 u must not restore: {output:?}");
+    }
+
+    #[test]
+    fn numeric_param_is_ignored() {
+        let mut output = Vec::new();
+        ansi_parser_inner_csi_finished_scorc(b"5", &mut output);
+        assert!(output.is_empty(), "CSI 5 u must not restore: {output:?}");
+    }
+
+    #[test]
+    fn multiple_numeric_params_are_ignored() {
+        let mut output = Vec::new();
+        ansi_parser_inner_csi_finished_scorc(b"1;2", &mut output);
+        assert!(output.is_empty(), "CSI 1;2 u must not restore: {output:?}");
+    }
+
+    #[test]
+    fn ignored_params_log_at_debug_without_payload() {
+        let mut output = Vec::new();
+        let events = crate::log_capture::capture(|| {
+            ansi_parser_inner_csi_finished_scorc(b"12345", &mut output);
+        });
+        assert!(output.is_empty(), "no output expected: {output:?}");
+        assert!(
+            events
+                .iter()
+                .any(|(level, _)| *level == tracing::Level::DEBUG),
+            "expected a debug event: {events:?}"
+        );
+        assert!(
+            events.iter().all(|(_, text)| !text.contains("12345")),
+            "no event may carry the parameters: {events:?}"
+        );
     }
 
     // ── Kitty query ─────────────────────────────────────────────────

@@ -7836,6 +7836,10 @@ Stale stub text was corrected at the same time:
   clears pending wrap; 147.18 replaces that with full resize tracking. All three save paths
   share `Buffer::save_cursor`/`restore_cursor`. Tests at buffer and emulator level, for
   DECSC, `CSI s`/`u`, `?1048` and `?1049`.
+- **147.7 (done).** `CSI Ps u` with any parameter (`0` included) emits nothing and logs a
+  payload-free `debug!`; `CSI u` still restores; the kitty prefixed forms are unchanged.
+  Changed test: `numeric_params_are_scorc` became three "ignored" tests. New end-to-end test
+  through `TerminalState`.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

@@ -1068,6 +1068,23 @@ mod tests {
         state.send_focus_event(false);
     }
 
+    // ── 147.7: CSI Ps u with parameters is ignored ──────────────────────────
+    #[test]
+    fn csi_ps_u_with_parameter_does_not_restore_cursor() {
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b[3;4H\x1b7\x1b[10;10H");
+        let moved = state.cursor_pos();
+        assert_eq!((moved.x, moved.y), (9, 9));
+
+        state.handle_incoming_data(b"\x1b[1u");
+        let after = state.cursor_pos();
+        assert_eq!((after.x, after.y), (9, 9), "CSI 1 u must not restore");
+
+        state.handle_incoming_data(b"\x1b[u");
+        let restored = state.cursor_pos();
+        assert_eq!((restored.x, restored.y), (3, 2), "CSI u must restore");
+    }
+
     // ── Lines 372-378: Mouse mode query DECRPM for encoding modes ───────────
     #[test]
     fn handle_mode_query_mouse_encoding_1006_set() {
