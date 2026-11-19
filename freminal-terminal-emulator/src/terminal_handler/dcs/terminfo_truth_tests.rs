@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm,
+    keypad::KeypadMode, lnm::Lnm, s8c1t::S8c1t,
 };
 
 use super::TerminalHandler;
@@ -398,6 +398,7 @@ fn encoded(input: &TerminalInput, decckm: Decckm, keypad: KeypadMode) -> Vec<u8>
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],

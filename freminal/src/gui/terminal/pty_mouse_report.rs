@@ -139,6 +139,7 @@ pub(in crate::gui) fn maybe_send_immediate_motion_report(
         previous.as_ref(),
         &snap.mouse_tracking,
         &snap.mouse_encoding,
+        snap.s8c1t,
     ) {
         let modes = InputModes::from_snapshot(snap);
         send_terminal_inputs(bytes.as_ref(), input_tx, &modes, &KeyEventMeta::PRESS);

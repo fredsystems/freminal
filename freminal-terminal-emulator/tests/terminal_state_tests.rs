@@ -125,6 +125,59 @@ fn test_send_focus_event_disabled() {
     );
 }
 
+/// Task 147.4: the focus reports follow S8C1T, and S7C1T restores `ESC [`.
+#[test]
+fn test_send_focus_event_follows_s8c1t() {
+    let (mut state, rx) = make_state();
+    state.modes.focus_reporting = XtMseWin::Enabled;
+
+    let cases: [(&[u8], bool, &[u8]); 4] = [
+        (b"\x1b G", true, b"\x9bI"),
+        (b"\x1b G", false, b"\x9bO"),
+        (b"\x1b F", true, b"\x1b[I"),
+        (b"\x1b F", false, b"\x1b[O"),
+    ];
+    for (select_mode, focused, expected) in cases {
+        state.handle_incoming_data(select_mode);
+        drain(&rx);
+        state.send_focus_event(focused);
+        assert_eq!(
+            unwrap_write(rx.try_recv().unwrap()),
+            expected,
+            "after {select_mode:?}, focused={focused}"
+        );
+        assert!(rx.try_recv().is_err(), "only one message should be sent");
+    }
+}
+
+/// Task 147.4: a key written after `ESC SP G` uses the 8-bit introducer, and
+/// DECCKM selects SS3 (`0x8F`) over CSI (`0x9B`).
+#[test]
+fn test_write_cursor_keys_follow_s8c1t() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G");
+    drain(&rx);
+
+    state
+        .write(&TerminalInput::ArrowUp(KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(unwrap_write(rx.try_recv().unwrap()), b"\x9bA");
+
+    state.handle_incoming_data(b"\x1b[?1h");
+    drain(&rx);
+    state
+        .write(&TerminalInput::ArrowUp(KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(unwrap_write(rx.try_recv().unwrap()), b"\x8fA");
+
+    state.handle_incoming_data(b"\x1b F");
+    drain(&rx);
+    state
+        .write(&TerminalInput::ArrowUp(KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(unwrap_write(rx.try_recv().unwrap()), b"\x1bOA");
+}
+
 // ─── write ───────────────────────────────────────────────────────────────────
 
 /// `write(Ascii(b'A'))` must succeed and deliver a single byte `0x41` (`'A'`).

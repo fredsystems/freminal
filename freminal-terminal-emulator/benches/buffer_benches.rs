@@ -16,14 +16,25 @@
 //! - Sustained output at the default 10,000-row scrollback capacity
 //!   (`handle_incoming_data()` with every line feed evicting a row), Task 125.12
 //! - Sixel decoding (`parse_sixel()`) of a 400x300 image, Task 148.2
+//! - Keyboard encoding (`TerminalInput::to_payload`) over a representative key
+//!   mix, legacy and kitty-keyboard paths, Task 147.4
 
 // Benchmark harness, not production code: unwrap/expect on setup is acceptable.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use freminal_common::buffer_states::sixel::parse_sixel;
+use freminal_common::buffer_states::{
+    modes::{
+        application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
+        keypad::KeypadMode, lnm::Lnm, s8c1t::S8c1t,
+    },
+    sixel::parse_sixel,
+};
 use freminal_terminal_emulator::{
-    ansi::FreminalAnsiParser, interface::TerminalEmulator, state::internal::TerminalState,
+    ansi::FreminalAnsiParser,
+    input::{KeyEventMeta, KeyModifiers, TerminalInput, TerminalInputPayload},
+    interface::TerminalEmulator,
+    state::internal::TerminalState,
 };
 use std::time::Duration;
 
@@ -399,6 +410,77 @@ fn bench_parse_sixel(c: &mut Criterion) {
             std::hint::black_box(parse_sixel(std::hint::black_box(&payload)));
         });
     });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_to_payload — keyboard encoding (Task 147.4)
+// ---------------------------------------------------------------
+
+/// A representative key mix: printable and control keys, arrows in both
+/// cursor-key modes, modified arrows, Home/End, the `CSI ~` keys, function
+/// keys in the SS3 and CSI forms, and the focus reports.
+fn key_mix() -> Vec<(TerminalInput, Decckm)> {
+    let shift = KeyModifiers {
+        shift: true,
+        ..KeyModifiers::NONE
+    };
+    let none = KeyModifiers::NONE;
+    vec![
+        (TerminalInput::Ascii(b'a'), Decckm::Ansi),
+        (TerminalInput::Ctrl(b'c'), Decckm::Ansi),
+        (TerminalInput::Enter, Decckm::Ansi),
+        (TerminalInput::Backspace, Decckm::Ansi),
+        (TerminalInput::ArrowUp(none), Decckm::Ansi),
+        (TerminalInput::ArrowDown(none), Decckm::Application),
+        (TerminalInput::ArrowLeft(shift), Decckm::Ansi),
+        (TerminalInput::Home(none), Decckm::Application),
+        (TerminalInput::End(none), Decckm::Ansi),
+        (TerminalInput::Delete(none), Decckm::Ansi),
+        (TerminalInput::PageUp(shift), Decckm::Ansi),
+        (TerminalInput::FunctionKey(1, none), Decckm::Ansi),
+        (TerminalInput::FunctionKey(5, none), Decckm::Ansi),
+        (TerminalInput::FunctionKey(9, shift), Decckm::Ansi),
+        (TerminalInput::InFocus, Decckm::Ansi),
+        (TerminalInput::LostFocus, Decckm::Ansi),
+    ]
+}
+
+fn bench_to_payload(c: &mut Criterion) {
+    let keys = key_mix();
+    let mut group = c.benchmark_group("bench_to_payload");
+    group.throughput(Throughput::Elements(
+        u64::try_from(keys.len()).unwrap_or(u64::MAX),
+    ));
+
+    // Legacy path (no kitty-keyboard flags) and kitty path (disambiguate).
+    for (id, kitty_flags) in [("legacy_mix", 0_u32), ("kkp_mix", 1_u32)] {
+        group.bench_function(id, |b| {
+            b.iter(|| {
+                let mut total = 0_usize;
+                for (key, decckm) in &keys {
+                    let payload = std::hint::black_box(key).to_payload(
+                        *decckm,
+                        KeypadMode::Numeric,
+                        0,
+                        ApplicationEscapeKey::Reset,
+                        Decbkm::BackarrowSendsDel,
+                        Lnm::LineFeed,
+                        kitty_flags,
+                        S8c1t::SevenBit,
+                        &KeyEventMeta::PRESS,
+                    );
+                    total += match payload {
+                        TerminalInputPayload::Single(_) => 1,
+                        TerminalInputPayload::Many(bytes) => bytes.len(),
+                        TerminalInputPayload::Owned(bytes) => bytes.len(),
+                    };
+                }
+                std::hint::black_box(total)
+            });
+        });
+    }
 
     group.finish();
 }
@@ -1104,6 +1186,7 @@ criterion_group!(
         bench_parse_osc9,
         bench_parse_kitty_apc_chunks,
         bench_parse_sixel,
+        bench_to_payload,
         bench_parse_cup_writes,
         bench_parse_bursty,
         bench_handle_incoming_data,

@@ -4,7 +4,8 @@
 // https://opensource.org/licenses/MIT.
 
 use egui;
-use freminal_terminal_emulator::io::InputEvent;
+use freminal_common::buffer_states::modes::s8c1t::S8c1t;
+use freminal_terminal_emulator::{input::Introducer, io::InputEvent};
 use tracing::{debug, error, trace, warn};
 
 use super::panes::PaneId;
@@ -939,8 +940,8 @@ impl super::FreminalGui {
     /// send it to `pane`'s PTY. Shared by the active-pane and targeted paths.
     fn send_paste_to_pane_ref(pane: &super::panes::Pane, payload: String) {
         let snap = pane.arc_swap.load();
-        let wrapped = wrap_bracketed_paste(payload, &snap.bracketed_paste);
-        if let Err(e) = pane.input_tx.send(InputEvent::Key(wrapped.into_bytes())) {
+        let wrapped = wrap_bracketed_paste(payload, &snap.bracketed_paste, snap.s8c1t);
+        if let Err(e) = pane.input_tx.send(InputEvent::Key(wrapped)) {
             error!("Paste: failed to send paste to PTY: {e}");
         }
     }
@@ -991,22 +992,29 @@ fn sanitize_bracketed_paste(payload: &str) -> String {
     out
 }
 
-/// Produce the bytes (as text) to send to the PTY for a paste of `payload`.
+/// Produce the bytes to send to the PTY for a paste of `payload`.
 ///
 /// When bracketed paste is [`RlBracket::Enabled`] the payload is sanitised
-/// with [`sanitize_bracketed_paste`] and wrapped in `ESC [ 200 ~` ...
-/// `ESC [ 201 ~`. Otherwise it is returned verbatim.
+/// with [`sanitize_bracketed_paste`] and framed by `CSI 200 ~` ... `CSI 201 ~`,
+/// each CSI written as `ESC [` or, under S8C1T, as the single byte `0x9B`.
+/// The pasted text itself is never rewritten. Otherwise it is returned
+/// verbatim.
 #[must_use]
 fn wrap_bracketed_paste(
     payload: String,
     mode: &freminal_common::buffer_states::modes::rl_bracket::RlBracket,
-) -> String {
+    s8c1t: S8c1t,
+) -> Vec<u8> {
     use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
 
     if *mode == RlBracket::Enabled {
-        format!("\x1b[200~{}\x1b[201~", sanitize_bracketed_paste(&payload))
+        let text = sanitize_bracketed_paste(&payload);
+        let mut bytes = Introducer::Csi.frame(s8c1t, b"200~");
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(&Introducer::Csi.frame(s8c1t, b"201~"));
+        bytes
     } else {
-        payload
+        payload.into_bytes()
     }
 }
 
@@ -1210,7 +1218,12 @@ mod tests {
     #[test]
     fn wrap_bracketed_paste_strips_embedded_end_marker() {
         use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
-        let wrapped = wrap_bracketed_paste("\x1b[201~rm -rf ~\n".to_owned(), &RlBracket::Enabled);
+        let wrapped = String::from_utf8(wrap_bracketed_paste(
+            "\x1b[201~rm -rf ~\n".to_owned(),
+            &RlBracket::Enabled,
+            S8c1t::SevenBit,
+        ))
+        .expect("7-bit framing of UTF-8 text is UTF-8");
         assert_eq!(wrapped, "\x1b[200~rm -rf ~\n\x1b[201~");
         assert_eq!(wrapped.matches("\x1b[200~").count(), 1);
         assert_eq!(wrapped.matches("\x1b[201~").count(), 1);
@@ -1257,7 +1270,42 @@ mod tests {
         use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
         let payload = "\x1b[201~rm -rf ~\n";
         for mode in [RlBracket::Disabled, RlBracket::Query] {
-            assert_eq!(wrap_bracketed_paste(payload.to_owned(), &mode), payload);
+            for s8c1t in [S8c1t::SevenBit, S8c1t::EightBit] {
+                assert_eq!(
+                    wrap_bracketed_paste(payload.to_owned(), &mode, s8c1t),
+                    payload.as_bytes()
+                );
+            }
         }
+    }
+
+    // ── S8C1T framing (Task 147.4) ──────────────────────────────────────
+
+    #[test]
+    fn wrap_bracketed_paste_framing_follows_s8c1t() {
+        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+        let cases: [(S8c1t, &[u8]); 2] = [
+            (S8c1t::SevenBit, b"\x1b[200~ls\n\x1b[201~"),
+            (S8c1t::EightBit, b"\x9b200~ls\n\x9b201~"),
+        ];
+        for (mode, expected) in cases {
+            assert_eq!(
+                wrap_bracketed_paste("ls\n".to_owned(), &RlBracket::Enabled, mode),
+                expected,
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_bracketed_paste_eight_bit_strips_markers_and_keeps_text_bytes() {
+        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+        // Both introducer forms of both markers are stripped; non-ASCII
+        // text (including U+00EF, UTF-8 `C3 AF`) is framed, never rewritten,
+        // and the 0x9B introducer is a raw byte, not the UTF-8 encoding of
+        // U+009B.
+        let payload = "na\u{ef}ve\u{9b}201~\x1b[201~ \x1b[200~x".to_owned();
+        let wrapped = wrap_bracketed_paste(payload, &RlBracket::Enabled, S8c1t::EightBit);
+        assert_eq!(wrapped, b"\x9b200~na\xc3\xafve x\x9b201~");
     }
 }

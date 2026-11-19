@@ -17,7 +17,7 @@
 
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm,
+    keypad::KeypadMode, lnm::Lnm, s8c1t::S8c1t,
 };
 use freminal_terminal_emulator::input::{
     KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput, TerminalInputPayload,
@@ -34,6 +34,7 @@ fn payload_bytes(input: &TerminalInput) -> Vec<u8> {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -366,6 +367,7 @@ fn payload_bytes_decckm(input: &TerminalInput) -> Vec<u8> {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -577,6 +579,7 @@ fn payload_bytes_mok2(input: &TerminalInput) -> Vec<u8> {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -625,6 +628,7 @@ fn ctrl_a_modify_other_keys_level_1() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
@@ -655,6 +659,7 @@ fn payload_bytes_aek(input: &TerminalInput) -> Vec<u8> {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -719,6 +724,7 @@ fn ctrl_b_modify_other_keys_level_1() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x02),
@@ -737,6 +743,7 @@ fn ctrl_z_modify_other_keys_level_1() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x1A),
@@ -800,6 +807,7 @@ fn escape_with_both_mok2_and_aek() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
@@ -822,6 +830,7 @@ fn ctrl_c_with_both_mok2_and_aek() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
@@ -842,6 +851,7 @@ fn ctrl_a_with_aek_and_mok0() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
@@ -864,6 +874,7 @@ fn backspace_decbkm_set_sends_bs() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
@@ -884,6 +895,7 @@ fn backspace_decbkm_reset_sends_del() {
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
@@ -911,6 +923,7 @@ fn enter_lnm_reset_sends_cr() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
@@ -936,6 +949,7 @@ fn enter_lnm_set_sends_cr_lf() {
         Decbkm::BackarrowSendsBs,
         Lnm::NewLine,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Many(bs) => {
@@ -962,6 +976,7 @@ fn linefeed_unaffected_by_lnm_set() {
         Decbkm::BackarrowSendsBs,
         Lnm::NewLine,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
@@ -988,6 +1003,7 @@ fn payload_bytes_kkp(input: &TerminalInput, flags: u32) -> Vec<u8> {
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
         flags,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -1231,6 +1247,7 @@ fn payload_bytes_kkp_meta(input: &TerminalInput, flags: u32, meta: &KeyEventMeta
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
         flags,
+        S8c1t::SevenBit,
         meta,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -1626,7 +1643,9 @@ fn kkp_takes_precedence_over_mok2() {
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
-        1, // KKP flag 1
+        1,
+        S8c1t::SevenBit,
+        // KKP flag 1
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
@@ -1647,6 +1666,7 @@ fn ctrl_a_with_aek_and_mok2() {
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {

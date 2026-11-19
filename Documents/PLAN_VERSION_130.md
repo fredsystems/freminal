@@ -7768,6 +7768,23 @@ Stale stub text was corrected at the same time:
 - Manual check by the maintainer at the PR: a freshly opened, unfocused window draws the
   unfocused cursor style on its first frame (127.C1).
 
+### 147 Cleanup entries
+
+#### 147.C1 — Mouse reports are re-encoded as keys under kitty flag 8
+
+- **Surfaced:** 147.4 (2026-11-19). Predates Task 147.
+- **Impact:** GUI mouse reports are built as `TerminalInput::Ascii` bytes and sent through
+  `send_terminal_inputs`, which encodes them with the key encoder. With kitty keyboard flag 8
+  (report all keys as escape codes) set, every byte of a report becomes its own `CSI u`, so
+  an application using flag 8 and mouse tracking gets garbage instead of mouse reports.
+- **Scope of fix:** `freminal/src/gui/mouse.rs`, `freminal/src/gui/terminal/pty_mouse_report.rs`,
+  `freminal/src/gui/terminal/input.rs` (the mouse call sites).
+- **Suggested approach:** mouse reports are not key events; send their bytes raw
+  (`InputEvent::Key(bytes)`, as paste does) instead of through the key encoder.
+- **Verification:** a test with kitty flag 8 set that a click produces the SGR report bytes
+  unchanged; existing mouse tests green.
+- **Scheduling:** within Task 147, after 147.5 (same `input.rs`).
+
 ### 147 Status notes
 
 - **147.1 (done).** `Mode::UnknownQuery { namespace, params }` reuses `ModeNamespace`; the
@@ -7790,6 +7807,16 @@ Stale stub text was corrected at the same time:
   and `InputModes::s8c1t`, which carries the temporary `TODO(147.4)` dead-code exception.
   Not added to change detection: it changes nothing rendered, and the encoders read the
   latest snapshot.
+- **147.4 (done).** `Introducer { Csi, Ss3 }` (`input.rs`) writes every generated CSI/SS3:
+  `to_payload`/`to_payload_kkp` take `S8c1t` (all key families, `modifyOtherKeys`, the
+  application escape key, kitty `CSI u` and event-type forms); focus reports follow the
+  handler's mode; GUI mouse reports (X11, SGR, SGR-pixel) and bracketed-paste markers take it
+  from the snapshot. `wrap_bracketed_paste` now returns bytes (a `String` would turn `0x9B`
+  into `C2 9B`). 7-bit fixed sequences stay borrowed (no allocation). No expected byte
+  string changed. There is no VT52 key encoder, so the VT52 case has nothing to test. New
+  `bench_to_payload` (added before the change, row added to `freminal-bench-table`):
+  interleaved minimum of 10, `legacy_mix` 160.8 → 147.6 ns, `kkp_mix` 210.8 → 199.6 ns
+  (machine load about 13; within noise). Surfaced 147.C1.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

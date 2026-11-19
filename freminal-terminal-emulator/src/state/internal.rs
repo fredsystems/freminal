@@ -780,6 +780,7 @@ impl TerminalState {
             backarrow_sends_bs,
             line_feed_mode,
             kitty_keyboard_flags,
+            *self.handler.s8c1t_mode(),
             &KeyEventMeta::PRESS,
         ) {
             TerminalInputPayload::Single(c) => {

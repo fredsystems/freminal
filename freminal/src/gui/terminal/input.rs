@@ -1110,10 +1110,6 @@ pub(super) struct InputModes {
     application_escape_key: ApplicationEscapeKey,
     backarrow_sends_bs: Decbkm,
     line_feed_mode: Lnm,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "TODO(147.4): read by the encoders")
-    )]
     s8c1t: S8c1t,
     kitty_keyboard_flags: u32,
 }
@@ -1164,6 +1160,7 @@ fn encode_terminal_inputs(
                 modes.backarrow_sends_bs,
                 modes.line_feed_mode,
                 modes.kitty_keyboard_flags,
+                modes.s8c1t,
                 meta,
             ) {
                 TerminalInputPayload::Single(b) => vec![b],
@@ -2558,6 +2555,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                         &new_mouse_position,
                         effective_mouse_tracking,
                         mouse_encoding,
+                        snap.s8c1t,
                     )
                 };
 
@@ -2797,6 +2795,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                         last_mouse_position,
                         effective_mouse_tracking,
                         mouse_encoding,
+                        snap.s8c1t,
                     )
                     .is_some()
                     {
@@ -2808,6 +2807,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                                 last_mouse_position,
                                 effective_mouse_tracking,
                                 mouse_encoding,
+                                snap.s8c1t,
                             ) {
                                 send_terminal_inputs(
                                     response.as_ref(),
@@ -3503,7 +3503,10 @@ mod input_modes_s8c1t_tests {
     //! Task 147.3: S8C1T reaches `InputModes` through the snapshot.
 
     use super::*;
+    use freminal_common::buffer_states::modes::mouse::MouseEncoding;
     use freminal_terminal_emulator::interface::TerminalEmulator;
+    use freminal_windowing::{RawKeyEvent, RawKeyMods};
+    use winit::keyboard::KeyCode;
 
     #[test]
     fn from_snapshot_carries_s8c1t_set_by_the_emulator() {
@@ -3524,6 +3527,99 @@ mod input_modes_s8c1t_tests {
             InputModes::from_snapshot(&emu.build_snapshot()).s8c1t,
             S8c1t::SevenBit
         );
+    }
+
+    // Task 147.4: the encoders honour it, end to end from the snapshot.
+
+    fn snapshot_after(select_mode: &[u8]) -> TerminalSnapshot {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(select_mode);
+        emu.build_snapshot()
+    }
+
+    fn encode_for(snap: &TerminalSnapshot, inputs: &[TerminalInput]) -> Vec<u8> {
+        encode_terminal_inputs(
+            inputs,
+            &InputModes::from_snapshot(snap),
+            &KeyEventMeta::PRESS,
+        )
+    }
+
+    #[test]
+    fn keys_use_the_eight_bit_introducer_after_s8c1t() {
+        let seven = snapshot_after(b"\x1b F");
+        let eight = snapshot_after(b"\x1b G");
+        let up = [TerminalInput::ArrowUp(KeyModifiers::NONE)];
+        assert_eq!(encode_for(&seven, &up), b"\x1b[A");
+        assert_eq!(encode_for(&eight, &up), b"\x9bA");
+        let f1 = [TerminalInput::FunctionKey(1, KeyModifiers::NONE)];
+        assert_eq!(encode_for(&seven, &f1), b"\x1bOP");
+        assert_eq!(encode_for(&eight, &f1), b"\x8fP");
+    }
+
+    #[test]
+    fn alt_prefixed_bracket_is_not_an_introducer_in_either_mode() {
+        for select_mode in [&b"\x1b F"[..], b"\x1b G"] {
+            let snap = snapshot_after(select_mode);
+            for text in *b"[O" {
+                let alt_text = [TerminalInput::Ascii(0x1b), TerminalInput::Ascii(text)];
+                assert_eq!(
+                    encode_for(&snap, &alt_text),
+                    [0x1b, text],
+                    "{select_mode:?} Alt+{}",
+                    char::from(text)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_report_reaches_the_pty_with_the_eight_bit_introducer() {
+        use crate::gui::mouse::{FreminalMousePosition, PreviousMouseState, handle_pointer_button};
+
+        let state = PreviousMouseState::new(
+            PointerButton::Primary,
+            true,
+            FreminalMousePosition::new(4, 2),
+            Modifiers::default(),
+        );
+        for (select_mode, expected) in [
+            (&b"\x1b F"[..], &b"\x1b[<0;5;3M"[..]),
+            (b"\x1b G", b"\x9b<0;5;3M"),
+        ] {
+            let snap = snapshot_after(select_mode);
+            let report = handle_pointer_button(
+                PointerButton::Primary,
+                &state,
+                &MouseTrack::XtMseX11,
+                &MouseEncoding::Sgr,
+                snap.s8c1t,
+            )
+            .expect("button press is reported");
+            assert_eq!(encode_for(&snap, report.as_ref()), expected);
+        }
+    }
+
+    #[test]
+    fn kitty_csi_u_follows_s8c1t_through_the_raw_key_path() {
+        let mut snap = snapshot_after(b"\x1b G");
+        snap.kitty_keyboard_flags = 1;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: KeyCode::Numpad1,
+                pressed: true,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &[]);
+
+        let Ok(InputEvent::Key(bytes)) = rx.try_recv() else {
+            panic!("expected one key report");
+        };
+        assert_eq!(bytes, b"\x9b57400u");
     }
 }
 
