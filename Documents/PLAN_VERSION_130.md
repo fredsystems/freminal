@@ -11551,6 +11551,12 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   leaves four warnings, all shared with `xterm-256color` or kitty (`kind`/`kDN` and
   `kri`/`kUP` duplicates, `tsl` parameter count, `%;` in `Setulc`, undocumented extended
   names). The SGR 8 GAPS row is new.
+- **151.4 (done).** `build.rs` writes `res/terminfo/{x,f,78,66}/…` (explicit paths, identical
+  bytes; `tic`'s alias is no longer counted twice) and packs the tar from that tree. Entry
+  contents are unchanged (the letter copy is byte-identical to the old tar). New
+  `tests/terminfo_tree.rs` pins the four members against the committed files. The
+  orchestrator also marked the tree and tar `binary` in `.gitattributes` and corrected the
+  `.ti` header.
 
 ---
 

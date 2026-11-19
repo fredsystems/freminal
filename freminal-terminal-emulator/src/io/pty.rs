@@ -930,8 +930,8 @@ impl FreminalPtyInputOutput {
         initial_size: &FreminalTerminalSize,
         pane_id: u32,
     ) -> Result<Self, PtyInitError> {
-        // don't use it.  Skip extraction entirely on Windows to avoid issues
-        // with symlinks in the tarball requiring elevated privileges.
+        // don't use it.  Skip extraction entirely on Windows: there is no
+        // terminfo database there, so nothing would read the extracted tree.
         let termcaps = if cfg!(target_os = "windows") {
             None
         } else {

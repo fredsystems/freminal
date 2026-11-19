@@ -109,25 +109,53 @@ fn git_path(relative: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Compile `res/freminal.ti` into `res/terminfo.tar` using `tic` and the Rust
-/// `tar` crate.
+/// Names of the terminfo entries `res/freminal.ti` defines: the primary entry
+/// and its alias.  Each is installed in both the letter and the hex directory
+/// layout (see [`tree_paths`]).
+const TERMINFO_NAMES: [&str; 2] = ["xterm-freminal", "freminal"];
+
+/// The four relative paths of the committed compiled tree, sorted.
 ///
-/// Only re-runs when `res/freminal.ti` changes (targeted `rerun-if-changed`
-/// directive).  The compiled binary terminfo tree is produced in a temporary
-/// directory inside `$OUT_DIR`, then archived using the Rust `tar` crate for
-/// portability (no GNU/BSD `tar` binary required).
+/// ncurses on Linux stores an entry under a directory named for its first
+/// character (`x/xterm-freminal`); Apple's ncurses uses the hex of that
+/// character (`78/xterm-freminal`).  Shipping both removes the need to know
+/// which layout a given ncurses reads.  The paths are explicit rather than
+/// discovered by walking a directory, because `tic` links the alias to the
+/// primary entry and a walk that follows links would see it twice.
+fn tree_paths() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut paths = Vec::new();
+    for name in TERMINFO_NAMES {
+        let first = name.bytes().next().ok_or("empty terminfo entry name")?;
+        paths.push(PathBuf::from(char::from(first).to_string()).join(name));
+        paths.push(PathBuf::from(format!("{first:x}")).join(name));
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// Compile `res/freminal.ti` into the committed `res/terminfo/` tree and pack
+/// that tree into `res/terminfo.tar`.
 ///
-/// The archive is first written to `$OUT_DIR/terminfo.tar`.  If the content
-/// differs from the committed `res/terminfo.tar`, the committed copy is
-/// updated.  This avoids dirtying the git working tree when nothing changed.
+/// Re-runs when `res/freminal.ti` or the committed tree / archive change.  The
+/// build script only rewrites a committed file when its bytes differ, so the
+/// directives settle after one extra run rather than re-running forever.
+///
+/// `tic -x` compiles into a temporary directory in `$OUT_DIR`; the compiled
+/// bytes of each entry are then written to the four paths of [`tree_paths`]
+/// (identical bytes in the letter and hex copies).  The archive is packed from
+/// the committed tree using the Rust `tar` crate for portability (no GNU/BSD
+/// `tar` binary required), staged in `$OUT_DIR/terminfo.tar`, and copied over
+/// `res/terminfo.tar` only if the content differs.  This avoids dirtying the
+/// git working tree when nothing changed.
 ///
 /// `tic` is invoked with `-x` because user-defined (extended) capabilities
 /// such as `Su`, `Smulx` and `Setulc` are otherwise dropped with an
 /// "unknown capability" warning and never reach the compiled entry.
 ///
 /// Requires `tic` (from ncurses) to be present on `$PATH`.  If `tic` is
-/// missing the function prints a warning and returns `Ok(())` so that builds
-/// in environments without `tic` (e.g. Windows CI) are not broken.
+/// missing the function prints a warning and returns `Ok(())`, keeping the
+/// committed tree and archive, so that builds in environments without `tic`
+/// (e.g. Windows CI) are not broken.
 fn rebuild_terminfo() -> Result<(), Box<dyn std::error::Error>> {
     // Derive the workspace root from the manifest directory of this crate.
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
@@ -136,13 +164,15 @@ fn rebuild_terminfo() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("could not determine workspace root")?;
 
     let ti_src = workspace_root.join("res").join("freminal.ti");
+    let tree_dst = workspace_root.join("res").join("terminfo");
     let tar_dst = workspace_root.join("res").join("terminfo.tar");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     let terminfo_build_dir = out_dir.join("terminfo_build");
     let tar_staging = out_dir.join("terminfo.tar");
 
-    // Tell Cargo to re-run this build script only when the source file changes.
     println!("cargo:rerun-if-changed={}", ti_src.display());
+    println!("cargo:rerun-if-changed={}", tree_dst.display());
+    println!("cargo:rerun-if-changed={}", tar_dst.display());
 
     // ── tic ──────────────────────────────────────────────────────────────────
     // Check that tic is available; if not, warn and skip.
@@ -171,45 +201,80 @@ fn rebuild_terminfo() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("`tic` exited with status {tic_status}").into());
     }
 
+    // ── committed tree ───────────────────────────────────────────────────────
+    // `tic` writes either the letter layout (Linux) or the hex layout (Apple's
+    // ncurses); locate each entry in whichever it produced and install the same
+    // bytes at both layouts' paths.
+    for name in TERMINFO_NAMES {
+        let compiled = read_compiled_entry(&terminfo_build_dir, name)?;
+        for rel in tree_paths()?
+            .into_iter()
+            .filter(|p| p.file_name().is_some_and(|f| f == name))
+        {
+            write_if_changed(&tree_dst.join(rel), &compiled)?;
+        }
+    }
+
     // ── tar (Rust crate) ─────────────────────────────────────────────────────
-    // Build the archive using the Rust `tar` crate for full portability — no
-    // dependency on GNU or BSD `tar` binary.  Entries are collected, sorted by
-    // path, and written with zeroed timestamps / ownership so the archive is
-    // deterministic (identical content ⇒ identical bytes).
-    create_deterministic_tar(&terminfo_build_dir, &tar_staging)?;
+    create_deterministic_tar(&tree_dst, &tar_staging)?;
 
     // Only update the committed copy when the content actually changed.  This
     // prevents every build from dirtying the git working tree.
     let new_bytes = std::fs::read(&tar_staging)?;
-    // A missing or unreadable committed copy always needs writing.
-    let update_needed = std::fs::read(&tar_dst).map_or(true, |existing| existing != new_bytes);
-
-    if update_needed {
-        std::fs::copy(&tar_staging, &tar_dst)?;
-    }
+    write_if_changed(&tar_dst, &new_bytes)?;
 
     Ok(())
 }
 
-/// Create a deterministic tar archive of `src_dir` at `dst_path`.
+/// Read the compiled bytes of entry `name` from a `tic -o` output directory,
+/// looking in the letter layout first and then the hex layout.
+fn read_compiled_entry(
+    build_dir: &std::path::Path,
+    name: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let first = name.bytes().next().ok_or("empty terminfo entry name")?;
+    let letter = build_dir.join(char::from(first).to_string()).join(name);
+    let hex = build_dir.join(format!("{first:x}")).join(name);
+    for candidate in [letter, hex] {
+        if candidate.is_file() {
+            return Ok(std::fs::read(candidate)?);
+        }
+    }
+    Err(format!("`tic` produced no compiled entry for `{name}`").into())
+}
+
+/// Write `bytes` to `path` (creating parent directories) unless the file
+/// already holds exactly those bytes.  A missing or unreadable file is written.
+fn write_if_changed(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if std::fs::read(path).is_ok_and(|existing| existing == bytes) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// Create a deterministic tar archive of the four [`tree_paths`] under
+/// `src_dir` at `dst_path`.
 ///
-/// All entries are sorted by relative path and written with zeroed mtime,
-/// uid, gid, and username/groupname so that the archive is reproducible.
+/// Entries are sorted by relative path and written with zeroed mtime, uid,
+/// gid, mode 0644, and no directory entries, so that the archive is
+/// reproducible.
 fn create_deterministic_tar(
     src_dir: &std::path::Path,
     dst_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::fs;
 
-    // Collect all files under src_dir with their relative paths.
-    let mut entries: Vec<PathBuf> = Vec::new();
-    collect_files(src_dir, src_dir, &mut entries)?;
-    entries.sort();
-
     let file = fs::File::create(dst_path)?;
     let mut builder = tar::Builder::new(file);
 
-    for rel_path in &entries {
+    for rel_path in &tree_paths()? {
         let full_path = src_dir.join(rel_path);
         let mut header = tar::Header::new_gnu();
         let data = fs::read(&full_path)?;
@@ -227,27 +292,6 @@ fn create_deterministic_tar(
     }
 
     builder.finish()?;
-    Ok(())
-}
-
-/// Recursively collect all file paths under `base` relative to `root`.
-fn collect_files(
-    root: &std::path::Path,
-    current: &std::path::Path,
-    out: &mut Vec<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for entry in std::fs::read_dir(current)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files(root, &path, out)?;
-        } else {
-            let rel = path
-                .strip_prefix(root)
-                .map_err(|e| format!("strip_prefix failed: {e}"))?;
-            out.push(rel.to_path_buf());
-        }
-    }
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 #       Source of truth for freminal's terminfo entry.  freminal-terminal-emulator/build.rs
-#       compiles this file with `tic -x` into res/terminfo.tar.  Every capability
+#       compiles this file with `tic -x` into res/terminfo/ (letter and hex
+#       layouts) and packs that tree into res/terminfo.tar.  Every capability
 #       here is implemented by freminal, and every value that the XTGETTCAP handler
 #       (`lookup_termcap` in terminal_handler/dcs.rs) also answers must be identical
 #       to the one below; a test in that file enforces it.
