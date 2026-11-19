@@ -5,7 +5,9 @@
 
 use crate::{
     buffer_states::{
-        line_draw::DecSpecialGraphics, mode::Mode, osc::AnsiOscType,
+        charset::{CharacterSet, CharsetSlot},
+        mode::Mode,
+        osc::AnsiOscType,
         window_manipulation::WindowManipulation,
     },
     cursor::CursorVisualStyle,
@@ -102,7 +104,18 @@ pub enum TerminalOutput {
     DeviceStatusReport,
     Invalid,
     Skipped,
-    DecSpecialGraphics(DecSpecialGraphics),
+    /// `ESC ( F`, `ESC ) F`, `ESC * F`, `ESC + F`: designate `set` into `slot`.
+    DesignateCharset {
+        slot: CharsetSlot,
+        set: CharacterSet,
+    },
+    /// SO, SI, LS2 (`ESC n`) and LS3 (`ESC o`): invoke `slot` into GL.
+    InvokeGl(CharsetSlot),
+    /// LS1R (`ESC ~`), LS2R (`ESC }`) and LS3R (`ESC |`): invoke `slot` into GR.
+    InvokeGr(CharsetSlot),
+    /// SS2 (`ESC N`, 0x8E) and SS3 (`ESC O`, 0x8F): map the next printable
+    /// character through `slot`.
+    SingleShift(CharsetSlot),
     CursorVisualStyle(CursorVisualStyle),
     /// DECSCUSR `Ps = 0` (or an omitted `Ps`): restore the *configured* cursor
     /// style, not a fixed shape. kitty, Ghostty and `WezTerm` all treat `0` as
@@ -131,29 +144,6 @@ pub enum TerminalOutput {
     ScreenAlignmentTest,
     CharsetDefault,
     CharsetUTF8,
-    CharsetG0,
-    CharsetG1,
-    CharsetG1AsGR,
-    CharsetG2,
-    CharsetG2AsGR,
-    CharsetG2AsGL,
-    CharsetG3,
-    CharsetG3AsGR,
-    CharsetG3AsGL,
-    DecSpecial,
-    CharsetUK,
-    CharsetUS,
-    CharsetUSASCII,
-    CharsetDutch,
-    CharsetFinnish,
-    CharsetFrench,
-    CharsetFrenchCanadian,
-    CharsetGerman,
-    CharsetItalian,
-    CharsetNorwegianDanish,
-    CharsetSpanish,
-    CharsetSwedish,
-    CharsetSwiss,
     SaveCursor,
     RestoreCursor,
     CursorToLowerLeftCorner,
@@ -266,9 +256,12 @@ impl std::fmt::Display for TerminalOutput {
             Self::Mode(mode) => write!(f, "SetMode({mode})"),
             Self::InsertSpaces(n) => write!(f, "InsertSpaces({n})"),
             Self::OscResponse(n) => write!(f, "OscResponse({n})"),
-            Self::DecSpecialGraphics(dec_special_graphics) => {
-                write!(f, "DecSpecialGraphics({dec_special_graphics:?})")
+            Self::DesignateCharset { slot, set } => {
+                write!(f, "DesignateCharset({slot:?}, {set:?})")
             }
+            Self::InvokeGl(slot) => write!(f, "InvokeGl({slot:?})"),
+            Self::InvokeGr(slot) => write!(f, "InvokeGr({slot:?})"),
+            Self::SingleShift(slot) => write!(f, "SingleShift({slot:?})"),
             Self::Invalid => write!(f, "Invalid"),
             Self::CursorReport => write!(f, "CursorReport"),
             Self::ColorThemeReport => write!(f, "ColorThemeReport"),
@@ -308,29 +301,6 @@ impl std::fmt::Display for TerminalOutput {
             Self::ScreenAlignmentTest => write!(f, "ScreenAlignmentTest"),
             Self::CharsetDefault => write!(f, "CharsetDefault"),
             Self::CharsetUTF8 => write!(f, "CharsetUTF8"),
-            Self::CharsetG0 => write!(f, "CharsetG0"),
-            Self::CharsetG1 => write!(f, "CharsetG1"),
-            Self::CharsetG1AsGR => write!(f, "CharsetG1AsGR"),
-            Self::CharsetG2 => write!(f, "CharsetG2"),
-            Self::CharsetG2AsGR => write!(f, "CharsetG2AsGR"),
-            Self::CharsetG2AsGL => write!(f, "CharsetG2AsGL"),
-            Self::CharsetG3 => write!(f, "CharsetG3"),
-            Self::CharsetG3AsGR => write!(f, "CharsetG3AsGR"),
-            Self::CharsetG3AsGL => write!(f, "CharsetG3AsGL"),
-            Self::DecSpecial => write!(f, "DecSpecial"),
-            Self::CharsetUK => write!(f, "CharsetUK"),
-            Self::CharsetUS => write!(f, "CharsetUS"),
-            Self::CharsetUSASCII => write!(f, "CharsetUSASCII"),
-            Self::CharsetDutch => write!(f, "CharsetDutch"),
-            Self::CharsetFinnish => write!(f, "CharsetFinnish"),
-            Self::CharsetFrench => write!(f, "CharsetFrench"),
-            Self::CharsetFrenchCanadian => write!(f, "CharsetFrenchCanadian"),
-            Self::CharsetGerman => write!(f, "CharsetGerman"),
-            Self::CharsetItalian => write!(f, "CharsetItalian"),
-            Self::CharsetNorwegianDanish => write!(f, "CharsetNorwegianDanish"),
-            Self::CharsetSpanish => write!(f, "CharsetSpanish"),
-            Self::CharsetSwedish => write!(f, "CharsetSwedish"),
-            Self::CharsetSwiss => write!(f, "CharsetSwiss"),
             Self::SaveCursor => write!(f, "SaveCursor"),
             Self::RestoreCursor => write!(f, "RestoreCursor"),
             Self::CursorToLowerLeftCorner => write!(f, "CursorToLowerLeftCorner"),
@@ -382,35 +352,26 @@ mod tests {
     fn display_charset_variants() {
         assert_eq!(TerminalOutput::CharsetDefault.to_string(), "CharsetDefault");
         assert_eq!(TerminalOutput::CharsetUTF8.to_string(), "CharsetUTF8");
-        assert_eq!(TerminalOutput::CharsetG0.to_string(), "CharsetG0");
-        assert_eq!(TerminalOutput::CharsetG1.to_string(), "CharsetG1");
-        assert_eq!(TerminalOutput::CharsetG1AsGR.to_string(), "CharsetG1AsGR");
-        assert_eq!(TerminalOutput::CharsetG2.to_string(), "CharsetG2");
-        assert_eq!(TerminalOutput::CharsetG2AsGR.to_string(), "CharsetG2AsGR");
-        assert_eq!(TerminalOutput::CharsetG2AsGL.to_string(), "CharsetG2AsGL");
-        assert_eq!(TerminalOutput::CharsetG3.to_string(), "CharsetG3");
-        assert_eq!(TerminalOutput::CharsetG3AsGR.to_string(), "CharsetG3AsGR");
-        assert_eq!(TerminalOutput::CharsetG3AsGL.to_string(), "CharsetG3AsGL");
-        assert_eq!(TerminalOutput::DecSpecial.to_string(), "DecSpecial");
-        assert_eq!(TerminalOutput::CharsetUK.to_string(), "CharsetUK");
-        assert_eq!(TerminalOutput::CharsetUS.to_string(), "CharsetUS");
-        assert_eq!(TerminalOutput::CharsetUSASCII.to_string(), "CharsetUSASCII");
-        assert_eq!(TerminalOutput::CharsetDutch.to_string(), "CharsetDutch");
-        assert_eq!(TerminalOutput::CharsetFinnish.to_string(), "CharsetFinnish");
-        assert_eq!(TerminalOutput::CharsetFrench.to_string(), "CharsetFrench");
         assert_eq!(
-            TerminalOutput::CharsetFrenchCanadian.to_string(),
-            "CharsetFrenchCanadian"
+            TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G1,
+                set: CharacterSet::DecSpecialGraphics,
+            }
+            .to_string(),
+            "DesignateCharset(G1, DecSpecialGraphics)"
         );
-        assert_eq!(TerminalOutput::CharsetGerman.to_string(), "CharsetGerman");
-        assert_eq!(TerminalOutput::CharsetItalian.to_string(), "CharsetItalian");
         assert_eq!(
-            TerminalOutput::CharsetNorwegianDanish.to_string(),
-            "CharsetNorwegianDanish"
+            TerminalOutput::InvokeGl(CharsetSlot::G2).to_string(),
+            "InvokeGl(G2)"
         );
-        assert_eq!(TerminalOutput::CharsetSpanish.to_string(), "CharsetSpanish");
-        assert_eq!(TerminalOutput::CharsetSwedish.to_string(), "CharsetSwedish");
-        assert_eq!(TerminalOutput::CharsetSwiss.to_string(), "CharsetSwiss");
+        assert_eq!(
+            TerminalOutput::InvokeGr(CharsetSlot::G3).to_string(),
+            "InvokeGr(G3)"
+        );
+        assert_eq!(
+            TerminalOutput::SingleShift(CharsetSlot::G2).to_string(),
+            "SingleShift(G2)"
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::buffer_states::line_draw::DecSpecialGraphics;
+use freminal_common::buffer_states::charset::{CharacterSet, CharsetSlot};
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use crate::ansi::ParserOutcome;
@@ -84,7 +84,7 @@ impl StandardParser {
                 ParserOutcome::Invalid("Invalid intermediate byte".to_string())
             }
             StandardParserState::Params => {
-                if is_standard_param(b) {
+                if is_standard_param(b) || self.is_designator_final(b) {
                     self.params.push(b);
                     self.state = StandardParserState::Finished;
 
@@ -98,6 +98,16 @@ impl StandardParser {
 
             _ => ParserOutcome::Continue,
         }
+    }
+
+    /// Whether the sequence so far is a designator (`ESC ( ) * +`) and `b` is
+    /// in the range a designator's final byte may take. The final need not
+    /// name a set freminal implements: an unknown one is ignored, not invalid.
+    fn is_designator_final(&self, b: u8) -> bool {
+        self.intermediates
+            .first()
+            .is_some_and(|i| designated_slot(*i).is_some())
+            && (0x30..=0x7e).contains(&b)
     }
 
     /// Push a byte into the parser and return the next state
@@ -193,108 +203,21 @@ impl StandardParser {
                         }
                     }
                 }
-                Some(b'(') => {
-                    let value = self.params.first();
+                Some(&intermediate @ (b'(' | b')' | b'*' | b'+')) => {
+                    let (Some(slot), Some(&final_byte)) =
+                        (designated_slot(intermediate), self.params.first())
+                    else {
+                        return ParserOutcome::Invalid("No params".to_string());
+                    };
 
-                    match value {
-                        None => ParserOutcome::Invalid("No params".to_string()),
-                        Some(value) => {
-                            let value = *value as char;
-
-                            match value {
-                                '0' => output.push(TerminalOutput::DecSpecialGraphics(
-                                    DecSpecialGraphics::Replace,
-                                )),
-                                'B' => output.push(TerminalOutput::DecSpecialGraphics(
-                                    DecSpecialGraphics::DontReplace,
-                                )),
-                                'C' => output.push(TerminalOutput::CharsetG0),
-                                _ => {
-                                    output.push(TerminalOutput::Invalid);
-                                    return ParserOutcome::Invalid(
-                                        "Invalid param value".to_string(),
-                                    );
-                                }
-                            }
-                            ParserOutcome::Finished
-                        }
+                    // An unknown final leaves the slot as it was: no output.
+                    if let Some(set) = CharacterSet::from_designator_final(final_byte) {
+                        output.push(TerminalOutput::DesignateCharset { slot, set });
+                    } else {
+                        debug!("Ignoring unknown charset designator final 0x{final_byte:02x}");
                     }
-                }
-                Some(b')') => {
-                    let value = self.params.first();
 
-                    match value {
-                        None => ParserOutcome::Invalid("No params".to_string()),
-                        Some(value) => {
-                            match *value {
-                                b'0' | b'B' | b'C' => {
-                                    // G1 designation: '0' = DEC Special, 'B' = US-ASCII,
-                                    // 'C' = Finnish NRC.  Freminal uses a simplified
-                                    // single-slot charset model — G1 designations are
-                                    // silently accepted but do not change state.
-                                    output.push(TerminalOutput::CharsetG1);
-                                }
-                                _ => {
-                                    output.push(TerminalOutput::Invalid);
-                                    return ParserOutcome::Invalid(
-                                        "Invalid param value".to_string(),
-                                    );
-                                }
-                            }
-
-                            ParserOutcome::Finished
-                        }
-                    }
-                }
-                Some(b'*') => {
-                    let value = self.params.first();
-
-                    match value {
-                        None => ParserOutcome::Invalid("No params".to_string()),
-                        Some(value) => {
-                            if *value == b'C' {
-                                output.push(TerminalOutput::CharsetG2);
-                            } else {
-                                output.push(TerminalOutput::Invalid);
-                                return ParserOutcome::Invalid("Invalid param value".to_string());
-                            }
-                            ParserOutcome::Finished
-                        }
-                    }
-                }
-                Some(b'+') => {
-                    let value = self.params.first();
-
-                    match value {
-                        None => ParserOutcome::Invalid("No params".to_string()),
-                        Some(value) => {
-                            match value {
-                                b'0' => output.push(TerminalOutput::DecSpecialGraphics(
-                                    DecSpecialGraphics::Replace,
-                                )),
-                                b'A' => output.push(TerminalOutput::CharsetUK),
-                                b'B' => output.push(TerminalOutput::CharsetUSASCII),
-                                b'4' => output.push(TerminalOutput::CharsetDutch),
-                                b'5' | b'C' => output.push(TerminalOutput::CharsetFinnish),
-                                b'R' => output.push(TerminalOutput::CharsetFrench),
-                                b'Q' => output.push(TerminalOutput::CharsetFrenchCanadian),
-                                b'K' => output.push(TerminalOutput::CharsetGerman),
-                                b'Y' => output.push(TerminalOutput::CharsetItalian),
-                                b'E' | b'6' => output.push(TerminalOutput::CharsetNorwegianDanish),
-                                b'Z' => output.push(TerminalOutput::CharsetSpanish),
-                                b'H' | b'7' => output.push(TerminalOutput::CharsetSwedish),
-                                b'=' => output.push(TerminalOutput::CharsetSwiss),
-                                _ => {
-                                    output.push(TerminalOutput::Invalid);
-                                    return ParserOutcome::Invalid(
-                                        "Invalid param value".to_string(),
-                                    );
-                                }
-                            }
-
-                            ParserOutcome::Finished
-                        }
-                    }
+                    ParserOutcome::Finished
                 }
                 Some(value) => {
                     let value = *value as char;
@@ -307,11 +230,13 @@ impl StandardParser {
                         'c' => output.push(TerminalOutput::ResetDevice),
                         'l' => output.push(TerminalOutput::MemoryLock),
                         'm' => output.push(TerminalOutput::MemoryUnlock),
-                        'n' => output.push(TerminalOutput::CharsetG2AsGL),
-                        'o' => output.push(TerminalOutput::CharsetG3AsGL),
-                        '|' => output.push(TerminalOutput::CharsetG3AsGR),
-                        '}' => output.push(TerminalOutput::CharsetG2AsGR),
-                        '~' => output.push(TerminalOutput::CharsetG1AsGR),
+                        'N' => output.push(TerminalOutput::SingleShift(CharsetSlot::G2)),
+                        'O' => output.push(TerminalOutput::SingleShift(CharsetSlot::G3)),
+                        'n' => output.push(TerminalOutput::InvokeGl(CharsetSlot::G2)),
+                        'o' => output.push(TerminalOutput::InvokeGl(CharsetSlot::G3)),
+                        '|' => output.push(TerminalOutput::InvokeGr(CharsetSlot::G3)),
+                        '}' => output.push(TerminalOutput::InvokeGr(CharsetSlot::G2)),
+                        '~' => output.push(TerminalOutput::InvokeGr(CharsetSlot::G1)),
                         'M' => output.push(TerminalOutput::ReverseIndex),
                         'D' => output.push(TerminalOutput::Index),
                         'E' => output.push(TerminalOutput::NextLine),
@@ -335,10 +260,22 @@ impl StandardParser {
     }
 }
 
+/// The slot a designator intermediate (`(`, `)`, `*`, `+`) designates into.
+const fn designated_slot(intermediate: u8) -> Option<CharsetSlot> {
+    match intermediate {
+        b'(' => Some(CharsetSlot::G0),
+        b')' => Some(CharsetSlot::G1),
+        b'*' => Some(CharsetSlot::G2),
+        b'+' => Some(CharsetSlot::G3),
+        _ => None,
+    }
+}
+
 #[must_use]
 pub const fn is_standard_intermediate_final(b: u8) -> bool {
-    // 7 8 = > F H c l m n o | } ~ are final and we want to enter the finished state
+    // 7 8 = > F H N O c l m n o | } ~ are final and we want to enter the finished state
     // H (0x48) is HTS — Horizontal Tab Set
+    // N (0x4E) and O (0x4F) are SS2 and SS3
 
     matches!(
         b,
@@ -346,6 +283,8 @@ pub const fn is_standard_intermediate_final(b: u8) -> bool {
             | 0x3e
             | 0x46
             | 0x48
+            | 0x4e
+            | 0x4f
             | 0x63
             | 0x6c
             | 0x6d
@@ -406,7 +345,7 @@ pub const fn is_standard_param(b: u8) -> bool {
 mod tests {
     use super::StandardParser;
     use crate::ansi::ParserOutcome;
-    use freminal_common::buffer_states::line_draw::DecSpecialGraphics;
+    use freminal_common::buffer_states::charset::{CharacterSet, CharsetSlot};
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
     /// Feed a two-byte standard escape sequence through the parser.
@@ -549,224 +488,92 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // ESC ( — G0 charset
+    // ESC ( ) * + — G0-G3 designation
     // ------------------------------------------------------------------
 
+    const DESIGNATORS: [(u8, CharsetSlot); 4] = [
+        (b'(', CharsetSlot::G0),
+        (b')', CharsetSlot::G1),
+        (b'*', CharsetSlot::G2),
+        (b'+', CharsetSlot::G3),
+    ];
+
     #[test]
-    fn esc_paren_0_dec_special_graphics_replace() {
-        let (output, result) = feed_standard(b'(', b'0');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(
-            output,
-            vec![TerminalOutput::DecSpecialGraphics(
-                DecSpecialGraphics::Replace
-            )]
-        );
+    fn every_designator_designates_every_known_set_into_its_own_slot() {
+        for (intermediate, slot) in DESIGNATORS {
+            for (final_byte, set) in [
+                (b'B', CharacterSet::Ascii),
+                (b'A', CharacterSet::UnitedKingdom),
+                (b'0', CharacterSet::DecSpecialGraphics),
+            ] {
+                let (output, result) = feed_standard(intermediate, final_byte);
+                assert!(
+                    matches!(result, ParserOutcome::Finished),
+                    "ESC {} {} must finish",
+                    intermediate as char,
+                    final_byte as char
+                );
+                assert_eq!(
+                    output,
+                    vec![TerminalOutput::DesignateCharset { slot, set }],
+                    "ESC {} {}",
+                    intermediate as char,
+                    final_byte as char
+                );
+            }
+        }
     }
 
     #[test]
-    fn esc_paren_b_dec_special_graphics_dont_replace() {
-        let (output, result) = feed_standard(b'(', b'B');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(
-            output,
-            vec![TerminalOutput::DecSpecialGraphics(
-                DecSpecialGraphics::DontReplace
-            )]
-        );
-    }
-
-    #[test]
-    fn esc_paren_c_charset_g0() {
-        let (output, result) = feed_standard(b'(', b'C');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG0]);
-    }
-
-    #[test]
-    fn esc_paren_invalid_param() {
-        let (output, result) = feed_standard(b'(', b'Z');
-        assert!(matches!(result, ParserOutcome::Invalid(_)));
-        assert!(output.contains(&TerminalOutput::Invalid));
-    }
-
-    // ------------------------------------------------------------------
-    // ESC ) — G1 charset designators
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn esc_close_paren_0_charset_g1() {
-        let (output, result) = feed_standard(b')', b'0');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG1]);
-    }
-
-    #[test]
-    fn esc_close_paren_b_charset_g1() {
-        let (output, result) = feed_standard(b')', b'B');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG1]);
-    }
-
-    #[test]
-    fn esc_close_paren_c_charset_g1() {
-        let (output, result) = feed_standard(b')', b'C');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG1]);
-    }
-
-    #[test]
-    fn esc_close_paren_invalid_param() {
-        let (output, result) = feed_standard(b')', b'Z');
-        assert!(matches!(result, ParserOutcome::Invalid(_)));
-        assert!(output.contains(&TerminalOutput::Invalid));
-    }
-
-    // ------------------------------------------------------------------
-    // ESC * — G2 charset
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn esc_star_c_charset_g2() {
-        let (output, result) = feed_standard(b'*', b'C');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG2]);
-    }
-
-    #[test]
-    fn esc_star_invalid_param() {
-        let (output, result) = feed_standard(b'*', b'Z');
-        assert!(matches!(result, ParserOutcome::Invalid(_)));
-        assert!(output.contains(&TerminalOutput::Invalid));
-    }
-
-    // ------------------------------------------------------------------
-    // ESC + — national character set designations
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn esc_plus_0_dec_special_graphics() {
+    fn esc_plus_0_designates_only_g3() {
         let (output, result) = feed_standard(b'+', b'0');
         assert!(matches!(result, ParserOutcome::Finished));
         assert_eq!(
             output,
-            vec![TerminalOutput::DecSpecialGraphics(
-                DecSpecialGraphics::Replace
-            )]
+            vec![TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G3,
+                set: CharacterSet::DecSpecialGraphics,
+            }]
         );
     }
 
     #[test]
-    fn esc_plus_a_charset_uk() {
-        let (output, result) = feed_standard(b'+', b'A');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetUK]);
+    fn unknown_designator_final_finishes_with_no_output() {
+        // Finals for sets freminal does not implement (Finnish, Dutch, French,
+        // ...), and finals that are not character sets at all, leave the slot
+        // as it was: the sequence is consumed and emits nothing.
+        for (intermediate, _) in DESIGNATORS {
+            for &final_byte in b"C54RQKYEZH=Fx~" {
+                let (output, result) = feed_standard(intermediate, final_byte);
+                assert!(
+                    matches!(result, ParserOutcome::Finished),
+                    "ESC {} {} must finish",
+                    intermediate as char,
+                    final_byte as char
+                );
+                assert!(
+                    output.is_empty(),
+                    "ESC {} {} must emit nothing, got {output:?}",
+                    intermediate as char,
+                    final_byte as char
+                );
+            }
+        }
     }
 
     #[test]
-    fn esc_plus_b_charset_us_ascii() {
-        let (output, result) = feed_standard(b'+', b'B');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetUSASCII]);
-    }
-
-    #[test]
-    fn esc_plus_4_charset_dutch() {
-        let (output, result) = feed_standard(b'+', b'4');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetDutch]);
-    }
-
-    #[test]
-    fn esc_plus_5_charset_finnish() {
-        let (output, result) = feed_standard(b'+', b'5');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetFinnish]);
-    }
-
-    #[test]
-    fn esc_plus_r_charset_french() {
-        let (output, result) = feed_standard(b'+', b'R');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetFrench]);
-    }
-
-    #[test]
-    fn esc_plus_q_charset_french_canadian() {
-        let (output, result) = feed_standard(b'+', b'Q');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetFrenchCanadian]);
-    }
-
-    #[test]
-    fn esc_plus_k_charset_german() {
-        let (output, result) = feed_standard(b'+', b'K');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetGerman]);
-    }
-
-    #[test]
-    fn esc_plus_y_charset_italian() {
-        let (output, result) = feed_standard(b'+', b'Y');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetItalian]);
-    }
-
-    #[test]
-    fn esc_plus_e_charset_norwegian_danish() {
-        let (output, result) = feed_standard(b'+', b'E');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetNorwegianDanish]);
-    }
-
-    #[test]
-    fn esc_plus_z_charset_spanish() {
-        let (output, result) = feed_standard(b'+', b'Z');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetSpanish]);
-    }
-
-    #[test]
-    fn esc_plus_h_charset_swedish() {
-        let (output, result) = feed_standard(b'+', b'H');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetSwedish]);
-    }
-
-    #[test]
-    fn esc_plus_eq_charset_swiss() {
-        let (output, result) = feed_standard(b'+', b'=');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetSwiss]);
-    }
-
-    #[test]
-    fn esc_plus_c_charset_finnish_alternate() {
-        let (output, result) = feed_standard(b'+', b'C');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetFinnish]);
-    }
-
-    #[test]
-    fn esc_plus_6_charset_norwegian_danish_alternate() {
-        let (output, result) = feed_standard(b'+', b'6');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetNorwegianDanish]);
-    }
-
-    #[test]
-    fn esc_plus_7_charset_swedish_alternate() {
-        let (output, result) = feed_standard(b'+', b'7');
-        assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetSwedish]);
-    }
-
-    #[test]
-    fn esc_plus_invalid_param() {
-        // b'F' passes is_standard_param() but is not valid for the '+' dispatch.
-        let (output, result) = feed_standard(b'+', b'F');
-        assert!(matches!(result, ParserOutcome::Invalid(_)));
-        assert!(output.contains(&TerminalOutput::Invalid));
+    fn designator_final_outside_the_final_range_is_invalid() {
+        for (intermediate, _) in DESIGNATORS {
+            for final_byte in [0x01, 0x1f, 0x20, 0x2f, 0x7f] {
+                let (output, result) = feed_standard(intermediate, final_byte);
+                assert!(
+                    matches!(result, ParserOutcome::Invalid(_)),
+                    "ESC {} 0x{final_byte:02x} must be invalid",
+                    intermediate as char
+                );
+                assert_eq!(output, Vec::<TerminalOutput>::new());
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -891,38 +698,52 @@ mod tests {
     }
 
     #[test]
-    fn esc_lower_n_charset_g2_as_gl() {
+    fn esc_lower_n_invokes_g2_into_gl() {
         let (output, result) = feed_standard_final(b'n');
         assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG2AsGL]);
+        assert_eq!(output, vec![TerminalOutput::InvokeGl(CharsetSlot::G2)]);
     }
 
     #[test]
-    fn esc_lower_o_charset_g3_as_gl() {
+    fn esc_lower_o_invokes_g3_into_gl() {
         let (output, result) = feed_standard_final(b'o');
         assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG3AsGL]);
+        assert_eq!(output, vec![TerminalOutput::InvokeGl(CharsetSlot::G3)]);
     }
 
     #[test]
-    fn esc_pipe_charset_g3_as_gr() {
+    fn esc_pipe_invokes_g3_into_gr() {
         let (output, result) = feed_standard_final(b'|');
         assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG3AsGR]);
+        assert_eq!(output, vec![TerminalOutput::InvokeGr(CharsetSlot::G3)]);
     }
 
     #[test]
-    fn esc_close_brace_charset_g2_as_gr() {
+    fn esc_close_brace_invokes_g2_into_gr() {
         let (output, result) = feed_standard_final(b'}');
         assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG2AsGR]);
+        assert_eq!(output, vec![TerminalOutput::InvokeGr(CharsetSlot::G2)]);
     }
 
     #[test]
-    fn esc_tilde_charset_g1_as_gr() {
+    fn esc_tilde_invokes_g1_into_gr() {
         let (output, result) = feed_standard_final(b'~');
         assert!(matches!(result, ParserOutcome::Finished));
-        assert_eq!(output, vec![TerminalOutput::CharsetG1AsGR]);
+        assert_eq!(output, vec![TerminalOutput::InvokeGr(CharsetSlot::G1)]);
+    }
+
+    #[test]
+    fn esc_upper_n_is_single_shift_two() {
+        let (output, result) = feed_standard_final(b'N');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::SingleShift(CharsetSlot::G2)]);
+    }
+
+    #[test]
+    fn esc_upper_o_is_single_shift_three() {
+        let (output, result) = feed_standard_final(b'O');
+        assert!(matches!(result, ParserOutcome::Finished));
+        assert_eq!(output, vec![TerminalOutput::SingleShift(CharsetSlot::G3)]);
     }
 
     #[test]

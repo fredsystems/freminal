@@ -11,6 +11,8 @@
 
 /// Which of the two terminal buffers is currently active.
 pub mod buffer_type;
+/// G0-G3 character sets, locking and single shifts, and the DEC Special Graphics table.
+pub mod charset;
 /// `CommandBlock` — a single shell command's full lifecycle from OSC 133 markers.
 pub mod command_block;
 /// Cursor state types: position, colors, decorations, and reverse-video.
@@ -25,8 +27,6 @@ pub mod format_tag;
 pub mod ftcs;
 /// Kitty graphics protocol types and helpers.
 pub mod kitty_graphics;
-/// DEC Special Graphics (line-drawing) character remapping.
-pub mod line_draw;
 /// Soft-wrap line join metadata.
 pub mod line_wrap;
 /// `Mode` and `SetMode` — generic set/reset mode command types.

@@ -16,7 +16,10 @@ use crate::{
 use crate::ansi_components::tracer::SequenceTracer;
 use crate::error::AnsiParseError;
 use freminal_common::buffer_states::{
-    line_draw::DecSpecialGraphics, mode::Mode, modes::decanm::Decanm, modes::s8c1t::S8c1t,
+    charset::{CharacterSet, CharsetSlot},
+    mode::Mode,
+    modes::decanm::Decanm,
+    modes::s8c1t::S8c1t,
     terminal_output::TerminalOutput,
 };
 
@@ -275,11 +278,13 @@ impl FreminalAnsiParser {
 
         // SI (0x0F) — Shift In: invoke G0 into GL.
         // SO (0x0E) — Shift Out: invoke G1 into GL.
-        // Silently consumed as control characters.  Freminal uses a simplified
-        // single-slot charset model — G0 is always the active GL set, so SI is
-        // a no-op and SO has no visible effect until full G0/G1 support is added.
         if b == 0x0F || b == 0x0E {
             push_data_if_non_empty(data_output, output);
+            output.push(TerminalOutput::InvokeGl(if b == 0x0F {
+                CharsetSlot::G0
+            } else {
+                CharsetSlot::G1
+            }));
             return Err(());
         }
 
@@ -327,7 +332,10 @@ impl FreminalAnsiParser {
                 0x9F => {
                     self.inner = ParserInner::Apc(ApcParser::new());
                 }
-                // SS2 (0x8E), SS3 (0x8F) — Single Shift G2/G3 (no-op for now)
+                // SS2 (0x8E) ≡ ESC N — Single Shift G2
+                0x8E => output.push(TerminalOutput::SingleShift(CharsetSlot::G2)),
+                // SS3 (0x8F) ≡ ESC O — Single Shift G3
+                0x8F => output.push(TerminalOutput::SingleShift(CharsetSlot::G3)),
                 // ST (0x9C) — String Terminator (no-op when no string is open)
                 // PM (0x9E) — Privacy Message (ignored, no handler)
                 // Other bytes in 0x80–0x9F without defined C1 meaning — silently ignored
@@ -726,18 +734,20 @@ impl FreminalAnsiParser {
                 });
                 self.inner = ParserInner::Empty;
             }
-            // ESC F — Enter graphics mode (DEC special graphics)
+            // ESC F — Enter graphics mode (DEC special graphics in G0)
             b'F' => {
-                output.push(TerminalOutput::DecSpecialGraphics(
-                    DecSpecialGraphics::Replace,
-                ));
+                output.push(TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::DecSpecialGraphics,
+                });
                 self.inner = ParserInner::Empty;
             }
-            // ESC G — Exit graphics mode
+            // ESC G — Exit graphics mode (ASCII in G0)
             b'G' => {
-                output.push(TerminalOutput::DecSpecialGraphics(
-                    DecSpecialGraphics::DontReplace,
-                ));
+                output.push(TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::Ascii,
+                });
                 self.inner = ParserInner::Empty;
             }
             // ESC H — Cursor home (row 1, col 1)
@@ -972,9 +982,13 @@ mod tests {
             ClearScrollbackandDisplay,
             ClearLineForwards,
             ClearLineBackwards,
-            DecSpecialGraphics(
-                freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace,
-            ),
+            DesignateCharset {
+                slot: CharsetSlot::G1,
+                set: CharacterSet::DecSpecialGraphics,
+            },
+            InvokeGl(CharsetSlot::G1),
+            InvokeGr(CharsetSlot::G2),
+            SingleShift(CharsetSlot::G3),
             CursorVisualStyle(freminal_common::cursor::CursorVisualStyle::BlockCursorSteady),
             CursorVisualStyleDefault,
             WindowManipulation(
@@ -997,29 +1011,6 @@ mod tests {
             ScreenAlignmentTest,
             CharsetDefault,
             CharsetUTF8,
-            CharsetG0,
-            CharsetG1,
-            CharsetG1AsGR,
-            CharsetG2,
-            CharsetG2AsGR,
-            CharsetG2AsGL,
-            CharsetG3,
-            CharsetG3AsGR,
-            CharsetG3AsGL,
-            DecSpecial,
-            CharsetUK,
-            CharsetUS,
-            CharsetUSASCII,
-            CharsetDutch,
-            CharsetFinnish,
-            CharsetFrench,
-            CharsetFrenchCanadian,
-            CharsetGerman,
-            CharsetItalian,
-            CharsetNorwegianDanish,
-            CharsetSpanish,
-            CharsetSwedish,
-            CharsetSwiss,
             SaveCursor,
             RestoreCursor,
             CursorToLowerLeftCorner,
@@ -1351,9 +1342,10 @@ mod tests {
         let result = p.push(b"\x1bF");
         assert_eq!(
             result,
-            vec![TerminalOutput::DecSpecialGraphics(
-                freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace
-            )]
+            vec![TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G0,
+                set: CharacterSet::DecSpecialGraphics,
+            }]
         );
     }
 
@@ -1363,9 +1355,10 @@ mod tests {
         let result = p.push(b"\x1bG");
         assert_eq!(
             result,
-            vec![TerminalOutput::DecSpecialGraphics(
-                freminal_common::buffer_states::line_draw::DecSpecialGraphics::DontReplace
-            )]
+            vec![TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G0,
+                set: CharacterSet::Ascii,
+            }]
         );
     }
 
@@ -1745,15 +1738,16 @@ mod tests {
 
     #[test]
     fn esc_plus_0_designates_g3_as_dec_special_graphics() {
-        // ESC + 0 should designate the G3 character set as DEC Special Graphics,
-        // producing the same output as ESC ( 0 does for G0.
+        // ESC + 0 designates DEC Special Graphics into G3 and into no other
+        // slot: it must not behave like ESC ( 0.
         let mut parser = FreminalAnsiParser::new();
         let result = parser.push(b"\x1b+0");
         assert_eq!(
             result,
-            vec![TerminalOutput::DecSpecialGraphics(
-                freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace
-            )]
+            vec![TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G3,
+                set: CharacterSet::DecSpecialGraphics,
+            }]
         );
     }
 
@@ -1875,11 +1869,11 @@ mod tests {
         );
         assert_eq!(p.inner, ParserInner::Empty);
 
-        // 0x8E (SS2) also falls through to the catch-all
-        let result2 = p.push(b"\x8E");
+        // PM (0x9E) has no handler either and is ignored.
+        let result2 = p.push(b"\x9E");
         assert!(
             result2.is_empty(),
-            "SS2 (0x8E) should be silently ignored: {result2:?}"
+            "PM (0x9E) should be silently ignored: {result2:?}"
         );
     }
 
@@ -1933,8 +1927,8 @@ mod tests {
         assert!(
             result
                 .iter()
-                .any(|o| matches!(o, TerminalOutput::DecSpecialGraphics(_))),
-            "ESC ( 0 should produce DecSpecialGraphics: {result:?}"
+                .any(|o| matches!(o, TerminalOutput::DesignateCharset { .. })),
+            "ESC ( 0 should produce DesignateCharset: {result:?}"
         );
         assert_eq!(p.inner, ParserInner::Empty);
     }
@@ -1942,13 +1936,134 @@ mod tests {
     #[test]
     fn standard_parser_invalid_charset_designator() {
         let mut p = FreminalAnsiParser::new();
-        // ESC ( followed by an unknown charset designator 'Z'
-        // This goes through StandardParser Continue on '(' then Invalid on 'Z'
-        let result = p.push(b"\x1b(Z");
-        // Should produce Invalid output
+        // ESC ( followed by a byte that cannot be a designator final
+        let result = p.push(b"\x1b(\x01");
         let has_invalid = result.iter().any(|o| matches!(o, TerminalOutput::Invalid));
-        assert!(has_invalid, "ESC ( Z should produce Invalid: {result:?}");
+        assert!(has_invalid, "ESC ( 0x01 should produce Invalid: {result:?}");
         assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn unknown_charset_designator_final_is_ignored() {
+        let mut p = FreminalAnsiParser::new();
+        // 'Z' is a well-formed final for a set freminal does not implement: the
+        // sequence is consumed and emits nothing, not even `Invalid`.
+        let result = p.push(b"\x1b(Z");
+        assert!(result.is_empty(), "ESC ( Z must emit nothing: {result:?}");
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    // ── Character sets: SO/SI, single shifts ────────────────────────────────
+
+    #[test]
+    fn so_and_si_invoke_g1_and_g0_after_flushing_data() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"a\x0eb\x0fc");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Data(b"a".to_vec()),
+                TerminalOutput::InvokeGl(CharsetSlot::G1),
+                TerminalOutput::Data(b"b".to_vec()),
+                TerminalOutput::InvokeGl(CharsetSlot::G0),
+                TerminalOutput::Data(b"c".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn so_inside_a_csi_executes_inline_and_the_csi_continues() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b[1\x0eA");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::InvokeGl(CharsetSlot::G1),
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn seven_bit_ss2_and_ss3_emit_single_shifts() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"a\x1bNb\x1bOc");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Data(b"a".to_vec()),
+                TerminalOutput::SingleShift(CharsetSlot::G2),
+                TerminalOutput::Data(b"b".to_vec()),
+                TerminalOutput::SingleShift(CharsetSlot::G3),
+                TerminalOutput::Data(b"c".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn eight_bit_ss2_and_ss3_emit_single_shifts_under_s8c1t() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let result = p.push(b"a\x8eb\x8fc");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Data(b"a".to_vec()),
+                TerminalOutput::SingleShift(CharsetSlot::G2),
+                TerminalOutput::Data(b"b".to_vec()),
+                TerminalOutput::SingleShift(CharsetSlot::G3),
+                TerminalOutput::Data(b"c".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn eight_bit_ss2_and_ss3_are_not_recognised_under_s7c1t() {
+        // Without S8C1T the bytes are not C1 controls: no single shift.
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x8e\x8f");
+        assert!(
+            !result
+                .iter()
+                .any(|o| matches!(o, TerminalOutput::SingleShift(_))),
+            "SS2/SS3 bytes must not shift under S7C1T: {result:?}"
+        );
+    }
+
+    #[test]
+    fn charset_outputs_do_not_change_a_parser_mode() {
+        // `apply_parser_mode_change` must treat the charset outputs as inert.
+        for output in [
+            TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G0,
+                set: CharacterSet::DecSpecialGraphics,
+            },
+            TerminalOutput::InvokeGl(CharsetSlot::G1),
+            TerminalOutput::InvokeGr(CharsetSlot::G2),
+            TerminalOutput::SingleShift(CharsetSlot::G3),
+        ] {
+            let mut vt52 = Decanm::Vt52;
+            let mut s8c1t = S8c1t::EightBit;
+            apply_parser_mode_change(&output, &mut vt52, &mut s8c1t);
+            assert_eq!(vt52, Decanm::Vt52, "{output}");
+            assert_eq!(s8c1t, S8c1t::EightBit, "{output}");
+        }
+    }
+
+    #[test]
+    fn bare_esc_ending_a_string_then_n_is_single_shift_two() {
+        // The bare ESC ends the OSC (`FinishedAtEsc`), and the byte after it is
+        // the second byte of a new escape sequence: here ESC N.
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b]0;t\x1bNq");
+        assert!(
+            result.contains(&TerminalOutput::SingleShift(CharsetSlot::G2)),
+            "ESC N after a bare-ESC-terminated OSC must be SS2: {result:?}"
+        );
+        assert_eq!(result.last(), Some(&TerminalOutput::Data(b"q".to_vec())));
     }
 
     // ── DCS parser Invalid path (lines 439-442) ────────────────────────────

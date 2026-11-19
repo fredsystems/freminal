@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use freminal_common::buffer_states::charset::{CharacterSet, CharsetSlot};
 use freminal_common::buffer_states::mode::Mode;
 use freminal_common::buffer_states::osc::AnsiOscType;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -110,29 +111,17 @@ fn display_exhaustive_variants_short() {
         TerminalOutput::ScreenAlignmentTest,
         TerminalOutput::CharsetDefault,
         TerminalOutput::CharsetUTF8,
-        TerminalOutput::CharsetG0,
-        TerminalOutput::CharsetG1,
-        TerminalOutput::CharsetG1AsGR,
-        TerminalOutput::CharsetG2,
-        TerminalOutput::CharsetG2AsGR,
-        TerminalOutput::CharsetG2AsGL,
-        TerminalOutput::CharsetG3,
-        TerminalOutput::CharsetG3AsGR,
-        TerminalOutput::CharsetG3AsGL,
-        TerminalOutput::DecSpecial,
-        TerminalOutput::CharsetUK,
-        TerminalOutput::CharsetUS,
-        TerminalOutput::CharsetUSASCII,
-        TerminalOutput::CharsetDutch,
-        TerminalOutput::CharsetFinnish,
-        TerminalOutput::CharsetFrench,
-        TerminalOutput::CharsetFrenchCanadian,
-        TerminalOutput::CharsetGerman,
-        TerminalOutput::CharsetItalian,
-        TerminalOutput::CharsetNorwegianDanish,
-        TerminalOutput::CharsetSpanish,
-        TerminalOutput::CharsetSwedish,
-        TerminalOutput::CharsetSwiss,
+        TerminalOutput::DesignateCharset {
+            slot: CharsetSlot::G0,
+            set: CharacterSet::Ascii,
+        },
+        TerminalOutput::DesignateCharset {
+            slot: CharsetSlot::G3,
+            set: CharacterSet::UnitedKingdom,
+        },
+        TerminalOutput::InvokeGl(CharsetSlot::G1),
+        TerminalOutput::InvokeGr(CharsetSlot::G2),
+        TerminalOutput::SingleShift(CharsetSlot::G3),
         TerminalOutput::SaveCursor,
         TerminalOutput::RestoreCursor,
         TerminalOutput::CursorToLowerLeftCorner,

@@ -5,23 +5,29 @@
 
 //! vttest Menu 3 — Character Set Tests.
 //!
-//! Tests for G0 charset designation and DEC Special Graphics character mapping,
-//! the only character-set feature currently implemented in Freminal.
+//! Tests for G0–G3 designation, the locking shifts (SI, SO, LS2, LS3, and the
+//! GR forms), the single shifts (SS2, SS3) and the DEC Special Graphics and UK
+//! sets.
 //!
 //! ## Coverage
 //!
-//! - **`ESC ( 0`** — designate DEC Special Graphics for G0
-//! - **`ESC ( B`** — designate US ASCII for G0 (restore default)
-//! - **SI / SO** — invoke G0 (SI) and G1 (SO); consumed as C0 control
-//!   characters (no-op — Freminal uses a simplified single-slot charset model)
+//! - **`ESC ( 0` / `ESC ( B`** — designate DEC Special Graphics / US ASCII
+//!   for G0, and the same for G1–G3 (`ESC ) * +`)
+//! - **SI / SO / `ESC n` / `ESC o`** — invoke G0, G1, G2 and G3 into GL
+//! - **GR** — `ESC ~ } |` are tracked but never applied (UTF-8)
+//! - **SS2 / SS3** — `ESC N` / `ESC O`, and 0x8E / 0x8F under S8C1T, each
+//!   affect exactly one character
+//! - **DECSC / DECRC, RIS, DECSTR, VT52** — what saves, restores and resets
+//!   the character-set state
 //! - **Complete DEC Special Graphics table** — all 32 mapped code points
 //!   (0x5F–0x7E → Unicode equivalents)
-//! - **Pass-through** — bytes outside 0x5F–0x7E are unaffected by G0 mode
+//! - **Pass-through** — bytes outside 0x5F–0x7E are unaffected by DEC Special
 //!
 //! ## Excluded
 //!
-//! - **VT220 locking/single shifts** (SS2/SS3, G2/G3): not implemented.
-//! - **National Replacement Character sets**: requires DECNRCM (Task 20.12).
+//! - **National Replacement Character sets** other than UK, and the
+//!   96-character designators (`ESC - . /`): not implemented. An unknown
+//!   designator final is ignored and the slot keeps its set.
 //! - **ISO Latin character sets**: not implemented.
 //!
 //! All cursor positions in the helper API are **0-indexed** (`x` = column,
@@ -61,33 +67,39 @@ fn dec_special_activate_and_deactivate() {
     );
 }
 
-/// SI (0x0F) and SO (0x0E) are defined in the VT100 standard to invoke G0 and
-/// G1 respectively. Freminal recognises them as C0 control characters and
-/// silently consumes them (no-op — Freminal uses a simplified single-slot
-/// charset model where G0 is always the active GL set). They must NOT appear
-/// as visible data in the terminal buffer.
+/// SO (0x0E) invokes G1 into GL and SI (0x0F) invokes G0. Neither appears as
+/// visible data. With DEC Special in G0 only, SO switches GL to the (ASCII) G1,
+/// so the next byte is literal, and SI switches back.
 #[test]
-fn si_so_consumed_as_control_characters() {
+fn si_so_switch_gl_between_g0_and_g1() {
     let mut h = VtTestHelper::new_default();
 
-    // With DEC Special Graphics active, write a known mapped char.
-    h.feed(b"\x1b(0"); // designate DEC Special for G0
-    h.feed(b"\x6a"); // 0x6a → '┘'
+    h.feed(b"\x1b(0"); // G0 = DEC Special; G1 stays ASCII
+    h.feed(b"\x6a"); // GL = G0 → '┘'
+    h.feed(b"\x0e"); // SO — GL = G1 (ASCII)
+    h.feed(b"\x6a"); // literal 'j'
+    h.feed(b"\x0f"); // SI — GL = G0 again
+    h.feed(b"\x6a"); // '┘'
 
-    // SO (0x0E) and SI (0x0F) are consumed as control characters.
-    // DEC Special Graphics mode remains active throughout.
-    h.feed(b"\x0e"); // SO — consumed; no visible output
-    h.feed(b"\x6a"); // still in DEC Special mode → '┘'
-    h.feed(b"\x0f"); // SI — consumed; no visible output
-    h.feed(b"\x6a"); // still in DEC Special mode → '┘'
-
-    // The row should contain exactly three '┘' glyphs and no SI/SO artifacts.
     let row = h.screen_text()[0].clone();
-    let box_count = row.chars().filter(|&c| c == '\u{2518}').count();
     assert_eq!(
-        box_count, 3,
-        "All three 0x6a writes must produce ┘; SO/SI must be consumed silently; got: {row:?}"
+        row, "\u{2518}j\u{2518}",
+        "SO/SI must switch GL and leave no artifacts; got: {row:?}"
     );
+}
+
+/// The classic way to draw a box: designate DEC Special Graphics into G1 with
+/// `ESC ) 0`, then SO to use it and SI to leave it.
+#[test]
+fn so_after_designating_g1_draws_a_box() {
+    let mut h = VtTestHelper::new_default();
+
+    h.feed(b"\x1b)0");
+    h.feed(b"lqqk"); // GL = G0 (ASCII) still: literal
+    h.feed(b"\x0elqqk\x0f"); // SO … SI
+    h.feed(b"lqqk");
+
+    h.assert_row(0, "lqqk\u{250c}\u{2500}\u{2500}\u{2510}lqqk");
 }
 
 /// After leaving and re-entering DEC Special mode, the mapping is still active.
@@ -398,6 +410,326 @@ fn dec_special_draw_box() {
     h.assert_row(0, "┌──┐");
     h.assert_row(1, "│  │");
     h.assert_row(2, "└──┘");
+}
+
+// ─── Designation and invocation, every slot ──────────────────────────────────
+
+const BOX_HORIZONTAL: &str = "\u{2500}";
+const POUND: &str = "\u{a3}";
+
+/// Designate `set` (the final byte) into the slot `intermediate` names, check
+/// that nothing changes while GL still invokes G0, then invoke the slot with
+/// `invoke` and check the mapping, then invoke G0 again with SI.
+fn assert_slot_maps_through_gl(intermediate: u8, invoke: &[u8], probe: u8, mapped: &str) {
+    let mut h = VtTestHelper::new_default();
+    h.feed(&[
+        0x1b,
+        intermediate,
+        if mapped == POUND { b'A' } else { b'0' },
+    ]);
+    h.feed(&[probe]);
+    h.feed(invoke);
+    h.feed(&[probe]);
+    h.feed(b"\x0f");
+    h.feed(&[probe]);
+
+    let literal = char::from(probe).to_string();
+    let expected = if intermediate == b'(' {
+        // G0 is GL from the start, so the first byte is already mapped, and
+        // invoking G0 again (ESC ( has no invoke) leaves it mapped.
+        format!("{mapped}{mapped}{mapped}")
+    } else {
+        format!("{literal}{mapped}{literal}")
+    };
+    h.assert_row(0, &expected);
+}
+
+#[test]
+fn g0_designation_maps_through_gl_immediately() {
+    assert_slot_maps_through_gl(b'(', b"", b'q', BOX_HORIZONTAL);
+}
+
+#[test]
+fn g1_designation_maps_after_so() {
+    assert_slot_maps_through_gl(b')', b"\x0e", b'q', BOX_HORIZONTAL);
+}
+
+#[test]
+fn g2_designation_maps_after_ls2() {
+    assert_slot_maps_through_gl(b'*', b"\x1bn", b'q', BOX_HORIZONTAL);
+}
+
+#[test]
+fn g3_designation_maps_after_ls3() {
+    assert_slot_maps_through_gl(b'+', b"\x1bo", b'q', BOX_HORIZONTAL);
+}
+
+#[test]
+fn uk_set_maps_hash_to_pound_in_every_slot() {
+    assert_slot_maps_through_gl(b'(', b"", b'#', POUND);
+    assert_slot_maps_through_gl(b')', b"\x0e", b'#', POUND);
+    assert_slot_maps_through_gl(b'*', b"\x1bn", b'#', POUND);
+    assert_slot_maps_through_gl(b'+', b"\x1bo", b'#', POUND);
+}
+
+#[test]
+fn uk_set_only_changes_the_hash() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b(A");
+    h.feed(b"a#~$");
+    h.assert_row(0, "a\u{a3}~$");
+}
+
+/// `ESC + 0` designates G3 and nothing else: G0 stays ASCII.
+#[test]
+fn esc_plus_0_does_not_touch_g0() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b+0");
+    h.feed(b"q");
+    h.assert_row(0, "q");
+}
+
+/// Designating a set into a slot GL is not using does not change what is drawn.
+#[test]
+fn designating_an_unused_slot_does_not_affect_gl() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b)0\x1b*0\x1b+0");
+    h.feed(b"q");
+    h.assert_row(0, "q");
+}
+
+/// The locking shifts persist: every following character is mapped.
+#[test]
+fn locking_shift_persists_until_changed() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b*0\x1bn");
+    h.feed(b"qqq");
+    h.feed(b"\x0f");
+    h.feed(b"qqq");
+    h.assert_row(0, "\u{2500}\u{2500}\u{2500}qqq");
+}
+
+/// An unknown final leaves the slot as it was; it does not reset it to ASCII.
+#[test]
+fn unknown_designator_final_leaves_the_slot_unchanged() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b)0"); // G1 = DEC Special
+    h.feed(b"\x1b)Z"); // unknown final: ignored
+    h.feed(b"\x1b)5"); // Finnish: not implemented, ignored
+    h.feed(b"\x0eq");
+    h.assert_row(0, BOX_HORIZONTAL);
+}
+
+/// An unknown final consumes only its own bytes: text after it is printed.
+#[test]
+fn unknown_designator_final_does_not_swallow_text() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"a\x1b(Zb");
+    h.assert_row(0, "ab");
+}
+
+// ─── GR is tracked, never applied ────────────────────────────────────────────
+
+/// `ESC ~ } |` invoke G1/G2/G3 into GR. GR is never applied: UTF-8 text with
+/// bytes at or above 0x80 prints as itself, and GL is untouched.
+#[test]
+fn gr_invocation_is_stored_but_not_applied() {
+    for invoke in [&b"\x1b~"[..], b"\x1b}", b"\x1b|"] {
+        let mut h = VtTestHelper::new_default();
+        h.feed(b"\x1b)0\x1b*0\x1b+0");
+        h.feed(invoke);
+        h.feed("\u{e9}q\u{3c0}".as_bytes());
+        h.assert_row(0, "\u{e9}q\u{3c0}");
+    }
+}
+
+// ─── Single shifts ───────────────────────────────────────────────────────────
+
+#[test]
+fn seven_bit_ss2_affects_exactly_one_character() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b*0");
+    h.feed(b"\x1bNqqq");
+    h.assert_row(0, "\u{2500}qq");
+}
+
+#[test]
+fn seven_bit_ss3_affects_exactly_one_character() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b+0");
+    h.feed(b"\x1bOqqq");
+    h.assert_row(0, "\u{2500}qq");
+}
+
+#[test]
+fn single_shift_overrides_gl_for_one_character_and_leaves_gl_locked() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b(0\x1b*B"); // G0 = DEC Special, G2 = ASCII
+    h.feed(b"q\x1bNqq");
+    h.assert_row(0, "\u{2500}q\u{2500}");
+}
+
+#[test]
+fn single_shift_applies_across_separate_reads() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b*0");
+    h.feed(b"\x1bN");
+    h.feed(b"q");
+    h.feed(b"q");
+    h.assert_row(0, "\u{2500}q");
+}
+
+#[test]
+fn single_shift_is_consumed_by_a_non_ascii_character() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b*0");
+    h.feed(b"\x1bN");
+    h.feed("\u{e9}qq".as_bytes());
+    h.assert_row(0, "\u{e9}qq");
+}
+
+#[test]
+fn eight_bit_ss2_affects_exactly_one_character_under_s8c1t() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b G"); // S8C1T
+    h.feed(b"\x1b*0");
+    h.feed(b"\x8eqqq");
+    h.assert_row(0, "\u{2500}qq");
+}
+
+#[test]
+fn eight_bit_ss3_affects_exactly_one_character_under_s8c1t() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b G"); // S8C1T
+    h.feed(b"\x1b+0");
+    h.feed(b"\x8fqqq");
+    h.assert_row(0, "\u{2500}qq");
+}
+
+// ─── DECSC / DECRC ───────────────────────────────────────────────────────────
+
+/// DECSC saves G0–G3, GL and the pending single shift; DECRC restores them.
+#[test]
+fn decsc_decrc_round_trips_the_charset_state_including_the_single_shift() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b*A"); // G2 = UK
+    h.feed(b"\x1b)0"); // G1 = DEC Special
+    h.feed(b"\x0e"); // GL = G1
+    h.feed(b"\x1bN"); // single shift pending (G2)
+    h.feed(b"\x1b7"); // DECSC
+
+    // Disturb everything: ASCII G1, GL = G0, and consume the shift.
+    h.feed(b"\x1b)B\x0fx");
+    h.feed(b"\x1b8"); // DECRC: back to col 0 with the saved state
+
+    // The restored single shift maps the first '#' through G2 (UK); the
+    // restored GL = G1 (DEC Special) maps 'q' and leaves a second '#' alone.
+    h.feed(b"#q#");
+    h.assert_row(0, "\u{a3}\u{2500}#");
+}
+
+#[test]
+fn decrc_restores_the_gl_invocation_and_designators() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b+0\x1bo"); // G3 = DEC Special, GL = G3
+    h.feed(b"\x1b7");
+    h.feed(b"\x0f\x1b+B"); // GL = G0, G3 = ASCII
+    h.feed(b"\x1b8");
+    h.feed(b"q");
+    h.assert_row(0, "\u{2500}");
+}
+
+#[test]
+fn decrc_with_nothing_saved_restores_the_default_charset_state() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b)0\x1b*0\x1b+0\x0e\x1bN");
+    h.feed(b"\x1b8"); // nothing saved on this screen
+    h.feed(b"qq");
+    h.assert_row(0, "qq");
+}
+
+// ─── RIS and DECSTR ──────────────────────────────────────────────────────────
+
+#[test]
+fn ris_resets_every_slot_gl_and_the_single_shift() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b(0\x1b)0\x1b*0\x1b+0\x0e\x1b}\x1bN");
+    h.feed(b"\x1bc");
+    h.feed(b"qq");
+    h.assert_row(0, "qq");
+
+    // And each slot is back to ASCII, not just the invoked one.
+    for invoke in [&b"\x0e"[..], b"\x1bn", b"\x1bo", b"\x0f"] {
+        h.feed(invoke);
+        h.feed(b"q");
+    }
+    h.assert_row(0, "qqqqqq");
+}
+
+#[test]
+fn ris_clears_the_saved_charset_state() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b(0\x1b7"); // DECSC with DEC Special in G0
+    h.feed(b"\x1bc");
+    h.feed(b"\x1b8"); // nothing saved: defaults
+    h.feed(b"q");
+    h.assert_row(0, "q");
+}
+
+#[test]
+fn decstr_resets_every_slot_gl_and_the_single_shift() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b(0\x1b)0\x1b*0\x1b+0\x0e\x1bN");
+    h.feed(b"\x1b[!p");
+    h.feed(b"qq");
+    for invoke in [&b"\x0e"[..], b"\x1bn", b"\x1bo", b"\x0f"] {
+        h.feed(invoke);
+        h.feed(b"q");
+    }
+    h.assert_row(0, "qqqqqq");
+}
+
+#[test]
+fn decstr_sets_the_saved_charset_state_to_the_default() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b)0\x0e\x1b7"); // DECSC with GL = G1 (DEC Special)
+    h.feed(b"\x1b[!p"); // DECSTR records the default state as the saved one
+    h.feed(b"\x1b)0\x0e"); // designate and invoke again
+    h.feed(b"\x1b8"); // DECRC: defaults
+    h.feed(b"q");
+    h.assert_row(0, "q");
+}
+
+// ─── VT52 ────────────────────────────────────────────────────────────────────
+
+/// Entering VT52 mode saves the ANSI charset state and starts from the
+/// defaults; leaving restores it, and `ESC F` / `ESC G` do not leak out.
+#[test]
+fn vt52_saves_and_restores_the_ansi_charset_state() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b)0\x0e"); // ANSI: G1 = DEC Special, GL = G1
+    h.feed(b"q"); // '─'
+
+    h.feed(b"\x1b[?2l"); // enter VT52
+    h.feed(b"\x1bH"); // home
+    h.feed(b"q"); // defaults in VT52: literal 'q'
+    h.feed(b"\x1bF"); // graphics on (G0 = DEC Special)
+    h.feed(b"q"); // '─'
+    h.feed(b"\x1b<"); // back to ANSI
+
+    h.feed(b"\x1b[H");
+    h.feed(b"q"); // restored: GL = G1 (DEC Special) → '─'
+    h.feed(b"\x0fq"); // SI → G0, which the VT52 ESC F did not leak into: 'q'
+
+    h.assert_row(0, "\u{2500}q");
+}
+
+#[test]
+fn vt52_esc_g_selects_ascii_in_g0() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b[?2l");
+    h.feed(b"\x1bH\x1bFq\x1bGq");
+    h.assert_row(0, "\u{2500}q");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

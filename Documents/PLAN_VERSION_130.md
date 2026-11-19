@@ -7792,6 +7792,18 @@ Stale stub text was corrected at the same time:
   old path. The orchestrator deleted the now-unused `raw_ascii_bytes_to_terminal_input` and
   its re-export.
 
+#### 147.C2 — SO/SI are acted on in VT52 mode
+
+- **Surfaced:** 147.20 (2026-11-19).
+- **Impact:** after 147.20, SO and SI shift GL in VT52 mode too. Whether a VT52 terminal
+  (and xterm's VT52 emulation) honours them is not established.
+- **Scope of fix:** `freminal-terminal-emulator/src/ansi.rs` (the SO/SI arm) and tests.
+- **Suggested approach:** check xterm's VT52 parse table (`VTPrsTbl.c` `vt52_table`) and the
+  VT100 User Guide's VT52-mode description before deciding; follow xterm unless the DEC
+  documentation contradicts it. Do not infer.
+- **Verification:** a VT52-mode test for SO/SI matching the chosen reference.
+- **Scheduling:** within Task 147, before 147.17.
+
 ### 147 Status notes
 
 - **147.1 (done).** `Mode::UnknownQuery { namespace, params }` reuses `ModeNamespace`; the
@@ -7855,6 +7867,22 @@ Stale stub text was corrected at the same time:
   handle the outcome instead of `unreachable!()`. Benchmarks (vs `before_147_8`, before run
   load-affected): plain text −4%, SGR −8.7%, OSC 9 −5% / +2%, kitty APC −28%, sixel −37%; no
   regression. `fuzz-replay` clean.
+- **147.20 (done).** New `buffer_states/charset.rs` (`CharacterSet`, `CharsetSlot`,
+  `CharsetState::translate`, the line-drawing table moved from the deleted `line_draw.rs`).
+  `TerminalOutput` gains `DesignateCharset`, `InvokeGl`, `InvokeGr` and `SingleShift` and
+  loses `DecSpecialGraphics` and 23 placeholder variants. SO/SI, `ESC n o ~ } |`, `ESC N O`
+  and 8-bit SS2/SS3 (under S8C1T) are implemented; one designator helper serves
+  `( ) * +` with B/A/0; an unknown final in 0x30–0x7E is ignored, outside that range it is
+  still `Invalid`. The handler's `charset: CharsetState` replaces `character_replace`
+  (borrowed fast path when GL is ASCII and no shift is pending); DECSC/DECRC, RIS, DECSTR
+  and VT52 entry/exit (`vt52_saved_charset`) as decided. `reset()` stays under the line limit
+  through a small `reset_parser_modes` helper. `CharsetDefault`/`CharsetUTF8` (`ESC % @/G`)
+  remain log-only (not G-set designations). Changed tests: the placeholder-pinning tests are
+  replaced, `si_so_consumed_as_control_characters` became
+  `si_so_switch_gl_between_g0_and_g1`, `ESC ( Z` moved from invalid to ignored, and the C1
+  fall-through probe uses PM (SS2 is no longer ignored). Benchmarks (vs `before_147_20`):
+  `parser_push` −17%, `handle_incoming_data_4096` −3%, `parse_and_handle_80x24` −8% to −11%
+  on three re-runs (+11% on a load-affected first run). `fuzz-replay` clean. Surfaced 147.C2.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

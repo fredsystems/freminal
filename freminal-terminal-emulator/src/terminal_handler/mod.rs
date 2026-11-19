@@ -14,12 +14,12 @@ use cursor_ops::SavedDecscState;
 use freminal_common::{
     buffer_states::{
         buffer_type::BufferType,
+        charset::CharsetState,
         command_block::CommandBlock,
         cursor::CursorPos,
         format_tag::FormatTag,
         ftcs::FtcsState,
         kitty_graphics::KittyControlData,
-        line_draw::DecSpecialGraphics,
         mode::{Mode, SetMode},
         modes::ReportMode,
         modes::allow_alt_screen::AllowAltScreen,
@@ -252,18 +252,21 @@ pub struct TerminalHandler {
     /// [`Self::set_configured_cursor_visual_style`]; DECSCUSR changes the
     /// current style alone.
     configured_cursor_visual_style: CursorVisualStyle,
-    /// Whether DEC Special Graphics character remapping is active.
-    character_replace: DecSpecialGraphics,
+    /// The G0-G3 character sets, what GL and GR invoke, and any pending
+    /// single shift.
+    charset: CharsetState,
+    /// The ANSI-mode charset state, saved on entering VT52 mode and restored
+    /// on leaving it (xterm does the same).  `None` outside VT52 mode.
+    vt52_saved_charset: Option<CharsetState>,
     /// The handler-owned half of the most recent DECSC (the charset and the
     /// SGR rendition), one slot per screen (indexed by `buffer.kind()`),
     /// mirroring the buffer's own per-screen DECSC slot, which holds the
     /// position and DECOM.
     ///
-    /// The VT100 spec requires DECSC to save the character set designators
-    /// (G0/G1) and GL invocation.  Freminal uses a simplified single-flag
-    /// model, so `character_replace` stands in for them; the SGR rendition is
-    /// saved alongside it.  `None` means no DECSC has run on that screen;
-    /// DECRC then homes with default attributes.
+    /// DECSC saves the character set designators (G0-G3), GL, GR and a pending
+    /// single shift, all of which `charset` holds; the SGR rendition is saved
+    /// alongside it.  `None` means no DECSC has run on that screen; DECRC then
+    /// homes with default attributes and the default charset state.
     saved_decsc: ScreenScoped<Option<SavedDecscState>>,
     /// Optional channel for writing responses back to the PTY.
     write_tx: Option<Sender<PtyWrite>>,
@@ -520,7 +523,8 @@ impl TerminalHandler {
             show_cursor: Dectcem::default(),
             cursor_visual_style: CursorVisualStyle::default(),
             configured_cursor_visual_style: CursorVisualStyle::default(),
-            character_replace: DecSpecialGraphics::default(),
+            charset: CharsetState::default(),
+            vt52_saved_charset: None,
             saved_decsc: ScreenScoped::default(),
             write_tx: None,
             dropped_replies: AtomicU64::new(0),
@@ -853,11 +857,11 @@ impl TerminalHandler {
     /// ## Saved character set
     /// Table 5-9 resets the DECSC state to home position with default
     /// attributes, so the saved cursor this produces is a real, complete
-    /// save. The saved G0 character set is therefore recorded as the
-    /// default (`Some(DecSpecialGraphics::default())`), not left as `None`
-    /// ("nothing saved"). Otherwise a program that designated DEC Special
-    /// Graphics after DECSTR and then issued DECRC without its own DECSC
-    /// would keep the graphics set. RIS ([`Self::full_reset`]) records no
+    /// save. The saved character-set state (G0-G3, GL, GR, no single shift) is
+    /// therefore recorded as the default (`Some(CharsetState::default())`),
+    /// not left as `None` ("nothing saved"). Otherwise a program that
+    /// designated DEC Special Graphics after DECSTR and then issued DECRC
+    /// without its own DECSC would keep the graphics set. RIS ([`Self::full_reset`]) records no
     /// save at all (`None` in both screens' slots); DECRC with nothing saved
     /// homes the cursor and resets the SGR rendition and character set to
     /// their defaults, as xterm and Ghostty do, so the two resets are
@@ -890,8 +894,10 @@ impl TerminalHandler {
     }
 
     /// Handle raw data bytes - convert to `TChar` and insert.
-    /// When DEC Special Graphics mode is active, bytes 0x5F–0x7E are remapped
-    /// to their Unicode box-drawing equivalents before conversion.
+    /// Printable bytes are first mapped through the character set GL invokes
+    /// (or a pending single shift), so DEC Special Graphics turns 0x5F–0x7E
+    /// into box-drawing glyphs.  With GL ASCII and no shift pending the data
+    /// is used as it is, without a copy.
     ///
     /// If any grapheme cluster begins with U+10EEEE (the Kitty Unicode
     /// placeholder character), it is intercepted and converted into an image
@@ -901,7 +907,7 @@ impl TerminalHandler {
             return;
         }
 
-        let remapped: Cow<[u8]> = apply_dec_special(data, &self.character_replace);
+        let remapped: Cow<[u8]> = self.charset.translate(data);
         let Ok(text) = TChar::from_vec(&remapped) else {
             return;
         };
@@ -2049,9 +2055,18 @@ impl TerminalHandler {
                 }
                 // ── DECANM — ANSI/VT52 Mode (?2) ─────────────────
                 Mode::Decanm(Decanm::Vt52) => {
+                    if self.vt52_mode != Decanm::Vt52 {
+                        self.vt52_saved_charset = Some(self.charset);
+                        self.charset = CharsetState::default();
+                    }
                     self.vt52_mode = Decanm::Vt52;
                 }
                 Mode::Decanm(Decanm::Ansi) => {
+                    if self.vt52_mode == Decanm::Vt52
+                        && let Some(saved) = self.vt52_saved_charset.take()
+                    {
+                        self.charset = saved;
+                    }
                     self.vt52_mode = Decanm::Ansi;
                 }
                 Mode::Decanm(Decanm::Query) => {
@@ -2177,9 +2192,12 @@ impl TerminalHandler {
             TerminalOutput::DeviceStatusReport => {
                 self.handle_device_status_report();
             }
-            TerminalOutput::DecSpecialGraphics(dsg) => {
-                self.character_replace = dsg.clone();
+            TerminalOutput::DesignateCharset { slot, set } => {
+                self.charset.designate(*slot, *set);
             }
+            TerminalOutput::InvokeGl(slot) => self.charset.invoke_gl(*slot),
+            TerminalOutput::InvokeGr(slot) => self.charset.invoke_gr(*slot),
+            TerminalOutput::SingleShift(slot) => self.charset.set_single_shift(*slot),
             TerminalOutput::CursorVisualStyle(style) => {
                 self.cursor_visual_style = style.clone();
             }
@@ -2226,33 +2244,9 @@ impl TerminalHandler {
             TerminalOutput::ScreenAlignmentTest => {
                 self.buffer.screen_alignment_test();
             }
-            TerminalOutput::CharsetDefault
-            | TerminalOutput::CharsetUTF8
-            | TerminalOutput::CharsetG0
-            | TerminalOutput::CharsetG1
-            | TerminalOutput::CharsetG1AsGR
-            | TerminalOutput::CharsetG2
-            | TerminalOutput::CharsetG2AsGR
-            | TerminalOutput::CharsetG2AsGL
-            | TerminalOutput::CharsetG3
-            | TerminalOutput::CharsetG3AsGR
-            | TerminalOutput::CharsetG3AsGL
-            | TerminalOutput::DecSpecial
-            | TerminalOutput::CharsetUK
-            | TerminalOutput::CharsetUS
-            | TerminalOutput::CharsetUSASCII
-            | TerminalOutput::CharsetDutch
-            | TerminalOutput::CharsetFinnish
-            | TerminalOutput::CharsetFrench
-            | TerminalOutput::CharsetFrenchCanadian
-            | TerminalOutput::CharsetGerman
-            | TerminalOutput::CharsetItalian
-            | TerminalOutput::CharsetNorwegianDanish
-            | TerminalOutput::CharsetSpanish
-            | TerminalOutput::CharsetSwedish
-            | TerminalOutput::CharsetSwiss => {
+            TerminalOutput::CharsetDefault | TerminalOutput::CharsetUTF8 => {
                 tracing::warn!(
-                    "Charset/line-drawing designation not yet implemented (ignored): {output}"
+                    "Default/UTF-8 charset selection not yet implemented (ignored): {output}"
                 );
             }
             TerminalOutput::SaveCursor => {
@@ -2341,64 +2335,6 @@ impl TerminalHandler {
     }
 }
 
-/// Remap bytes in `data` according to the DEC Special Graphics character set.
-///
-/// When `mode` is `DecSpecialGraphics::Replace`, bytes in the range `0x5F–0x7E`
-/// are expanded to their Unicode UTF-8 equivalents (box-drawing, Greek, etc.).
-/// All other bytes are passed through unchanged. When `mode` is `DontReplace`
-/// the slice is copied verbatim.
-///
-/// Reference: <https://en.wikipedia.org/wiki/DEC_Special_Graphics>
-///
-/// Returns `Cow::Borrowed(data)` when no remapping is needed (`DontReplace` mode),
-/// avoiding any heap allocation in the overwhelmingly common case.
-fn apply_dec_special<'a>(data: &'a [u8], mode: &DecSpecialGraphics) -> Cow<'a, [u8]> {
-    match mode {
-        DecSpecialGraphics::DontReplace => Cow::Borrowed(data),
-        DecSpecialGraphics::Replace => {
-            let mut out = Vec::with_capacity(data.len() * 3);
-            for &b in data {
-                match b {
-                    0x5f => out.extend_from_slice("\u{00A0}".as_bytes()), // NO-BREAK SPACE
-                    0x60 => out.extend_from_slice("\u{25C6}".as_bytes()), // BLACK DIAMOND
-                    0x61 => out.extend_from_slice("\u{2592}".as_bytes()), // MEDIUM SHADE
-                    0x62 => out.extend_from_slice("\u{2409}".as_bytes()), // SYMBOL FOR HT
-                    0x63 => out.extend_from_slice("\u{240C}".as_bytes()), // SYMBOL FOR FF
-                    0x64 => out.extend_from_slice("\u{240D}".as_bytes()), // SYMBOL FOR CR
-                    0x65 => out.extend_from_slice("\u{240A}".as_bytes()), // SYMBOL FOR LF
-                    0x66 => out.extend_from_slice("\u{00B0}".as_bytes()), // DEGREE SIGN
-                    0x67 => out.extend_from_slice("\u{00B1}".as_bytes()), // PLUS-MINUS SIGN
-                    0x68 => out.extend_from_slice("\u{2424}".as_bytes()), // SYMBOL FOR NEWLINE
-                    0x69 => out.extend_from_slice("\u{240B}".as_bytes()), // SYMBOL FOR VT
-                    0x6a => out.extend_from_slice("\u{2518}".as_bytes()), // BOX LIGHT UP AND LEFT
-                    0x6b => out.extend_from_slice("\u{2510}".as_bytes()), // BOX LIGHT DOWN AND LEFT
-                    0x6c => out.extend_from_slice("\u{250C}".as_bytes()), // BOX LIGHT DOWN AND RIGHT
-                    0x6d => out.extend_from_slice("\u{2514}".as_bytes()), // BOX LIGHT UP AND RIGHT
-                    0x6e => out.extend_from_slice("\u{253C}".as_bytes()), // BOX LIGHT VERTICAL AND HORIZONTAL
-                    0x6f => out.extend_from_slice("\u{23BA}".as_bytes()), // HORIZONTAL SCAN LINE-1
-                    0x70 => out.extend_from_slice("\u{23BB}".as_bytes()), // HORIZONTAL SCAN LINE-3
-                    0x71 => out.extend_from_slice("\u{2500}".as_bytes()), // BOX LIGHT HORIZONTAL
-                    0x72 => out.extend_from_slice("\u{23BC}".as_bytes()), // HORIZONTAL SCAN LINE-7
-                    0x73 => out.extend_from_slice("\u{23BD}".as_bytes()), // HORIZONTAL SCAN LINE-9
-                    0x74 => out.extend_from_slice("\u{251C}".as_bytes()), // BOX LIGHT VERTICAL AND RIGHT
-                    0x75 => out.extend_from_slice("\u{2524}".as_bytes()), // BOX LIGHT VERTICAL AND LEFT
-                    0x76 => out.extend_from_slice("\u{2534}".as_bytes()), // BOX LIGHT UP AND HORIZONTAL
-                    0x77 => out.extend_from_slice("\u{252C}".as_bytes()), // BOX LIGHT DOWN AND HORIZONTAL
-                    0x78 => out.extend_from_slice("\u{2502}".as_bytes()), // BOX LIGHT VERTICAL
-                    0x79 => out.extend_from_slice("\u{2264}".as_bytes()), // LESS-THAN OR EQUAL TO
-                    0x7a => out.extend_from_slice("\u{2265}".as_bytes()), // GREATER-THAN OR EQUAL TO
-                    0x7b => out.extend_from_slice("\u{03C0}".as_bytes()), // GREEK SMALL LETTER PI
-                    0x7c => out.extend_from_slice("\u{2260}".as_bytes()), // NOT EQUAL TO
-                    0x7d => out.extend_from_slice("\u{00A3}".as_bytes()), // POUND SIGN
-                    0x7e => out.extend_from_slice("\u{00B7}".as_bytes()), // MIDDLE DOT
-                    _ => out.push(b),
-                }
-            }
-            Cow::Owned(out)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use freminal_common::{
@@ -2414,6 +2350,7 @@ mod tests {
     };
 
     use super::*;
+    use freminal_common::buffer_states::charset::{CharacterSet, CharsetSlot};
     use freminal_common::buffer_states::osc_color::{ColorRequest, PaletteColorOp, PaletteReset};
 
     /// OSC 4 set of one palette entry.
@@ -4505,9 +4442,10 @@ mod tests {
     #[test]
     fn process_dec_special_graphics() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
-            DecSpecialGraphics::Replace,
-        )]);
+        handler.process_outputs(&[TerminalOutput::DesignateCharset {
+            slot: CharsetSlot::G0,
+            set: CharacterSet::DecSpecialGraphics,
+        }]);
         // 'q' (0x71) should map to a box drawing character
         handler.handle_data(b"q");
         // Cursor should advance
@@ -4679,38 +4617,88 @@ mod tests {
     }
 
     #[test]
-    fn process_charset_variants_are_noops() {
+    fn charset_outputs_update_the_charset_state() {
         let mut handler = TerminalHandler::new(80, 24);
-        let charsets = [
-            TerminalOutput::CharsetDefault,
-            TerminalOutput::CharsetUTF8,
-            TerminalOutput::CharsetG0,
-            TerminalOutput::CharsetG1,
-            TerminalOutput::CharsetG1AsGR,
-            TerminalOutput::CharsetG2,
-            TerminalOutput::CharsetG2AsGR,
-            TerminalOutput::CharsetG2AsGL,
-            TerminalOutput::CharsetG3,
-            TerminalOutput::CharsetG3AsGR,
-            TerminalOutput::CharsetG3AsGL,
-            TerminalOutput::DecSpecial,
-            TerminalOutput::CharsetUK,
-            TerminalOutput::CharsetUS,
-            TerminalOutput::CharsetUSASCII,
-            TerminalOutput::CharsetDutch,
-            TerminalOutput::CharsetFinnish,
-            TerminalOutput::CharsetFrench,
-            TerminalOutput::CharsetFrenchCanadian,
-            TerminalOutput::CharsetGerman,
-            TerminalOutput::CharsetItalian,
-            TerminalOutput::CharsetNorwegianDanish,
-            TerminalOutput::CharsetSpanish,
-            TerminalOutput::CharsetSwedish,
-            TerminalOutput::CharsetSwiss,
-        ];
-        for cs in &charsets {
-            handler.process_outputs(std::slice::from_ref(cs));
+        handler.process_outputs(&[
+            TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G2,
+                set: CharacterSet::UnitedKingdom,
+            },
+            TerminalOutput::InvokeGl(CharsetSlot::G3),
+            TerminalOutput::InvokeGr(CharsetSlot::G1),
+            TerminalOutput::SingleShift(CharsetSlot::G2),
+        ]);
+        assert_eq!(
+            handler.charset.set(CharsetSlot::G2),
+            CharacterSet::UnitedKingdom
+        );
+        assert_eq!(handler.charset.gl(), CharsetSlot::G3);
+        assert_eq!(handler.charset.gr(), CharsetSlot::G1);
+        assert_eq!(handler.charset.single_shift(), Some(CharsetSlot::G2));
+    }
+
+    #[test]
+    fn ris_and_decstr_reset_the_whole_charset_state() {
+        for output in [TerminalOutput::ResetDevice, TerminalOutput::SoftReset] {
+            let mut handler = TerminalHandler::new(80, 24);
+            handler.process_outputs(&[
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G3,
+                    set: CharacterSet::DecSpecialGraphics,
+                },
+                TerminalOutput::InvokeGl(CharsetSlot::G1),
+                TerminalOutput::InvokeGr(CharsetSlot::G3),
+                TerminalOutput::SingleShift(CharsetSlot::G2),
+            ]);
+            handler.process_outputs(&[output]);
+            assert_eq!(handler.charset, CharsetState::default());
         }
+    }
+
+    #[test]
+    fn entering_vt52_twice_keeps_the_first_saved_charset_state() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::DesignateCharset {
+            slot: CharsetSlot::G0,
+            set: CharacterSet::DecSpecialGraphics,
+        }]);
+        let ansi_state = handler.charset;
+
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52))]);
+        assert_eq!(handler.charset, CharsetState::default());
+        assert_eq!(handler.vt52_saved_charset, Some(ansi_state));
+
+        // A second entry must not replace the saved ANSI state with the
+        // VT52 one.
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52))]);
+        assert_eq!(handler.vt52_saved_charset, Some(ansi_state));
+
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi))]);
+        assert_eq!(handler.charset, ansi_state);
+        assert_eq!(handler.vt52_saved_charset, None);
+    }
+
+    #[test]
+    fn ris_discards_the_saved_vt52_charset_state() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[
+            TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G0,
+                set: CharacterSet::DecSpecialGraphics,
+            },
+            TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52)),
+            TerminalOutput::ResetDevice,
+        ]);
+        assert_eq!(handler.vt52_saved_charset, None);
+        assert_eq!(handler.charset, CharsetState::default());
+    }
+
+    #[test]
+    fn process_default_and_utf8_charset_selection_are_noops() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let before = handler.charset;
+        handler.process_outputs(&[TerminalOutput::CharsetDefault, TerminalOutput::CharsetUTF8]);
+        assert_eq!(handler.charset, before);
     }
 
     #[test]
@@ -5136,35 +5124,6 @@ mod tests {
             ApplicationEscapeKey::Reset
         );
         assert_eq!(*handler.current_format(), FormatTag::default());
-    }
-
-    // ------------------------------------------------------------------
-    // `apply_dec_special` standalone function
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn apply_dec_special_dont_replace() {
-        let data = b"hello";
-        let result = apply_dec_special(data, &DecSpecialGraphics::DontReplace);
-        assert!(matches!(result, Cow::Borrowed(_)));
-        assert_eq!(&*result, data);
-    }
-
-    #[test]
-    fn apply_dec_special_replace_box_drawing() {
-        // 'q' (0x71) maps to U+2500 HORIZONTAL LINE (─)
-        let data = b"q";
-        let result = apply_dec_special(data, &DecSpecialGraphics::Replace);
-        // The result should be UTF-8 bytes for ─ (U+2500 = 0xE2 0x94 0x80)
-        assert_ne!(&*result, data, "Should have been remapped");
-    }
-
-    #[test]
-    fn apply_dec_special_replace_non_mappable_byte() {
-        // Bytes outside 0x5F-0x7E are passed through
-        let data = b"ABC";
-        let result = apply_dec_special(data, &DecSpecialGraphics::Replace);
-        assert_eq!(&*result, data, "Non-mappable bytes should pass through");
     }
 
     // ------------------------------------------------------------------

@@ -11,8 +11,8 @@
 use conv2::ValueFrom;
 use freminal_common::{
     buffer_states::{
+        charset::CharsetState,
         format_tag::FormatTag,
-        line_draw::DecSpecialGraphics,
         modes::{decanm::Decanm, decom::Decom, dectcem::Dectcem, xtcblink::XtCBlink},
     },
     cursor::CursorVisualStyle,
@@ -23,13 +23,13 @@ use super::TerminalHandler;
 /// The handler-owned half of a DECSC save: the state xterm's `CursorSave2`
 /// records that the buffer does not own.
 ///
-/// The buffer's own `SavedCursor` holds the position and DECOM. Freminal uses
-/// a simplified single-flag charset model, so `character_replace` stands in
-/// for the G0/G1 designators and GL/GR invocation.
+/// The buffer's own `SavedCursor` holds the position and DECOM. The charset
+/// state covers the G0-G3 designators, GL, GR and a pending single shift,
+/// which the VT420 and VT520 manuals have DECSC save.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SavedDecscState {
-    /// The DEC Special Graphics remapping state at the time of the save.
-    pub(super) character_replace: DecSpecialGraphics,
+    /// The character-set state at the time of the save.
+    pub(super) charset: CharsetState,
     /// The SGR rendition (colours, weight, decorations, blink) at the time of
     /// the save. Its `url` (an open OSC 8 hyperlink) is ignored on restore.
     pub(super) format: FormatTag,
@@ -114,7 +114,7 @@ impl TerminalHandler {
     pub fn handle_save_cursor(&mut self) {
         self.buffer.save_cursor();
         *self.saved_decsc.get_mut(self.buffer.kind()) = Some(SavedDecscState {
-            character_replace: self.character_replace.clone(),
+            charset: self.charset,
             format: self.current_format.clone(),
         });
     }
@@ -126,13 +126,13 @@ impl TerminalHandler {
     /// defaults, as xterm and Ghostty do.
     pub fn handle_restore_cursor(&mut self) {
         self.buffer.restore_cursor();
-        let (character_replace, format) = self
+        let (charset, format) = self
             .saved_decsc
             .get(self.buffer.kind())
             .as_ref()
             .map_or_else(
-                || (DecSpecialGraphics::default(), FormatTag::default()),
-                |saved| (saved.character_replace.clone(), saved.format.clone()),
+                || (CharsetState::default(), FormatTag::default()),
+                |saved| (saved.charset, saved.format.clone()),
             );
         // An open OSC 8 hyperlink is not part of the DECSC state: xterm saves
         // no hyperlink, kitty keeps the active hyperlink on the screen rather
@@ -142,7 +142,7 @@ impl TerminalHandler {
             url: self.current_format.url.clone(),
             ..format
         };
-        self.character_replace = character_replace;
+        self.charset = charset;
         self.current_format = format.clone();
         self.buffer.set_format(format);
     }

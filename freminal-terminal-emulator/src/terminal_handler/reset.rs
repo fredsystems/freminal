@@ -18,9 +18,9 @@ use std::collections::HashMap;
 
 use freminal_buffer::buffer::Buffer;
 use freminal_common::buffer_states::{
+    charset::CharsetState,
     format_tag::FormatTag,
     ftcs::FtcsState,
-    line_draw::DecSpecialGraphics,
     modes::{
         allow_column_mode_switch::AllowColumnModeSwitch,
         application_escape_key::ApplicationEscapeKey, decanm::Decanm, decawm::Decawm,
@@ -63,6 +63,18 @@ fn clear_kitty_placements(
     *placement_prune_base = ScreenScoped::new(RowNumber::ZERO, RowNumber::ALTERNATE_BASE);
 }
 
+/// RIS returns the parser-facing modes to their defaults: ANSI mode (dropping
+/// the charset state saved on entering VT52) and 7-bit controls.
+const fn reset_parser_modes(
+    vt52_mode: &mut Decanm,
+    vt52_saved_charset: &mut Option<CharsetState>,
+    s8c1t_mode: &mut S8c1t,
+) {
+    *vt52_mode = Decanm::Ansi;
+    *vt52_saved_charset = None;
+    *s8c1t_mode = S8c1t::SevenBit;
+}
+
 /// The buffer half of DECSTR.  Resets origin mode, the scroll region and the
 /// left/right margins, and records "home, default charset" as the DECSC state
 /// of the **active** screen only, all without moving the live cursor.
@@ -79,7 +91,7 @@ fn soft_reset_buffer(buffer: &mut Buffer, saved_decsc: &mut ScreenScoped<Option<
     buffer.set_decom(Decom::NormalCursor);
     buffer.save_cursor();
     *saved_decsc.get_mut(buffer.kind()) = Some(SavedDecscState {
-        character_replace: DecSpecialGraphics::default(),
+        charset: CharsetState::default(),
         format: FormatTag::default(),
     });
 
@@ -115,7 +127,8 @@ impl TerminalHandler {
             show_cursor,
             cursor_visual_style,
             configured_cursor_visual_style,
-            character_replace,
+            charset,
+            vt52_saved_charset,
             saved_decsc,
             write_tx: _,               // transport: survives both
             dropped_replies: _,        // diagnostic counter: survives both
@@ -166,7 +179,7 @@ impl TerminalHandler {
         // ── Reset by both kinds ──────────────────────────────────────────
         *show_cursor = Dectcem::Show;
         *cursor_visual_style = configured_cursor_visual_style.clone();
-        *character_replace = DecSpecialGraphics::default();
+        *charset = CharsetState::default();
         *current_format = FormatTag::default();
         // The theme inside `color_state` is configuration: it survives both.
         color_state.reset_palette_all();
@@ -207,8 +220,7 @@ impl TerminalHandler {
                 *sixel_display_mode = Decsdm::ScrollingMode;
                 *private_color_registers = PrivateColorRegisters::Private;
                 *sixel_shared_palette = None;
-                *vt52_mode = Decanm::Ansi;
-                *s8c1t_mode = S8c1t::SevenBit;
+                reset_parser_modes(vt52_mode, vt52_saved_charset, s8c1t_mode);
                 pending_osc99.clear();
             }
             ResetKind::Soft => {
@@ -218,7 +230,8 @@ impl TerminalHandler {
                 soft_reset_buffer(buffer, saved_decsc);
                 // Soft keeps (today's behaviour, no table row): the REP
                 // character, FTCS state, the colour overrides, ?40, the
-                // sixel and S8C1T/DECANM state, ?7727, ?2048, OSC 99
+                // sixel and S8C1T/DECANM state (and with it the pre-VT52
+                // charset, which leaving VT52 mode restores), ?7727, ?2048, OSC 99
                 // accumulators, in-flight image transfers and placements.
             }
         }
