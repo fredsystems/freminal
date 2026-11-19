@@ -7,8 +7,12 @@ use core::fmt;
 
 use crate::{
     ansi_components::{
-        apc::ApcParser, csi::AnsiCsiParser, dcs::DcsParser, osc::AnsiOscParser,
-        standard::StandardParser, tracer::SequenceTraceable,
+        apc::ApcParser,
+        csi::{AnsiCsiParser, CsiBuffers, CsiIntroducer},
+        dcs::DcsParser,
+        osc::AnsiOscParser,
+        standard::StandardParser,
+        tracer::SequenceTraceable,
     },
     error::ParserFailures,
 };
@@ -191,6 +195,10 @@ pub struct FreminalAnsiParser {
     // Accumulates plain text between control sequences across chunk boundaries,
     // reducing per-call allocations and enabling coalesced Data emissions.
     pending_data: Vec<u8>,
+    /// Spare byte buffers lent to each CSI sub-parser for the length of one
+    /// sequence, so a CSI allocates nothing per sequence. Always empty while
+    /// lent out and between sequences.
+    csi_buffers: CsiBuffers,
     seq_trace: SequenceTracer,
     /// When set to `Decanm::Vt52`, the parser uses the reduced VT52 escape set
     /// instead of standard ANSI/VT100+ sequences.  Toggled by DECANM (`?2`).
@@ -224,9 +232,28 @@ impl FreminalAnsiParser {
         Self {
             inner: ParserInner::Empty,
             pending_data: Vec::new(),
+            csi_buffers: CsiBuffers::new(),
             seq_trace: SequenceTracer::new(),
             vt52_mode: Decanm::Ansi,
             s8c1t_mode: S8c1t::SevenBit,
+        }
+    }
+
+    /// Enter the CSI state, lending the parser's spare buffers to the new
+    /// sub-parser.
+    fn start_csi(&mut self, introducer: CsiIntroducer) {
+        self.recycle_csi_buffers();
+        let buffers = std::mem::take(&mut self.csi_buffers);
+        self.inner = ParserInner::Csi(AnsiCsiParser::from_buffers(introducer, buffers));
+    }
+
+    /// If a CSI sub-parser is active, take its buffers back (emptied, with
+    /// oversized capacity released). Call this before `self.inner` stops
+    /// being `Csi` by any route; the sub-parser's own diagnostics are gone
+    /// afterwards, so log first.
+    fn recycle_csi_buffers(&mut self) {
+        if let ParserInner::Csi(parser) = &mut self.inner {
+            self.csi_buffers = parser.take_buffers();
         }
     }
 
@@ -322,7 +349,7 @@ impl FreminalAnsiParser {
                 }
                 // CSI (0x9B) ≡ ESC [ — Control Sequence Introducer (8-bit C1)
                 0x9B => {
-                    self.inner = ParserInner::Csi(AnsiCsiParser::new_c1());
+                    self.start_csi(CsiIntroducer::EightBit);
                 }
                 // OSC (0x9D) ≡ ESC ] — Operating System Command
                 0x9D => {
@@ -370,7 +397,7 @@ impl FreminalAnsiParser {
 
         match b {
             b'[' => {
-                self.inner = ParserInner::Csi(AnsiCsiParser::new());
+                self.start_csi(CsiIntroducer::SevenBit);
             }
             b']' => {
                 self.inner = ParserInner::Osc(AnsiOscParser::new());
@@ -578,6 +605,7 @@ impl FreminalAnsiParser {
                     // ESC (0x1B) is special: it aborts the current CSI and
                     // starts a new escape sequence.
                     if b == 0x1B {
+                        self.recycle_csi_buffers();
                         self.inner = ParserInner::Escape;
                         continue;
                     }
@@ -589,6 +617,7 @@ impl FreminalAnsiParser {
 
                     match parser.ansiparser_inner_csi(b, &mut output) {
                         ParserOutcome::Finished => {
+                            self.recycle_csi_buffers();
                             self.inner = ParserInner::Empty;
                             if output.last() == Some(&TerminalOutput::Invalid) {
                                 debug!(
@@ -601,6 +630,7 @@ impl FreminalAnsiParser {
                         // CSI aborts on ESC above and never returns this;
                         // handled for completeness rather than as a panic path.
                         ParserOutcome::FinishedAtEsc => {
+                            self.recycle_csi_buffers();
                             self.restart_escape_with(b, &mut data_output, &mut output);
                         }
                         ParserOutcome::InvalidParserFailure(message) => {
@@ -609,6 +639,7 @@ impl FreminalAnsiParser {
                                 message,
                                 self.current_trace_escaped()
                             );
+                            self.recycle_csi_buffers();
                             self.inner = ParserInner::Empty;
                             output.push(TerminalOutput::Invalid);
                         }
@@ -618,6 +649,7 @@ impl FreminalAnsiParser {
                                 message,
                                 self.current_trace_escaped()
                             );
+                            self.recycle_csi_buffers();
                             self.inner = ParserInner::Empty;
                             output.push(TerminalOutput::Invalid);
                         }
@@ -2318,5 +2350,136 @@ mod tests {
         assert!(std::mem::size_of::<StandardParser>() < MAX_BYTES);
         assert!(std::mem::size_of::<DcsParser>() < MAX_BYTES);
         assert!(std::mem::size_of::<ApcParser>() < MAX_BYTES);
+    }
+
+    // ── CSI buffer reuse (147.15) ───────────────────────────────────────────
+
+    /// Assert the parser holds no stale CSI bytes and a bounded spare capacity.
+    fn assert_csi_buffers_clean(p: &FreminalAnsiParser) {
+        assert!(p.csi_buffers.is_empty(), "stale bytes: {:?}", p.csi_buffers);
+        assert!(p.csi_buffers.max_capacity() <= crate::ansi_components::csi::RETAINED_CAPACITY_MAX);
+    }
+
+    /// What a brand-new parser makes of `bytes`.
+    fn fresh_output(bytes: &[u8]) -> Vec<TerminalOutput> {
+        FreminalAnsiParser::new().push(bytes)
+    }
+
+    #[test]
+    fn csi_after_long_csi_has_no_stale_params_or_intermediates() {
+        let mut p = FreminalAnsiParser::new();
+        // A long sequence with intermediates and many parameters.
+        let mut long = b"\x1b[".to_vec();
+        for i in 0..200 {
+            long.extend_from_slice(format!("{i};").as_bytes());
+        }
+        long.extend_from_slice(b"1 q");
+        let _ = p.push(&long);
+        assert_csi_buffers_clean(&p);
+
+        let result = p.push(b"\x1b[5;10H");
+        assert_eq!(result, fresh_output(b"\x1b[5;10H"));
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(10),
+                y: Some(5)
+            }]
+        );
+        assert_csi_buffers_clean(&p);
+    }
+
+    #[test]
+    fn csi_buffer_capacity_is_bounded_after_a_huge_sequence() {
+        let mut p = FreminalAnsiParser::new();
+        let mut huge = b"\x1b[".to_vec();
+        huge.extend(std::iter::repeat_n(b'1', 200_000));
+        huge.push(b'm');
+        let _ = p.push(&huge);
+        assert_csi_buffers_clean(&p);
+
+        // A huge sequence that is aborted instead of finished.
+        let mut huge_aborted = b"\x1b[".to_vec();
+        huge_aborted.extend(std::iter::repeat_n(b'1', 200_000));
+        let _ = p.push(&huge_aborted);
+        let _ = p.push(b"\x1b");
+        assert_csi_buffers_clean(&p);
+
+        assert_eq!(p.push(b"[2J"), fresh_output(b"\x1b[2J"));
+    }
+
+    #[test]
+    fn csi_buffers_are_clean_after_every_exit_path() {
+        let follow_up = b"\x1b[3;4H";
+        let expected = fresh_output(follow_up);
+        let prefix_cases: [(&str, &[u8]); 5] = [
+            ("finished", b"\x1b[1;2;3;4m"),
+            ("invalid byte", b"\x1b[1;2\x7f"),
+            ("abort on ESC", b"\x1b[1;2;3 \x1b"),
+            ("abort on ESC into new CSI", b"\x1b[1;2;3\x1b[9"),
+            ("unhandled final", b"\x1b[1;2;3 W"),
+        ];
+        for (name, prefix) in prefix_cases {
+            let mut p = FreminalAnsiParser::new();
+            let _ = p.push(prefix);
+            // The "new CSI" case is mid-sequence; finish it harmlessly.
+            if matches!(p.inner, ParserInner::Csi(_)) {
+                let _ = p.push(b"m");
+            }
+            if matches!(p.inner, ParserInner::Escape) {
+                let _ = p.push(b"[0m");
+            }
+            assert_csi_buffers_clean(&p);
+            assert_eq!(p.push(follow_up), expected, "{name}");
+            assert_csi_buffers_clean(&p);
+        }
+    }
+
+    #[test]
+    fn csi_buffers_are_clean_after_c1_csi_and_vt52_and_ris() {
+        let follow_up = b"\x1b[3;4H";
+        let expected = fresh_output(follow_up);
+
+        // 8-bit CSI, then a sequence that restarts through ESC.
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let _ = p.push(b"\x9b1;2;3");
+        let _ = p.push(b"\x1bc"); // ESC c: RIS aborts the open CSI.
+        assert_csi_buffers_clean(&p);
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
+        assert_eq!(p.s8c1t_mode, S8c1t::SevenBit);
+        assert_eq!(p.push(follow_up), expected);
+
+        // CSI, then VT52 mode in effect: the CSI is gone, VT52 `ESC H` works.
+        let mut p = FreminalAnsiParser::new();
+        let _ = p.push(b"\x1b[?2l"); // DECANM reset: enter VT52.
+        assert_eq!(p.vt52_mode, Decanm::Vt52);
+        assert_csi_buffers_clean(&p);
+        assert_eq!(
+            p.push(b"\x1bH"),
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(1),
+                y: Some(1)
+            }]
+        );
+        let _ = p.push(b"\x1b<"); // back to ANSI
+        assert_eq!(p.push(follow_up), expected);
+        assert_csi_buffers_clean(&p);
+    }
+
+    #[test]
+    fn csi_split_across_pushes_still_reuses_buffers_correctly() {
+        let mut p = FreminalAnsiParser::new();
+        let _ = p.push(b"\x1b[1;2");
+        let _ = p.push(b";3m\x1b[5");
+        let result = p.push(b";10H");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(10),
+                y: Some(5)
+            }]
+        );
+        assert_csi_buffers_clean(&p);
     }
 }
