@@ -240,7 +240,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 137 | Keyboard Protocol Conformance               | `PLAN_VERSION_130.md` (Task 137)              | Planned       | Tasks 128, 131; arch sign-off |
 | 138 | Desktop Notifications (OSC 99) Conformance  | `PLAN_VERSION_130.md` (Task 138)              | Complete      | Tasks 129, 130                |
 | 139 | Pointer Shapes (OSC 22) Completion          | `PLAN_VERSION_130.md` (Task 139)              | Complete      | Tasks 129–131                 |
-| 140 | Underline & SGR Parity                      | `PLAN_VERSION_130.md` (Task 140)              | Planned       | None                          |
+| 140 | Underline & SGR Parity                      | `PLAN_VERSION_130.md` (Task 140)              | In progress   | None                          |
 | 141 | Misc Protocol Extensions                    | `PLAN_VERSION_130.md` (Task 141)              | Planned       | Tasks 128, 131                |
 | 142 | Unscroll (CSI + T)                          | `PLAN_VERSION_130.md` (Task 142)              | Planned       | Task 128                      |
 | 143 | DECCARA / DECSACE                           | `PLAN_VERSION_130.md` (Task 143)              | Planned       | Tasks 128, 140                |
@@ -506,7 +506,7 @@ was reverted and is tracked separately. All target stable kitty specs; v0.11.0 k
 
 **Tasks 102–105 and 126–150 (v0.13.x, kitty compliance):** see `PLAN_VERSION_130.md`. It has
 the audit, the common-work analysis, the milestone split, and the per-task stubs. Tasks
-126–132, 138, 139, 147, 148, 149 and 150 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
+126–132, 138, 139, 140, 147, 148, 149 and 150 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
 Task 128 (CSI dispatch foundation) run in parallel worktrees. The earlier breakdowns of
 Tasks 102–104 were superseded by enriched stubs after the audit found factual errors in them.
 Tasks 102 and 103 were originally planned for v0.12.0 and moved to v0.13.0 when v0.12.0 was
@@ -844,6 +844,7 @@ Update this section as tasks complete:
 | 149  | 2026-10-22 | 2026-10-22 | 149.1-149.4, C1-C17, two review passes; merged via PR #575 (`fd3c7ede`)            |
 | 150  | 2026-10-22 | 2026-10-22 | 150.1-150.10, C1-C26, two review passes; merged via PR #576 (`c359cf3d`)           |
 | 139  | 2026-11-19 | 2026-11-19 | 139.1-139.5, C1-C3, two review passes; merged via PR #586 (`9fb9d63a`)             |
+| 140  | 2026-11-19 |            | Activated and decomposed (140.1-140.5)                                             |
 
 ---
 
@@ -866,7 +867,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
 - `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0, complete, merged via PR #526)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
-- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–150; audit + 126–132, 138, 139, 147–150 decomposed)
+- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–150; audit + 126–132, 138–140, 147–150 decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
 - `Documents/PLAN_VERSION_150.md` — v0.15.0 "Remote" (stub, Task 86)
 - `Documents/PLAN_VERSION_160.md` — v0.16.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)
