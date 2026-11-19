@@ -14,6 +14,7 @@ use freminal_common::config::{
     TabTitlePolicy, ThemeMode, UnfocusedCursorStyle,
 };
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
+use freminal_common::term_name::{TermPlatform, validate_term_name};
 use freminal_common::themes;
 use std::path::PathBuf;
 
@@ -1162,6 +1163,31 @@ impl SettingsModal {
             };
         }
         ui.label("Leave empty to use the system default shell.");
+        ui.add_space(8.0);
+
+        ui.label("TERM:");
+        let mut term_text = self.draft.shell.term.clone().unwrap_or_default();
+        let response = ui.text_edit_singleline(&mut term_text);
+        if response.changed() {
+            self.draft.shell.term = if term_text.is_empty() {
+                None
+            } else {
+                Some(term_text)
+            };
+        }
+        let platform_default = TermPlatform::current().default_term();
+        ui.label(format!(
+            "Leave empty to use the default ({platform_default}). Applies to new panes only; \
+             a layout or pane `env` TERM overrides it."
+        ));
+        if let Some(term) = self.draft.shell.term.as_deref()
+            && let Err(err) = validate_term_name(term)
+        {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Invalid TERM ({err}); the default will be used."),
+            );
+        }
         ui.add_space(8.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),

@@ -11557,6 +11557,13 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   `tests/terminfo_tree.rs` pins the four members against the committed files. The
   orchestrator also marked the tree and tar `binary` in `.gitattributes` and corrected the
   `.ti` header.
+- **151.5 (done).** New `freminal-common/src/term_name.rs` (`TermPlatform`, the two defaults,
+  `validate_term_name` with a typed `TermNameError`); `ShellConfig::term: Option<String>` and
+  `ShellConfig::effective_term(platform)`, the single resolved value. An invalid value is
+  dropped at load with a warning on the existing load-warning channel (silently in
+  `from_toml_str`, which has none). `[shell]` was already a whole-section `ConfigPartial`
+  entry, so only the guard test changed. Settings Shell tab, `config_example.toml` and the
+  home-manager option are wired.
 
 ---
 

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::keybindings::{BindingMap, KeyAction, KeyCombo};
+use crate::term_name::{TermPlatform, validate_term_name};
 use crate::themes;
 use directories::BaseDirs;
 
@@ -283,6 +284,42 @@ pub struct ShellConfig {
     /// Default shell path. When `None`, the system default shell is used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+
+    /// The `TERM` value advertised to programs run in a pane. When `None`, the platform default
+    /// applies (`xterm-freminal`; `xterm-256color` on Windows). A value that fails
+    /// [`validate_term_name`] is discarded at load time with a warning. Use
+    /// [`ShellConfig::effective_term`] to read the resolved value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub term: Option<String>,
+}
+
+impl ShellConfig {
+    /// The `TERM` to advertise on `platform`: the configured value when it is valid, otherwise
+    /// the platform default.
+    #[must_use]
+    pub fn effective_term(&self, platform: TermPlatform) -> &str {
+        match self.term.as_deref() {
+            Some(term) if validate_term_name(term).is_ok() => term,
+            _ => platform.default_term(),
+        }
+    }
+
+    /// Discard an invalid configured `TERM`, pushing a warning that names the problem.
+    ///
+    /// Runs at load time so the loaded config never carries a value the spawn path would have
+    /// to second-guess.
+    fn sanitize_term(&mut self, warnings: &mut Vec<String>) {
+        let Some(term) = self.term.as_deref() else {
+            return;
+        };
+        if let Err(err) = validate_term_name(term) {
+            warnings.push(format!(
+                "config key `[shell] term` = {term:?} is invalid ({err}); \
+                 using the platform default instead"
+            ));
+            self.term = None;
+        }
+    }
 }
 
 /// ---------------------------------------------------------------------------------------------
@@ -1725,6 +1762,7 @@ impl Config {
         let partial = parse_partial(contents).map_err(|source| ConfigError::ParseStr { source })?;
         let mut cfg = Self::default();
         cfg.apply_partial(partial);
+        cfg.shell.sanitize_term(&mut Vec::new());
         cfg.validate()?;
         Ok(cfg)
     }
@@ -2064,6 +2102,7 @@ pub fn load_config_with_warnings(
         }
     }
 
+    cfg.shell.sanitize_term(&mut warnings);
     cfg.validate()?;
     Ok((cfg, warnings))
 }
@@ -3692,6 +3731,7 @@ mode = "none"
         original.cursor.blink = !Config::default().cursor.blink;
         original.theme.mode = ThemeMode::Light;
         original.shell.path = Some("/bin/dash".to_owned());
+        original.shell.term = Some("xterm-guard".to_owned());
         original.logging.write_to_file = !Config::default().logging.write_to_file;
         original.scrollback.limit = 12_345;
         original.ui.hide_menu_bar = !Config::default().ui.hide_menu_bar;
@@ -3742,6 +3782,11 @@ mode = "none"
             loaded.shell.path.as_deref(),
             Some("/bin/dash"),
             "shell section dropped"
+        );
+        assert_eq!(
+            loaded.shell.term.as_deref(),
+            Some("xterm-guard"),
+            "shell.term dropped"
         );
         assert_eq!(
             loaded.logging.write_to_file, original.logging.write_to_file,
@@ -4939,6 +4984,119 @@ path = "/tmp/my.frag"
         assert_eq!(
             serialize_config_for_diff(&cfg),
             serialize_config_for_diff(&Config::default())
+        );
+    }
+
+    #[test]
+    fn shell_term_absent_means_platform_default() {
+        let cfg = Config::from_toml_str("[shell]\npath = \"/bin/zsh\"\n")
+            .expect("config without term should load");
+        assert_eq!(cfg.shell.term, None);
+        assert_eq!(
+            cfg.shell.effective_term(TermPlatform::Other),
+            "xterm-freminal"
+        );
+        assert_eq!(
+            cfg.shell.effective_term(TermPlatform::Windows),
+            "xterm-256color"
+        );
+
+        let cfg = Config::from_toml_str("").expect("empty config should load");
+        assert_eq!(cfg.shell.term, None);
+        assert_eq!(
+            Config::default().shell.effective_term(TermPlatform::Other),
+            "xterm-freminal"
+        );
+    }
+
+    #[test]
+    fn shell_term_configured_value_wins_on_every_platform() {
+        let cfg = Config::from_toml_str("[shell]\nterm = \"screen-256color\"\n")
+            .expect("config should load");
+        assert_eq!(cfg.shell.term.as_deref(), Some("screen-256color"));
+        assert_eq!(
+            cfg.shell.effective_term(TermPlatform::Other),
+            "screen-256color"
+        );
+        assert_eq!(
+            cfg.shell.effective_term(TermPlatform::Windows),
+            "screen-256color"
+        );
+    }
+
+    #[test]
+    fn shell_term_round_trips_through_toml() {
+        let mut cfg = Config::default();
+        cfg.shell.term = Some("xterm-kitty".to_owned());
+        let toml = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(toml.contains("term = \"xterm-kitty\""), "{toml}");
+        let back: Config = toml::from_str(&toml).expect("deserialize");
+        assert_eq!(back.shell.term.as_deref(), Some("xterm-kitty"));
+
+        let default_toml = toml::to_string_pretty(&Config::default()).expect("serialize");
+        assert!(
+            !default_toml.contains("term ="),
+            "an unset term must not be serialised: {default_toml}"
+        );
+    }
+
+    #[test]
+    fn shell_term_invalid_values_fall_back_with_a_warning() {
+        let long = "a".repeat(129);
+        let cases = [
+            "",
+            "xterm freminal",
+            "xterm\\tfreminal",
+            "xterm\\u001bfreminal",
+            "xterm/freminal",
+            long.as_str(),
+        ];
+        for value in cases {
+            let toml = format!("[shell]\npath = \"/bin/zsh\"\nterm = \"{value}\"\n");
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("config.toml");
+            fs::write(&path, toml).expect("write config");
+
+            let (cfg, warnings) =
+                load_config_with_warnings(Some(&path)).expect("an invalid term must not fail load");
+            assert_eq!(cfg.shell.term, None, "{value:?} must be discarded");
+            assert_eq!(
+                cfg.shell.effective_term(TermPlatform::Other),
+                "xterm-freminal"
+            );
+            assert_eq!(cfg.shell.path.as_deref(), Some("/bin/zsh"));
+            assert_eq!(warnings.len(), 1, "{value:?}: {warnings:?}");
+            assert!(warnings[0].contains("[shell] term"), "{warnings:?}");
+        }
+    }
+
+    #[test]
+    fn shell_term_valid_value_produces_no_warning() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[shell]\nterm = \"xterm-256color\"\n").expect("write config");
+        let (cfg, warnings) = load_config_with_warnings(Some(&path)).expect("load");
+        assert_eq!(cfg.shell.term.as_deref(), Some("xterm-256color"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn shell_term_from_toml_str_discards_invalid_value() {
+        let cfg = Config::from_toml_str("[shell]\nterm = \"a/b\"\n")
+            .expect("an invalid term must not fail load");
+        assert_eq!(cfg.shell.term, None);
+    }
+
+    #[test]
+    fn effective_term_ignores_an_invalid_value_set_at_runtime() {
+        let shell = ShellConfig {
+            term: Some("bad name".to_owned()),
+            ..ShellConfig::default()
+        };
+        assert_eq!(shell.effective_term(TermPlatform::Other), "xterm-freminal");
+        assert_eq!(
+            shell.effective_term(TermPlatform::Windows),
+            "xterm-256color"
         );
     }
 

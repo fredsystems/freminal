@@ -75,9 +75,9 @@ let
           ;
       };
 
-      # Only include shell section if path is set.
+      # Only include shell section keys that are set.
       shellSection = lib.filterAttrs (_: v: v != null) {
-        inherit (s.shell) path;
+        inherit (s.shell) path term;
       };
 
       # Only include logging section keys that are set.
@@ -458,6 +458,17 @@ in
           description = ''
             Default shell to launch.
             When null, the system default shell is used.
+          '';
+        };
+        term = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = ''
+            The TERM value advertised to programs run in a pane.
+            When null, the default is "xterm-freminal" ("xterm-256color" on
+            Windows). Must be non-empty, contain no whitespace, control
+            characters or "/", and be at most 128 bytes; an invalid value is
+            ignored with a warning. A TERM in a layout or pane env overrides it.
           '';
         };
       };

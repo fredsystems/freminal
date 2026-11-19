@@ -325,6 +325,7 @@ fn config_with_custom_values_round_trips() {
 fn shell_config_default() {
     let s = ShellConfig::default();
     assert!(s.path.is_none());
+    assert!(s.term.is_none());
 }
 
 #[test]
