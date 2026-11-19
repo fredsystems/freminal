@@ -28,14 +28,19 @@ use crate::buffer_states::modes::{
     decsdm::Decsdm,
     dectcem::Dectcem,
     grapheme::GraphemeClustering,
+    hilite_mouse_tracking::HiliteMouseTracking,
     in_band_resize_mode::InBandResizeMode,
     irm::Irm,
+    kam::Kam,
     keypad::KeypadMode,
     lnm::Lnm,
+    meta_sends_eighth_bit::MetaSendsEighthBit,
     mouse::{MouseEncoding, MouseTrack},
+    numlock_overrides_keypad::NumLockOverridesKeypad,
     private_color_registers::PrivateColorRegisters,
     reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
+    srm::Srm,
     sync_updates::SynchronizedUpdates,
     theme::Theming,
     unknown::{ModeNamespace, UnknownMode},
@@ -142,6 +147,18 @@ pub enum Mode {
     ApplicationEscapeKey(ApplicationEscapeKey),
     InBandResizeMode(InBandResizeMode),
     PrivateColorRegisters(PrivateColorRegisters),
+    /// Keyboard Action Mode (ANSI 2) — recognised, not implemented.
+    Kam(Kam),
+    /// Send/Receive Mode (ANSI 12) — recognised, not implemented.
+    Srm(Srm),
+    /// Hilite mouse tracking (`?1001`) — recognised, not implemented. Not a
+    /// `MouseMode`: it never reports events or changes the tracking level.
+    HiliteMouseTracking(HiliteMouseTracking),
+    /// Meta sets the eighth bit (`?1034`) — recognised, not implemented.
+    MetaSendsEighthBit(MetaSendsEighthBit),
+    /// `NumLock` overrides the application keypad (`?1035`) — recognised, not
+    /// implemented.
+    NumLockOverridesKeypad(NumLockOverridesKeypad),
     /// DECRQM for a mode with no handler. `namespace` records whether the
     /// query carried the `?` prefix so the reply can keep the same form.
     UnknownQuery {
@@ -184,7 +201,9 @@ impl Mode {
             b"?8" => Self::Decarm(Decarm::new(&mode)),
             b"?9" => Self::mouse_mode(mode, MouseTrack::XtMsex10, 9),
             b"?12" => Self::XtCBlink(XtCBlink::new(&mode)),
+            b"2" => Self::Kam(Kam::new(&mode)),
             b"4" => Self::Irm(Irm::new(&mode)),
+            b"12" => Self::Srm(Srm::new(&mode)),
             b"20" => Self::LineFeedMode(Lnm::new(&mode)),
             b"?25" => Self::Dectem(Dectcem::new(&mode)),
             b"?40" => Self::AllowColumnModeSwitch(AllowColumnModeSwitch::new(&mode)),
@@ -195,7 +214,7 @@ impl Mode {
             b"?69" => Self::Declrmm(Declrmm::new(&mode)),
             b"?80" => Self::Decsdm(Decsdm::new(&mode)),
             b"?1000" => Self::mouse_mode(mode, MouseTrack::XtMseX11, 1000),
-            b"?1001" => Self::mouse_mode(mode, MouseTrack::XtMseHilite, 1001),
+            b"?1001" => Self::HiliteMouseTracking(HiliteMouseTracking::new(&mode)),
             b"?1002" => Self::mouse_mode(mode, MouseTrack::XtMseBtn, 1002),
             b"?1003" => Self::mouse_mode(mode, MouseTrack::XtMseAny, 1003),
             b"?1004" => Self::XtMseWin(XtMseWin::new(&mode)),
@@ -206,6 +225,8 @@ impl Mode {
             // recommended; ?1006 (SGR) is the preferred replacement.
             b"?1007" => Self::AlternateScroll(AlternateScroll::new(&mode)),
             b"?1016" => Self::mouse_encoding_mode(mode, MouseEncoding::SgrPixels, 1016),
+            b"?1034" => Self::MetaSendsEighthBit(MetaSendsEighthBit::new(&mode)),
+            b"?1035" => Self::NumLockOverridesKeypad(NumLockOverridesKeypad::new(&mode)),
             b"?1045" => Self::XtRevWrap2(XtRevWrap2::new(&mode)),
             b"?1046" => Self::AllowAltScreen(AllowAltScreen::new(&mode)),
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
@@ -293,6 +314,11 @@ impl ReportMode for Mode {
             Self::ApplicationEscapeKey(aek) => aek.report(override_mode),
             Self::InBandResizeMode(mok) => mok.report(override_mode),
             Self::PrivateColorRegisters(pcr) => pcr.report(override_mode),
+            Self::Kam(kam) => kam.report(override_mode),
+            Self::Srm(srm) => srm.report(override_mode),
+            Self::HiliteMouseTracking(hilite) => hilite.report(override_mode),
+            Self::MetaSendsEighthBit(meta) => meta.report(override_mode),
+            Self::NumLockOverridesKeypad(numlock) => numlock.report(override_mode),
             Self::Unknown(mode) => mode.report(override_mode),
             Self::UnknownQuery { namespace, params } => {
                 let digits = params.iter().map(|&x| x as char).collect::<String>();
@@ -349,6 +375,11 @@ impl fmt::Display for Mode {
             Self::ApplicationEscapeKey(aek) => write!(f, "{aek}"),
             Self::InBandResizeMode(mok) => write!(f, "{mok}"),
             Self::PrivateColorRegisters(pcr) => write!(f, "{pcr}"),
+            Self::Kam(kam) => write!(f, "{kam}"),
+            Self::Srm(srm) => write!(f, "{srm}"),
+            Self::HiliteMouseTracking(hilite) => write!(f, "{hilite}"),
+            Self::MetaSendsEighthBit(meta) => write!(f, "{meta}"),
+            Self::NumLockOverridesKeypad(numlock) => write!(f, "{numlock}"),
             Self::Unknown(params) => write!(f, "{params}"),
             Self::UnknownQuery { namespace, params } => {
                 write!(f, "{namespace} Unknown Query({params:?})")

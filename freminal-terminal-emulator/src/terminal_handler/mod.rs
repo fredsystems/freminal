@@ -35,12 +35,17 @@ use freminal_common::{
         modes::decsdm::Decsdm,
         modes::dectcem::Dectcem,
         modes::grapheme::GraphemeClustering,
+        modes::hilite_mouse_tracking::HiliteMouseTracking,
         modes::in_band_resize_mode::InBandResizeMode,
         modes::irm::Irm,
+        modes::kam::Kam,
         modes::lnm::Lnm,
+        modes::meta_sends_eighth_bit::MetaSendsEighthBit,
+        modes::numlock_overrides_keypad::NumLockOverridesKeypad,
         modes::private_color_registers::PrivateColorRegisters,
         modes::reverse_wrap_around::ReverseWrapAround,
         modes::s8c1t::S8c1t,
+        modes::srm::Srm,
         modes::xt_rev_wrap2::XtRevWrap2,
         modes::xtcblink::XtCBlink,
         modes::xtextscrn::{AltScreen47, AltScreen1047, SaveCursor1048, XtExtscrn},
@@ -2163,6 +2168,25 @@ impl TerminalHandler {
                 }
                 Mode::Irm(irm @ (Irm::Insert | Irm::Replace)) => {
                     self.insert_mode = *irm;
+                }
+
+                // ── KAM (2), SRM (12), ?1001, ?1034, ?1035 — recognised, ──
+                // not implemented. Set and reset are logged and change
+                // nothing; DECRQM answers Ps=0 (not recognised), in the
+                // ANSI form for KAM/SRM and the DEC form for the rest.
+                Mode::Kam(Kam::Query)
+                | Mode::Srm(Srm::Query)
+                | Mode::HiliteMouseTracking(HiliteMouseTracking::Query)
+                | Mode::MetaSendsEighthBit(MetaSendsEighthBit::Query)
+                | Mode::NumLockOverridesKeypad(NumLockOverridesKeypad::Query) => {
+                    self.write_csi_response(&mode.report(None));
+                }
+                Mode::Kam(_)
+                | Mode::Srm(_)
+                | Mode::HiliteMouseTracking(_)
+                | Mode::MetaSendsEighthBit(_)
+                | Mode::NumLockOverridesKeypad(_) => {
+                    tracing::debug!("Recognised but not implemented mode ignored: {mode}");
                 }
 
                 // ── Scroll Mode (DECSCLM, ?4) — recognised, never settable ──

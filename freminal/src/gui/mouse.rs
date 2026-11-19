@@ -152,7 +152,6 @@ pub const fn motion_track_wants_report(
         MouseTrack::NoTracking
         | MouseTrack::XtMsex10
         | MouseTrack::XtMseX11
-        | MouseTrack::XtMseHilite
         | MouseTrack::Query(_) => false,
     }
 }
@@ -299,21 +298,17 @@ pub fn handle_pointer_button(
             }
             None
         }
-        // XtMseHilite (?1001) is an X11-era protocol that highlights the region
-        // between press and release at the X11 window level.  Freminal does not
-        // implement X11 highlighting, so we report events the same as XtMseX11.
-        MouseTrack::XtMseX11
-        | MouseTrack::XtMseHilite
-        | MouseTrack::XtMseBtn
-        | MouseTrack::XtMseAny => Some(encode_x11_mouse_button(
-            button,
-            current_state.button_pressed,
-            current_state.modifiers,
-            &current_state.mouse_position,
-            false,
-            encoding,
-            s8c1t,
-        )),
+        MouseTrack::XtMseX11 | MouseTrack::XtMseBtn | MouseTrack::XtMseAny => {
+            Some(encode_x11_mouse_button(
+                button,
+                current_state.button_pressed,
+                current_state.modifiers,
+                &current_state.mouse_position,
+                false,
+                encoding,
+                s8c1t,
+            ))
+        }
         MouseTrack::NoTracking | MouseTrack::Query(_) => None,
     }
 }
@@ -416,16 +411,15 @@ pub fn handle_pointer_scroll(
     s8c1t: S8c1t,
 ) -> Option<Vec<u8>> {
     match mouse_track {
-        MouseTrack::XtMseX11
-        | MouseTrack::XtMseHilite
-        | MouseTrack::XtMseBtn
-        | MouseTrack::XtMseAny => encode_x11_mouse_wheel(
-            delta,
-            current_state.modifiers,
-            &current_state.mouse_position,
-            encoding,
-            s8c1t,
-        ),
+        MouseTrack::XtMseX11 | MouseTrack::XtMseBtn | MouseTrack::XtMseAny => {
+            encode_x11_mouse_wheel(
+                delta,
+                current_state.modifiers,
+                &current_state.mouse_position,
+                encoding,
+                s8c1t,
+            )
+        }
         MouseTrack::NoTracking | MouseTrack::XtMsex10 | MouseTrack::Query(_) => None,
     }
 }
@@ -1064,7 +1058,6 @@ mod tests {
             MouseTrack::NoTracking,
             MouseTrack::XtMsex10,
             MouseTrack::XtMseX11,
-            MouseTrack::XtMseHilite,
             MouseTrack::Query(1000),
         ] {
             assert!(!motion_track_wants_report(
@@ -1566,5 +1559,51 @@ mod tests {
                 mode,
             )
         });
+    }
+
+    // ── Task 147.21: `?1001` is not a mouse-tracking level ───────────────
+
+    fn pane_terminal_state() -> freminal_terminal_emulator::state::internal::TerminalState {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        freminal_terminal_emulator::state::internal::TerminalState::new(tx, None)
+    }
+
+    #[test]
+    fn hilite_tracking_set_then_click_sends_no_report() {
+        let mut terminal = pane_terminal_state();
+        terminal.handle_incoming_data(b"\x1b[?1001h");
+
+        assert_eq!(terminal.modes.mouse_tracking, MouseTrack::NoTracking);
+        let report = handle_pointer_button(
+            PointerButton::Primary,
+            &state(true),
+            &terminal.modes.mouse_tracking,
+            &terminal.modes.mouse_encoding,
+            S8c1t::SevenBit,
+        );
+        assert_eq!(report, None, "?1001h must not make a click report");
+    }
+
+    #[test]
+    fn hilite_tracking_set_leaves_the_active_tracking_mode_alone() {
+        let mut terminal = pane_terminal_state();
+        terminal.handle_incoming_data(b"\x1b[?1000h\x1b[?1001h");
+
+        assert_eq!(terminal.modes.mouse_tracking, MouseTrack::XtMseX11);
+        let report = handle_pointer_button(
+            PointerButton::Primary,
+            &state(true),
+            &terminal.modes.mouse_tracking,
+            &terminal.modes.mouse_encoding,
+            S8c1t::SevenBit,
+        );
+        assert!(report.is_some(), "?1000 tracking must still report clicks");
+
+        terminal.handle_incoming_data(b"\x1b[?1001l");
+        assert_eq!(
+            terminal.modes.mouse_tracking,
+            MouseTrack::XtMseX11,
+            "?1001l must not reset the active tracking mode"
+        );
     }
 }

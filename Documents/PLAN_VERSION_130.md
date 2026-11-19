@@ -7892,6 +7892,13 @@ Stale stub text was corrected at the same time:
   binaries interleaved 30–40 times under load; min / median): SGR-heavy −6% / −5%, SGR
   indexed −6% / −9%, plain text and `parse_and_handle_80x24` within noise. A real but modest
   gain: the mallocs removed were fast-path ones. `fuzz-replay` clean.
+- **147.21 (done).** New mode types `Kam`, `Srm`, `HiliteMouseTracking`, `MetaSendsEighthBit`,
+  `NumLockOverridesKeypad` (one file each); set/reset log at `debug!` and change nothing;
+  DECRQM answers `Ps = 0` (ANSI form for KAM/SRM, DEC form for the rest) through
+  `Mode::report`. `MouseTrack::XtMseHilite` is removed, so `?1001h` no longer enables normal
+  button reports or claims support. Changed tests: the four `test_hilite_mouse_tracking_*`
+  tests and three `?1001` dispatch tests (rewritten for "recognised, not implemented"); the
+  147.1 "unknown ANSI mode" tests query `99` now that `2` is KAM. COVERAGE/GAPS are 147.17.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

@@ -705,42 +705,46 @@ fn test_alternate_scroll_decrqm_after_set_is_enabled() {
     );
 }
 
-// ─── Hilite Mouse Tracking (?1001) ──────────────────────────────────────────
+// ─── Hilite Mouse Tracking (?1001) — recognised, not implemented ────────────
 
-/// `CSI ? 1001 h` (DECSET) sets mouse tracking to `XtMseHilite`.
+/// `CSI ? 1001 h` (DECSET) is a typed no-op: it must not become a mouse
+/// tracking level (Task 147.21).
 #[test]
-fn test_hilite_mouse_tracking_set() {
+fn test_hilite_mouse_tracking_set_does_not_change_tracking() {
     use freminal_common::buffer_states::modes::mouse::MouseTrack;
     let (mut state, rx) = make_state();
     drain(&rx);
 
     state.handle_incoming_data(b"\x1b[?1001h");
-    assert_eq!(
-        state.modes.mouse_tracking,
-        MouseTrack::XtMseHilite,
-        "DECSET ?1001 must set mouse tracking to XtMseHilite"
-    );
-}
-
-/// `CSI ? 1001 l` (DECRST) resets mouse tracking to `NoTracking`.
-#[test]
-fn test_hilite_mouse_tracking_reset() {
-    use freminal_common::buffer_states::modes::mouse::MouseTrack;
-    let (mut state, rx) = make_state();
-    drain(&rx);
-
-    state.handle_incoming_data(b"\x1b[?1001h");
-    state.handle_incoming_data(b"\x1b[?1001l");
     assert_eq!(
         state.modes.mouse_tracking,
         MouseTrack::NoTracking,
-        "DECRST ?1001 must reset mouse tracking to NoTracking"
+        "DECSET ?1001 must not set a mouse tracking level"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "DECSET ?1001 must not write anything"
     );
 }
 
-/// DECRQM `?1001` returns Ps=2 in default (no-tracking) state.
+/// `?1001h` while `?1000` tracking is active leaves `?1000` active, and
+/// `?1001l` does not clear it either.
 #[test]
-fn test_hilite_mouse_tracking_decrqm_default_is_reset() {
+fn test_hilite_mouse_tracking_leaves_active_tracking_alone() {
+    use freminal_common::buffer_states::modes::mouse::MouseTrack;
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1000h\x1b[?1001h");
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseX11);
+
+    state.handle_incoming_data(b"\x1b[?1001l");
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseX11);
+}
+
+/// DECRQM `?1001` answers Ps=0 (not recognised) in the default state.
+#[test]
+fn test_hilite_mouse_tracking_decrqm_default_is_not_recognised() {
     let (mut state, rx) = make_state();
     drain(&rx);
 
@@ -749,14 +753,14 @@ fn test_hilite_mouse_tracking_decrqm_default_is_reset() {
     let bytes = unwrap_write(msg);
     let resp = String::from_utf8(bytes).unwrap();
     assert_eq!(
-        resp, "\x1b[?1001;2$y",
-        "DECRQM ?1001 in default (no-tracking) state must return Ps=2 (reset)"
+        resp, "\x1b[?1001;0$y",
+        "DECRQM ?1001 must return Ps=0 (not recognised)"
     );
 }
 
-/// DECRQM `?1001` returns Ps=1 after DECSET.
+/// DECRQM `?1001` still answers Ps=0 after DECSET: the mode is not stored.
 #[test]
-fn test_hilite_mouse_tracking_decrqm_after_set() {
+fn test_hilite_mouse_tracking_decrqm_after_set_is_not_recognised() {
     let (mut state, rx) = make_state();
     drain(&rx);
 
@@ -768,8 +772,8 @@ fn test_hilite_mouse_tracking_decrqm_after_set() {
     let bytes = unwrap_write(msg);
     let resp = String::from_utf8(bytes).unwrap();
     assert_eq!(
-        resp, "\x1b[?1001;1$y",
-        "DECRQM ?1001 after DECSET must return Ps=1 (set)"
+        resp, "\x1b[?1001;0$y",
+        "DECRQM ?1001 after DECSET must still return Ps=0"
     );
 }
 

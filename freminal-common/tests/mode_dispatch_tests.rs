@@ -23,11 +23,16 @@ use freminal_common::buffer_states::modes::{
     decsdm::Decsdm,
     dectcem::Dectcem,
     grapheme::GraphemeClustering,
+    hilite_mouse_tracking::HiliteMouseTracking,
+    kam::Kam,
     lnm::Lnm,
+    meta_sends_eighth_bit::MetaSendsEighthBit,
     mouse::{MouseEncoding, MouseTrack},
+    numlock_overrides_keypad::NumLockOverridesKeypad,
     private_color_registers::PrivateColorRegisters,
     reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
+    srm::Srm,
     sync_updates::SynchronizedUpdates,
     theme::Theming,
     unknown::{ModeNamespace, UnknownMode},
@@ -647,29 +652,99 @@ fn decquery_q1046_returns_allow_alt_screen_query() {
     );
 }
 
-// ── ?1001 (Hilite Mouse Tracking) ─────────────────────────────────────────
+// ── ?1001 (Hilite Mouse Tracking — recognised, not implemented) ───────────
 
 #[test]
-fn decset_q1001_returns_mouse_mode_xtmsehilite() {
+fn decset_q1001_returns_hilite_mouse_tracking_enabled() {
     assert_eq!(
         dispatch(b"?1001", SetMode::DecSet),
-        Mode::MouseMode(MouseTrack::XtMseHilite)
+        Mode::HiliteMouseTracking(HiliteMouseTracking::Enabled)
     );
 }
 
 #[test]
-fn decrst_q1001_returns_mouse_mode_no_tracking() {
+fn decrst_q1001_returns_hilite_mouse_tracking_disabled() {
     assert_eq!(
         dispatch(b"?1001", SetMode::DecRst),
-        Mode::MouseMode(MouseTrack::NoTracking)
+        Mode::HiliteMouseTracking(HiliteMouseTracking::Disabled)
     );
 }
 
 #[test]
-fn decquery_q1001_returns_mouse_mode_query_1001() {
+fn decquery_q1001_returns_hilite_mouse_tracking_query() {
     assert_eq!(
         dispatch(b"?1001", SetMode::DecQuery),
-        Mode::MouseMode(MouseTrack::Query(1001))
+        Mode::HiliteMouseTracking(HiliteMouseTracking::Query)
+    );
+}
+
+#[test]
+fn q1001_is_never_a_mouse_mode() {
+    for set_mode in [SetMode::DecSet, SetMode::DecRst, SetMode::DecQuery] {
+        assert!(!matches!(dispatch(b"?1001", set_mode), Mode::MouseMode(_)));
+    }
+}
+
+// ── ANSI 2 (KAM) and 12 (SRM) — recognised, not implemented ───────────────
+
+#[test]
+fn ansi_2_dispatches_to_kam() {
+    assert_eq!(dispatch(b"2", SetMode::DecSet), Mode::Kam(Kam::Locked));
+    assert_eq!(dispatch(b"2", SetMode::DecRst), Mode::Kam(Kam::Unlocked));
+    assert_eq!(dispatch(b"2", SetMode::DecQuery), Mode::Kam(Kam::Query));
+}
+
+#[test]
+fn ansi_12_dispatches_to_srm() {
+    assert_eq!(dispatch(b"12", SetMode::DecSet), Mode::Srm(Srm::Set));
+    assert_eq!(dispatch(b"12", SetMode::DecRst), Mode::Srm(Srm::Reset));
+    assert_eq!(dispatch(b"12", SetMode::DecQuery), Mode::Srm(Srm::Query));
+}
+
+#[test]
+fn dec_private_2_and_12_stay_distinct_from_ansi_2_and_12() {
+    // `?2` is DECANM and `?12` is the cursor-blink mode, not KAM / SRM.
+    assert_eq!(
+        dispatch(b"?2", SetMode::DecSet),
+        Mode::Decanm(Decanm::new(&SetMode::DecSet))
+    );
+    assert_eq!(
+        dispatch(b"?12", SetMode::DecSet),
+        Mode::XtCBlink(XtCBlink::new(&SetMode::DecSet))
+    );
+}
+
+// ── ?1034 and ?1035 — recognised, not implemented ─────────────────────────
+
+#[test]
+fn q1034_dispatches_to_meta_sends_eighth_bit() {
+    assert_eq!(
+        dispatch(b"?1034", SetMode::DecSet),
+        Mode::MetaSendsEighthBit(MetaSendsEighthBit::Enabled)
+    );
+    assert_eq!(
+        dispatch(b"?1034", SetMode::DecRst),
+        Mode::MetaSendsEighthBit(MetaSendsEighthBit::Disabled)
+    );
+    assert_eq!(
+        dispatch(b"?1034", SetMode::DecQuery),
+        Mode::MetaSendsEighthBit(MetaSendsEighthBit::Query)
+    );
+}
+
+#[test]
+fn q1035_dispatches_to_numlock_overrides_keypad() {
+    assert_eq!(
+        dispatch(b"?1035", SetMode::DecSet),
+        Mode::NumLockOverridesKeypad(NumLockOverridesKeypad::Enabled)
+    );
+    assert_eq!(
+        dispatch(b"?1035", SetMode::DecRst),
+        Mode::NumLockOverridesKeypad(NumLockOverridesKeypad::Disabled)
+    );
+    assert_eq!(
+        dispatch(b"?1035", SetMode::DecQuery),
+        Mode::NumLockOverridesKeypad(NumLockOverridesKeypad::Query)
     );
 }
 

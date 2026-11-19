@@ -4125,11 +4125,11 @@ fn decrpm_unknown_ansi_mode_reply_has_no_question_mark() {
         &mut handler,
         TerminalOutput::Mode(Mode::UnknownQuery {
             namespace: ModeNamespace::Ansi,
-            params: b"2".to_vec(),
+            params: b"99".to_vec(),
         }),
     );
     assert_eq!(
-        resp, "\x1b[2;0$y",
+        resp, "\x1b[99;0$y",
         "ANSI unknown query must keep its namespace"
     );
 }
