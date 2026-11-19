@@ -240,7 +240,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 137 | Keyboard Protocol Conformance               | `PLAN_VERSION_130.md` (Task 137)              | Planned       | Tasks 128, 131; arch sign-off |
 | 138 | Desktop Notifications (OSC 99) Conformance  | `PLAN_VERSION_130.md` (Task 138)              | Complete      | Tasks 129, 130                |
 | 139 | Pointer Shapes (OSC 22) Completion          | `PLAN_VERSION_130.md` (Task 139)              | Complete      | Tasks 129–131                 |
-| 140 | Underline & SGR Parity                      | `PLAN_VERSION_130.md` (Task 140)              | In progress   | None                          |
+| 140 | Underline & SGR Parity                      | `PLAN_VERSION_130.md` (Task 140)              | Pending merge | None                          |
 | 141 | Misc Protocol Extensions                    | `PLAN_VERSION_130.md` (Task 141)              | Planned       | Tasks 128, 131                |
 | 142 | Unscroll (CSI + T)                          | `PLAN_VERSION_130.md` (Task 142)              | Planned       | Task 128                      |
 | 143 | DECCARA / DECSACE                           | `PLAN_VERSION_130.md` (Task 143)              | Planned       | Tasks 128, 140                |
@@ -851,7 +851,7 @@ Update this section as tasks complete:
 | 149  | 2026-10-22 | 2026-10-22 | 149.1-149.4, C1-C17, two review passes; merged via PR #575 (`fd3c7ede`)            |
 | 150  | 2026-10-22 | 2026-10-22 | 150.1-150.10, C1-C26, two review passes; merged via PR #576 (`c359cf3d`)           |
 | 139  | 2026-11-19 | 2026-11-19 | 139.1-139.5, C1-C3, two review passes; merged via PR #586 (`9fb9d63a`)             |
-| 140  | 2026-11-19 |            | Activated and decomposed (140.1-140.5)                                             |
+| 140  | 2026-11-19 |            | 140.1-140.5, C1-C5, two review passes; PR #587 pending                             |
 
 ---
 
