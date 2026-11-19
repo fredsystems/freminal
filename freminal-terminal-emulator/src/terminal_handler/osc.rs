@@ -173,7 +173,10 @@ impl TerminalHandler {
 
             // OSC 22 — set pointer (mouse cursor) shape.
             AnsiOscType::SetPointerShape(shape) => {
-                self.pointer_shape = *shape;
+                // TODO(139.3): interim mapping, replaced by typed OSC 22 operations.
+                self.pointer_shape_stack.get_mut(self.buffer.kind()).set(
+                    freminal_common::buffer_states::pointer_shape::PointerShapeEntry::Shape(*shape),
+                );
             }
 
             // OSC 9;4 — ConEmu-style progress-state update (issue #507).

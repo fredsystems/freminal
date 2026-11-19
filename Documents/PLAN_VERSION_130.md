@@ -10372,6 +10372,11 @@ Verification: markdownlint and `prettier --check` on the three files.
   name the old `From<&str>` accepted maps identically through the temporary shim. Changed
   expectation: `display_all_pointer_shape_variants` (`ew-resize`, `ns-resize`; canonical-name
   decision).
+- **139.2 (done).** `PointerShapeEntry` and `PointerShapeStack` (depth 16, kitty set / push /
+  pop semantics); the handler holds `ScreenScoped<PointerShapeStack>`, and RIS and DECSTR clear
+  both. Interim: `SetPointerShape` performs a set. `push` / `pop` carry a temporary
+  `expect(dead_code)` (`TODO(139.3)`). New RIS pointer test in `reset_table.rs`; no changed
+  expectations.
 
 ### 139 Cleanup entries
 

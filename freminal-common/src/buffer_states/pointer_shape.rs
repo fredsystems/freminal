@@ -96,6 +96,20 @@ pub enum PointerShape {
     ZoomOut,
 }
 
+/// One entry of an OSC 22 pointer-shape stack.
+///
+/// Every entry is either a requested shape or [`PointerShapeEntry::Unset`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerShapeEntry {
+    /// A shape requested by the application.
+    Shape(PointerShape),
+    /// The entry an empty set name stores (kitty's `INVALID_POINTER`).
+    ///
+    /// It shows the default shape and reports `0` to `__current__`, while the
+    /// entries below it survive: a later pop reveals them again.
+    Unset,
+}
+
 impl PointerShape {
     /// Look up a pointer shape by its OSC 22 name.
     ///

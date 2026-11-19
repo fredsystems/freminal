@@ -29,7 +29,6 @@ use freminal_common::buffer_states::{
         private_color_registers::PrivateColorRegisters, reverse_wrap_around::ReverseWrapAround,
         s8c1t::S8c1t, xt_rev_wrap2::XtRevWrap2,
     },
-    pointer_shape::PointerShape,
     progress::ProgressReport,
     row_number::RowNumber,
     unicode_placeholder::VirtualPlacement,
@@ -130,7 +129,7 @@ impl TerminalHandler {
             allow_alt_screen: _, // xterm does not reset it: survives both
             pre_deccolm_width,
             host_capabilities: _, // host facts (config + platform), not terminal state: survives both
-            pointer_shape,
+            pointer_shape_stack,
             progress,
             progress_updated_at,
             multipart_state,
@@ -165,7 +164,9 @@ impl TerminalHandler {
         *current_format = FormatTag::default();
         // The theme inside `color_state` is configuration: it survives both.
         color_state.reset_palette_all();
-        *pointer_shape = PointerShape::Default;
+        for stack in pointer_shape_stack.both_mut() {
+            stack.clear();
+        }
         *progress = ProgressReport::default();
         *progress_updated_at = None;
         *modify_other_keys_level = 0;
