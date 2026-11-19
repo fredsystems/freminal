@@ -11560,6 +11560,30 @@ it. Then an adversarial review of `main...HEAD`; every finding, nit and above, b
 with Task 147 (`config.rs`, `settings.rs`, `config_example.toml`, the home-manager module,
 COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
 
+#### 151 Cleanup entries
+
+##### 151.C1 — A stale `~/.terminfo` entry overrides the pane's own
+
+- **Surfaced:** 151.9 (2026-11-19). On the development machine the child resolved
+  `~/.terminfo/x/xterm-freminal` rather than the per-pane copy.
+- **Impact:** ncurses searches `~/.terminfo` before `TERMINFO_DIRS`, so any per-user copy wins
+  over the bundle or per-pane copy, which always matches the running freminal. Decision 4's
+  fallback (`curl … | tic -x -` without root) installs exactly such a per-user copy, so a
+  user who installed it once keeps that version after upgrading freminal.
+- **Scope of fix:** `freminal-terminal-emulator/src/io/pty.rs` (`run_terminal`, the
+  `TERMINFO`/`TERMINFO_DIRS` comment and setup), its tests, `tests/terminfo_child.rs`.
+- **Suggested approach:** first establish, from the ncurses source (`read_entry.c`,
+  `db_iterator.c`) and Apple's ncurses, the real search order and whether `TERMINFO` is
+  exclusive (the existing code comment says it is; kitty and Ghostty set `TERMINFO` to their
+  bundled directory and other `TERM` values keep working). Do not infer it. If `TERMINFO` is
+  searched first and not exclusively, set `TERMINFO` to the pane's directory (bundle or
+  per-pane) as kitty and Ghostty do, keep `TERMINFO_DIRS` for the rest, and test that
+  `xterm-freminal` resolves from the pane's directory with a stale `~/.terminfo` copy present
+  and that `TERM=xterm-256color` still resolves from the system database.
+- **Verification:** `terminfo_child.rs` without the empty-`HOME` workaround, plus a stale
+  `~/.terminfo` copy in a temp `HOME`.
+- **Scheduling:** within Task 151, after 151.10 and before the adversarial review.
+
 #### 151 Status notes
 
 - **151.1 (done).** See "151 Audit".
@@ -11628,6 +11652,14 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   path is public. `source_compiles_from_stdin_to_the_committed_entry` pipes the file through
   `tic -x -o <tmp> -` and compares the result with the committed entry (skipped, with a
   message, without `tic`). The raw `main` URL resolves once this branch merges.
+- **151.9 (done).** `tests/terminfo_child.rs` spawns `/bin/sh` through
+  `FreminalPtyInputOutput::new` with the default config and checks, inside the child, `TERM`,
+  that the first `TERMINFO_DIRS` entry holds `x/xterm-freminal`, that `infocmp -x` resolves
+  it from that directory with `Smulx` and `Sync`, and `tput colors` / `tput setaf 9`. Plan
+  correction: `tput` cannot read extended capabilities, so `Smulx` is checked through
+  `infocmp`. The child gets an empty `HOME` through the pane `env`, because ncurses searches
+  `~/.terminfo` before `TERMINFO_DIRS`; that surfaced 151.C1. 20 sequential runs and 5 under
+  load passed. Its macOS CI run settles the Apple ncurses question.
 
 ---
 
