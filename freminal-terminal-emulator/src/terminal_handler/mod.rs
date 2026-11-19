@@ -93,6 +93,7 @@ mod kitty_keyboard_stack;
 mod notify_99;
 mod osc;
 mod osc_colors;
+mod osc_pointer;
 mod pointer_shape_stack;
 mod pty_writer;
 mod reports;
@@ -3109,9 +3110,7 @@ mod tests {
     fn osc22_set_and_read_pointer_shape() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::SetPointerShape(
-            freminal_common::buffer_states::pointer_shape::PointerShape::Text,
-        ));
+        set_pointer_shape(&mut handler, PointerShape::Text);
         assert_eq!(
             handler.pointer_shape(),
             freminal_common::buffer_states::pointer_shape::PointerShape::Text,
@@ -3123,12 +3122,8 @@ mod tests {
     fn osc22_reset_via_default_shape() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::SetPointerShape(
-            freminal_common::buffer_states::pointer_shape::PointerShape::Crosshair,
-        ));
-        handler.handle_osc(&AnsiOscType::SetPointerShape(
-            freminal_common::buffer_states::pointer_shape::PointerShape::Default,
-        ));
+        set_pointer_shape(&mut handler, PointerShape::Crosshair);
+        set_pointer_shape(&mut handler, PointerShape::Default);
         assert_eq!(
             handler.pointer_shape(),
             freminal_common::buffer_states::pointer_shape::PointerShape::Default,
@@ -3140,9 +3135,7 @@ mod tests {
     fn osc22_full_reset_clears_pointer_shape() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::SetPointerShape(
-            freminal_common::buffer_states::pointer_shape::PointerShape::Pointer,
-        ));
+        set_pointer_shape(&mut handler, PointerShape::Pointer);
         handler.full_reset();
         assert_eq!(
             handler.pointer_shape(),
@@ -3155,7 +3148,11 @@ mod tests {
         handler: &mut TerminalHandler,
         shape: freminal_common::buffer_states::pointer_shape::PointerShape,
     ) {
-        handler.handle_osc(&AnsiOscType::SetPointerShape(shape));
+        use freminal_common::buffer_states::pointer_shape::{PointerShapeEntry, PointerShapeOp};
+
+        handler.handle_osc(&AnsiOscType::PointerShape(PointerShapeOp::Set(vec![
+            PointerShapeEntry::Shape(shape),
+        ])));
     }
 
     #[test]

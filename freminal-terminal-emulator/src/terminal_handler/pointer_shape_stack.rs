@@ -56,8 +56,6 @@ impl PointerShapeStack {
 
     /// Push `shape`.  At [`POINTER_SHAPE_STACK_DEPTH`] entries the oldest
     /// (bottom) entry is evicted first.
-    // TODO(139.3): drop the expectation once the parser emits push operations.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 139.3"))]
     pub fn push(&mut self, shape: PointerShape) {
         if self.entries.len() >= POINTER_SHAPE_STACK_DEPTH {
             self.entries.remove(0);
@@ -66,8 +64,6 @@ impl PointerShapeStack {
     }
 
     /// Remove the top entry.  Does nothing on an empty stack.
-    // TODO(139.3): drop the expectation once the parser emits pop operations.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 139.3"))]
     pub fn pop(&mut self) {
         self.entries.pop();
     }

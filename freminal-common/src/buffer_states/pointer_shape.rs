@@ -110,6 +110,44 @@ pub enum PointerShapeEntry {
     Unset,
 }
 
+/// The most names one OSC 22 request may carry.
+///
+/// Names past this cap are ignored, for every operation.  This is a freminal
+/// policy (kitty has no cap): it bounds the reply a single query can produce.
+pub const MAX_OSC22_NAMES: usize = 64;
+
+/// One item of an OSC 22 query (`OSC 22 ; ? name , name ST`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerShapeQuery {
+    /// A name freminal accepts for set and push.
+    Supported,
+    /// A name freminal does not accept (including an empty name).
+    Unsupported,
+    /// `__current__`: the active screen's current shape.
+    Current,
+    /// `__default__`: the shape shown when none is set.
+    Default,
+    /// `__grabbed__`: the shape shown while the application has grabbed the
+    /// mouse (mouse reporting is on).
+    Grabbed,
+}
+
+/// A parsed OSC 22 request.
+///
+/// Names that freminal does not know are already dropped by the parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PointerShapeOp {
+    /// `OSC 22 ; [=] names ST`: replace the top entry, applied in order.
+    Set(Vec<PointerShapeEntry>),
+    /// `OSC 22 ; > names ST`: push each shape in order.  Empty and unknown
+    /// names are already dropped.
+    Push(Vec<PointerShape>),
+    /// `OSC 22 ; < ST`: pop one entry.
+    Pop,
+    /// `OSC 22 ; ? names ST`: ask about names; always answered.
+    Query(Vec<PointerShapeQuery>),
+}
+
 impl PointerShape {
     /// Look up a pointer shape by its OSC 22 name.
     ///
@@ -212,206 +250,245 @@ impl fmt::Display for PointerShape {
     }
 }
 
-impl From<&str> for PointerShape {
-    /// Convert an xcursor / CSS cursor name to a `PointerShape`, trimming the
-    /// name first.  Unknown names and empty strings map to
-    /// `PointerShape::Default`.
-    ///
-    /// TODO(139.3): temporary shim so the OSC 22 parser keeps compiling.  Task
-    /// 139.3 removes it in favour of [`PointerShape::from_name`], which is
-    /// case-sensitive, does not trim, and reports unknown names.
-    fn from(name: &str) -> Self {
-        Self::from_name(name.trim()).unwrap_or_default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::PointerShape;
 
     #[test]
-    fn empty_string_maps_to_default() {
-        assert_eq!(PointerShape::from(""), PointerShape::Default);
+    fn empty_string_is_not_a_name() {
+        assert_eq!(PointerShape::from_name(""), None);
     }
 
     #[test]
-    fn whitespace_only_maps_to_default() {
-        assert_eq!(PointerShape::from("   "), PointerShape::Default);
+    fn whitespace_only_is_not_a_name() {
+        assert_eq!(PointerShape::from_name("   "), None);
     }
 
     #[test]
     fn explicit_default_names() {
-        assert_eq!(PointerShape::from("default"), PointerShape::Default);
-        assert_eq!(PointerShape::from("arrow"), PointerShape::Default);
-        assert_eq!(PointerShape::from("left_ptr"), PointerShape::Default);
+        assert_eq!(
+            PointerShape::from_name("default"),
+            Some(PointerShape::Default)
+        );
+        assert_eq!(
+            PointerShape::from_name("arrow"),
+            Some(PointerShape::Default)
+        );
+        assert_eq!(
+            PointerShape::from_name("left_ptr"),
+            Some(PointerShape::Default)
+        );
     }
 
     #[test]
     fn none_cursor() {
-        assert_eq!(PointerShape::from("none"), PointerShape::None);
+        assert_eq!(PointerShape::from_name("none"), Some(PointerShape::None));
     }
 
     #[test]
     fn text_cursor_variants() {
-        assert_eq!(PointerShape::from("text"), PointerShape::Text);
-        assert_eq!(PointerShape::from("xterm"), PointerShape::Text);
+        assert_eq!(PointerShape::from_name("text"), Some(PointerShape::Text));
+        assert_eq!(PointerShape::from_name("xterm"), Some(PointerShape::Text));
     }
 
     #[test]
     fn vertical_text() {
         assert_eq!(
-            PointerShape::from("vertical-text"),
-            PointerShape::VerticalText
+            PointerShape::from_name("vertical-text"),
+            Some(PointerShape::VerticalText)
         );
     }
 
     #[test]
     fn pointer_variants() {
-        assert_eq!(PointerShape::from("pointer"), PointerShape::Pointer);
-        assert_eq!(PointerShape::from("hand"), PointerShape::Pointer);
-        assert_eq!(PointerShape::from("hand2"), PointerShape::Pointer);
+        assert_eq!(
+            PointerShape::from_name("pointer"),
+            Some(PointerShape::Pointer)
+        );
+        assert_eq!(PointerShape::from_name("hand"), Some(PointerShape::Pointer));
+        assert_eq!(
+            PointerShape::from_name("hand2"),
+            Some(PointerShape::Pointer)
+        );
     }
 
     #[test]
     fn help_cursor() {
-        assert_eq!(PointerShape::from("help"), PointerShape::Help);
+        assert_eq!(PointerShape::from_name("help"), Some(PointerShape::Help));
     }
 
     #[test]
     fn context_menu_cursor() {
         assert_eq!(
-            PointerShape::from("context-menu"),
-            PointerShape::ContextMenu
+            PointerShape::from_name("context-menu"),
+            Some(PointerShape::ContextMenu)
         );
     }
 
     #[test]
     fn progress_variants() {
-        assert_eq!(PointerShape::from("progress"), PointerShape::Progress);
-        assert_eq!(PointerShape::from("left_ptr_watch"), PointerShape::Progress);
+        assert_eq!(
+            PointerShape::from_name("progress"),
+            Some(PointerShape::Progress)
+        );
+        assert_eq!(
+            PointerShape::from_name("left_ptr_watch"),
+            Some(PointerShape::Progress)
+        );
     }
 
     #[test]
     fn wait_variants() {
-        assert_eq!(PointerShape::from("wait"), PointerShape::Wait);
-        assert_eq!(PointerShape::from("watch"), PointerShape::Wait);
+        assert_eq!(PointerShape::from_name("wait"), Some(PointerShape::Wait));
+        assert_eq!(PointerShape::from_name("watch"), Some(PointerShape::Wait));
     }
 
     #[test]
     fn crosshair() {
-        assert_eq!(PointerShape::from("crosshair"), PointerShape::Crosshair);
+        assert_eq!(
+            PointerShape::from_name("crosshair"),
+            Some(PointerShape::Crosshair)
+        );
     }
 
     #[test]
     fn cell_cursor() {
-        assert_eq!(PointerShape::from("cell"), PointerShape::Cell);
+        assert_eq!(PointerShape::from_name("cell"), Some(PointerShape::Cell));
     }
 
     #[test]
     fn move_variants() {
-        assert_eq!(PointerShape::from("move"), PointerShape::Move);
-        assert_eq!(PointerShape::from("fleur"), PointerShape::Move);
+        assert_eq!(PointerShape::from_name("move"), Some(PointerShape::Move));
+        assert_eq!(PointerShape::from_name("fleur"), Some(PointerShape::Move));
     }
 
     #[test]
     fn no_drop() {
-        assert_eq!(PointerShape::from("no-drop"), PointerShape::NoDrop);
+        assert_eq!(
+            PointerShape::from_name("no-drop"),
+            Some(PointerShape::NoDrop)
+        );
     }
 
     #[test]
     fn not_allowed() {
-        assert_eq!(PointerShape::from("not-allowed"), PointerShape::NotAllowed);
+        assert_eq!(
+            PointerShape::from_name("not-allowed"),
+            Some(PointerShape::NotAllowed)
+        );
     }
 
     #[test]
     fn grab_and_grabbing() {
-        assert_eq!(PointerShape::from("grab"), PointerShape::Grab);
-        assert_eq!(PointerShape::from("grabbing"), PointerShape::Grabbing);
+        assert_eq!(PointerShape::from_name("grab"), Some(PointerShape::Grab));
+        assert_eq!(
+            PointerShape::from_name("grabbing"),
+            Some(PointerShape::Grabbing)
+        );
     }
 
     #[test]
     fn alias_and_copy() {
-        assert_eq!(PointerShape::from("alias"), PointerShape::Alias);
-        assert_eq!(PointerShape::from("copy"), PointerShape::Copy);
+        assert_eq!(PointerShape::from_name("alias"), Some(PointerShape::Alias));
+        assert_eq!(PointerShape::from_name("copy"), Some(PointerShape::Copy));
     }
 
     #[test]
     fn all_scroll() {
-        assert_eq!(PointerShape::from("all-scroll"), PointerShape::AllScroll);
+        assert_eq!(
+            PointerShape::from_name("all-scroll"),
+            Some(PointerShape::AllScroll)
+        );
     }
 
     #[test]
     fn horizontal_resize_variants() {
         assert_eq!(
-            PointerShape::from("col-resize"),
-            PointerShape::ResizeHorizontal
+            PointerShape::from_name("col-resize"),
+            Some(PointerShape::ResizeHorizontal)
         );
         assert_eq!(
-            PointerShape::from("ew-resize"),
-            PointerShape::ResizeHorizontal
+            PointerShape::from_name("ew-resize"),
+            Some(PointerShape::ResizeHorizontal)
         );
     }
 
     #[test]
     fn vertical_resize_variants() {
         assert_eq!(
-            PointerShape::from("row-resize"),
-            PointerShape::ResizeVertical
+            PointerShape::from_name("row-resize"),
+            Some(PointerShape::ResizeVertical)
         );
         assert_eq!(
-            PointerShape::from("ns-resize"),
-            PointerShape::ResizeVertical
+            PointerShape::from_name("ns-resize"),
+            Some(PointerShape::ResizeVertical)
         );
     }
 
     #[test]
     fn diagonal_resizes() {
-        assert_eq!(PointerShape::from("nesw-resize"), PointerShape::ResizeNeSw);
-        assert_eq!(PointerShape::from("nwse-resize"), PointerShape::ResizeNwSe);
+        assert_eq!(
+            PointerShape::from_name("nesw-resize"),
+            Some(PointerShape::ResizeNeSw)
+        );
+        assert_eq!(
+            PointerShape::from_name("nwse-resize"),
+            Some(PointerShape::ResizeNwSe)
+        );
     }
 
     #[test]
     fn directional_resizes() {
-        assert_eq!(PointerShape::from("e-resize"), PointerShape::ResizeEast);
         assert_eq!(
-            PointerShape::from("se-resize"),
-            PointerShape::ResizeSouthEast
+            PointerShape::from_name("e-resize"),
+            Some(PointerShape::ResizeEast)
         );
-        assert_eq!(PointerShape::from("s-resize"), PointerShape::ResizeSouth);
         assert_eq!(
-            PointerShape::from("sw-resize"),
-            PointerShape::ResizeSouthWest
+            PointerShape::from_name("se-resize"),
+            Some(PointerShape::ResizeSouthEast)
         );
-        assert_eq!(PointerShape::from("w-resize"), PointerShape::ResizeWest);
         assert_eq!(
-            PointerShape::from("nw-resize"),
-            PointerShape::ResizeNorthWest
+            PointerShape::from_name("s-resize"),
+            Some(PointerShape::ResizeSouth)
         );
-        assert_eq!(PointerShape::from("n-resize"), PointerShape::ResizeNorth);
         assert_eq!(
-            PointerShape::from("ne-resize"),
-            PointerShape::ResizeNorthEast
+            PointerShape::from_name("sw-resize"),
+            Some(PointerShape::ResizeSouthWest)
+        );
+        assert_eq!(
+            PointerShape::from_name("w-resize"),
+            Some(PointerShape::ResizeWest)
+        );
+        assert_eq!(
+            PointerShape::from_name("nw-resize"),
+            Some(PointerShape::ResizeNorthWest)
+        );
+        assert_eq!(
+            PointerShape::from_name("n-resize"),
+            Some(PointerShape::ResizeNorth)
+        );
+        assert_eq!(
+            PointerShape::from_name("ne-resize"),
+            Some(PointerShape::ResizeNorthEast)
         );
     }
 
     #[test]
     fn zoom_in_and_out() {
-        assert_eq!(PointerShape::from("zoom-in"), PointerShape::ZoomIn);
-        assert_eq!(PointerShape::from("zoom-out"), PointerShape::ZoomOut);
+        assert_eq!(
+            PointerShape::from_name("zoom-in"),
+            Some(PointerShape::ZoomIn)
+        );
+        assert_eq!(
+            PointerShape::from_name("zoom-out"),
+            Some(PointerShape::ZoomOut)
+        );
     }
 
     #[test]
-    fn unknown_name_maps_to_default() {
-        assert_eq!(PointerShape::from("banana"), PointerShape::Default);
-        assert_eq!(PointerShape::from("not-a-cursor"), PointerShape::Default);
-    }
-
-    #[test]
-    fn shim_trims_and_defaults_unknown() {
-        assert_eq!(PointerShape::from(" text "), PointerShape::Text);
-        assert_eq!(PointerShape::from("\tpointer"), PointerShape::Pointer);
-        assert_eq!(PointerShape::from("Pointer"), PointerShape::Default);
-        assert_eq!(PointerShape::from("TEXT"), PointerShape::Default);
+    fn unknown_name_is_not_a_name() {
+        assert_eq!(PointerShape::from_name("banana"), None);
+        assert_eq!(PointerShape::from_name("not-a-cursor"), None);
     }
 
     // ── from_name / css_name ────────────────────────────────────────
@@ -620,17 +697,6 @@ mod tests {
         assert_eq!(PointerShape::from_name("not-a-cursor"), None);
         assert_eq!(PointerShape::from_name("text,pointer"), None);
         assert_eq!(PointerShape::from_name("__current__"), None);
-    }
-
-    #[test]
-    fn shim_agrees_with_from_name_for_every_table_entry() {
-        let tables: [&[(&str, PointerShape)]; 4] =
-            [&SPEC_NAMES, &EXTRA_NAMES, &CSS_ALIASES, &KITTY_ALIASES];
-        for table in tables {
-            for (name, expected) in table {
-                assert_eq!(PointerShape::from(*name), *expected, "name {name:?}");
-            }
-        }
     }
 
     #[test]

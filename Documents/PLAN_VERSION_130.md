@@ -10377,6 +10377,16 @@ Verification: markdownlint and `prettier --check` on the three files.
   both. Interim: `SetPointerShape` performs a set. `push` / `pop` carry a temporary
   `expect(dead_code)` (`TODO(139.3)`). New RIS pointer test in `reset_table.rs`; no changed
   expectations.
+- **139.3 (done).** `AnsiOscType::PointerShape(PointerShapeOp)` replaces `SetPointerShape`;
+  the `From<&str>` shim and the 139.2 interim mapping are gone. Orchestrator scope change: the
+  body parser lives in a new `ansi_components/osc_pointer_shape.rs` (the `osc_colors.rs`
+  precedent) instead of growing `osc.rs`; the handler side is `terminal_handler/osc_pointer.rs`.
+  A set or push whose names were all unknown is emitted with an empty list (a no-op). Changed
+  expectations: the empty-name and no-`;` parser tests now expect `Set([Unset])`; the old
+  `from(&str)` tests assert through `from_name` (empty, whitespace and unknown are `None`);
+  OSC 22 left `tokenising_targets_with_non_utf8_byte_still_invalid`, since a non-UTF-8 name is
+  now an unknown name, not `Invalid`. Plan correction: an empty set on a one-entry stack
+  replaces that entry, so "empty set then pop restores the lower shape" needs two entries.
 
 ### 139 Cleanup entries
 
