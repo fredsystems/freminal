@@ -10753,6 +10753,17 @@ markdownlint and `prettier --check` on the named files.
   `insert_space_tests::ich_preserves_shifted_tags` (ICH blanks of a bold tag are now default;
   decision 3). Benchmarks (no change detected by Criterion): `erase_display` −7.8%,
   `erase_display_full` −2.7%, `erase_display_bce` +4.7%.
+- **140.3 (done).** Per-cell geometry as decided, in a new out-of-line `push_run_decorations`
+  (kept out of `build_background_instances` so the undecorated path stays tight); strikethrough
+  is clamped with the same `clamp_to_cell`. **Deviation, accepted:** a dashed cell whose two
+  dashes would touch or overlap (`w ≥ 3q`, e.g. 6–7 px cells, or under 4 px) is one solid dash;
+  at the default 8 px cell the layout is exactly the spec's. New `instanced_bg_decorated` bench
+  and corpus, baseline captured before the change. 11 geometry tests (box clamps across seven
+  metric cases, run-boundary independence, DECDWL scaling, double spacing and relocation,
+  curly continuity, dash joins, dot spacing); no existing assertion changed. Orchestrator rerun
+  on an idle machine against `before_140_3`: worst `instanced_bg_indexed` 80x24 +9.5%,
+  `instanced_bg_decorated` −17% to −20% and `instanced_bg` −20% to −27% (the baseline was taken
+  under load, so the improvements are overstated).
 
 ---
 

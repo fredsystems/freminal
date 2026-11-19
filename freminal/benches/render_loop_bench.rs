@@ -45,6 +45,7 @@ use freminal::gui::renderer::{
 use freminal::gui::shaping::ShapingCache;
 use freminal::gui::terminal::cursor_appearance::CursorAppearance;
 use freminal_common::buffer_states::cursor::StateColors;
+use freminal_common::buffer_states::fonts::{FontDecorationFlags, FontDecorations, UnderlineStyle};
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_common::buffer_states::tchar::TChar;
@@ -860,6 +861,102 @@ fn build_shaped_lines_for_background_corpus(
     (lines, fm)
 }
 
+/// Decoration state for one cell of the decorated corpus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DecoratedCell {
+    foreground: TerminalColor,
+    decorations: FontDecorationFlags,
+}
+
+/// Cells per decoration segment in the decorated corpus. The foreground colour
+/// changes at every segment boundary, so one decoration spans several runs.
+const DECORATED_SEGMENT_COLS: usize = 5;
+
+/// Decoration for the cell at `col` of `line` in the decorated corpus: every
+/// underline style, strikethrough and an undecorated stretch cycle across each
+/// line, and the foreground colour changes every segment so shaping splits
+/// the text into many runs.
+const fn decorated_cell(line: usize, col: usize) -> DecoratedCell {
+    let segment = col / DECORATED_SEGMENT_COLS;
+    let foreground = match segment % 3 {
+        0 => TerminalColor::Red,
+        1 => TerminalColor::Green,
+        _ => TerminalColor::Blue,
+    };
+    let mut decorations = FontDecorationFlags::empty();
+    match (segment / 2 + line) % 7 {
+        0 => decorations.set_underline_style(UnderlineStyle::Single),
+        1 => decorations.set_underline_style(UnderlineStyle::Double),
+        2 => decorations.set_underline_style(UnderlineStyle::Curly),
+        3 => decorations.set_underline_style(UnderlineStyle::Dotted),
+        4 => decorations.set_underline_style(UnderlineStyle::Dashed),
+        5 => decorations.insert(FontDecorations::Strikethrough),
+        _ => {}
+    }
+    DecoratedCell {
+        foreground,
+        decorations,
+    }
+}
+
+/// Build shaped lines whose text carries every underline style plus
+/// strikethrough, with foreground colour changes splitting the decorated runs.
+fn build_shaped_lines_for_decorated_size(
+    width: usize,
+    height: usize,
+) -> (
+    Vec<std::sync::Arc<freminal::gui::shaping::ShapedLine>>,
+    FontManager,
+) {
+    let (chars, _) = ligature_heavy_visible_chars(width, height);
+    let mut tags = Vec::new();
+    let mut range_start = 0;
+    let mut current = decorated_cell(0, 0);
+    let mut line = 0;
+    let mut col = 0;
+
+    let tag_for = |start: usize, end: usize, cell: DecoratedCell| FormatTag {
+        start,
+        end,
+        colors: StateColors::default().with_color(cell.foreground),
+        font_decorations: cell.decorations,
+        ..FormatTag::default()
+    };
+
+    for (char_index, character) in chars.iter().enumerate() {
+        if matches!(character, TChar::NewLine) {
+            line += 1;
+            col = 0;
+            continue;
+        }
+        let cell = decorated_cell(line, col);
+        col += 1;
+        if cell != current {
+            if range_start < char_index {
+                tags.push(tag_for(range_start, char_index, current));
+            }
+            range_start = char_index;
+            current = cell;
+        }
+    }
+    tags.push(tag_for(range_start, chars.len(), current));
+
+    let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
+    let mut cache = ShapingCache::new();
+    #[allow(clippy::cast_precision_loss)]
+    let cell_w = fm.cell_width() as f32;
+    let lines = cache.shape_visible(
+        &chars,
+        &tags,
+        width,
+        &mut fm,
+        cell_w,
+        LigatureShaping::Disabled,
+        &[],
+    );
+    (lines, fm)
+}
+
 /// Build shaped lines from a real emulator snapshot produced by feeding the
 /// indexed-colour screen payload (`ESC[38;5;Nm` / `ESC[48;5;Mm` runs).
 ///
@@ -907,6 +1004,75 @@ fn bench_bg_instances(c: &mut Criterion) {
 
     for &(width, height) in sizes {
         let (lines, fm) = build_shaped_lines_for_size(width, height);
+        let total_cells = (width * height) as u64;
+
+        group.throughput(Throughput::Elements(total_cells));
+
+        let cell_width = fm.cell_width();
+        let cell_height = fm.cell_height();
+        let ascent = fm.ascent();
+        let underline_offset = fm.underline_offset();
+        let strikeout_offset = fm.strikeout_offset();
+        let stroke_size = fm.stroke_size();
+
+        let cursor = CursorDrawParams {
+            appearance: CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+            col: 0.0,
+            row: 0.0,
+            color: cursor_f(&CATPPUCCIN_MOCHA, None),
+            x_scale: 1.0,
+            blink_on: CursorBlinkPhase::On,
+        };
+
+        group.bench_function(
+            BenchmarkId::new("build_bg_instances", format!("{width}x{height}")),
+            |b| {
+                let mut instances = Vec::new();
+                let mut deco = Vec::new();
+                b.iter(|| {
+                    let _cursor_range = build_background_instances(
+                        &BackgroundFrame {
+                            shaped_lines: &lines,
+                            cell_width,
+                            cell_height,
+                            ascent,
+                            underline_offset,
+                            strikeout_offset,
+                            stroke_size,
+                            cursor: &cursor,
+                            selection: None,
+                            selection_is_block: false,
+                            match_highlights: &[],
+                            command_block_hover_rows: None,
+                            term_width_cols: 0,
+                            colors: &colors,
+                            screen_inversion: ScreenInversion::Normal,
+                        },
+                        &mut instances,
+                        &mut deco,
+                    );
+                    std::hint::black_box(instances.len());
+                    std::hint::black_box(deco.len());
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_bg_instances_decorated — same builder as `instanced_bg`, fed by a
+// corpus dense in underline styles and strikethrough (Task 140.3 baseline).
+// ---------------------------------------------------------------
+fn bench_bg_instances_decorated(c: &mut Criterion) {
+    let colors = mocha_colors();
+    let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
+
+    let mut group = c.benchmark_group("instanced_bg_decorated");
+
+    for &(width, height) in sizes {
+        let (lines, fm) = build_shaped_lines_for_decorated_size(width, height);
         let total_cells = (width * height) as u64;
 
         group.throughput(Throughput::Elements(total_cells));
@@ -1757,6 +1923,7 @@ criterion_group!(
         bench_shaping_ligatures,
         bench_shaping_crossframe,
         bench_bg_instances,
+        bench_bg_instances_decorated,
         bench_fg_instances,
         bench_bg_instances_indexed,
         bench_fg_instances_indexed,
