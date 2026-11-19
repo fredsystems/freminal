@@ -53,7 +53,7 @@ enriched stubs again and get re-decomposed at activation.
 | 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
 | 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
 | 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Pending merge | 129, 130, 131                      |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Complete      | 129, 130, 131                      |
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
@@ -10513,6 +10513,8 @@ ACCEPTED-AS-DOCUMENTED. No BLOCKER or MAJOR. New findings, all fixed in 139.C3:
 - **N9 (nit, pre-existing):** the misplaced `pointer_shape_to_cursor_icon` doc comment in
   `widget.rs` is moved and corrected, and a test pins explicit icons for that function.
 - **N10 (nit):** verification results are recorded above.
+
+**Merged** 2026-11-19 via PR #586 (`9fb9d63a`).
 
 ---
 

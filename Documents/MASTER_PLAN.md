@@ -239,7 +239,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 136 | Graphics Placement Model & Z-Layers         | `PLAN_VERSION_130.md` (Task 136)              | Planned       | Task 135                      |
 | 137 | Keyboard Protocol Conformance               | `PLAN_VERSION_130.md` (Task 137)              | Planned       | Tasks 128, 131; arch sign-off |
 | 138 | Desktop Notifications (OSC 99) Conformance  | `PLAN_VERSION_130.md` (Task 138)              | Complete      | Tasks 129, 130                |
-| 139 | Pointer Shapes (OSC 22) Completion          | `PLAN_VERSION_130.md` (Task 139)              | Pending merge | Tasks 129–131                 |
+| 139 | Pointer Shapes (OSC 22) Completion          | `PLAN_VERSION_130.md` (Task 139)              | Complete      | Tasks 129–131                 |
 | 140 | Underline & SGR Parity                      | `PLAN_VERSION_130.md` (Task 140)              | Planned       | None                          |
 | 141 | Misc Protocol Extensions                    | `PLAN_VERSION_130.md` (Task 141)              | Planned       | Tasks 128, 131                |
 | 142 | Unscroll (CSI + T)                          | `PLAN_VERSION_130.md` (Task 142)              | Planned       | Task 128                      |
@@ -843,7 +843,7 @@ Update this section as tasks complete:
 | 148  | 2026-10-19 | 2026-10-19 | 148.1-148.27, C1-C12 except C6; merged via PR #572 (`1d9b7166`)                    |
 | 149  | 2026-10-22 | 2026-10-22 | 149.1-149.4, C1-C17, two review passes; merged via PR #575 (`fd3c7ede`)            |
 | 150  | 2026-10-22 | 2026-10-22 | 150.1-150.10, C1-C26, two review passes; merged via PR #576 (`c359cf3d`)           |
-| 139  | 2026-11-19 |            | 139.1-139.5, C1-C3, two review passes; PR #586 pending                             |
+| 139  | 2026-11-19 | 2026-11-19 | 139.1-139.5, C1-C3, two review passes; merged via PR #586 (`9fb9d63a`)             |
 
 ---
 
