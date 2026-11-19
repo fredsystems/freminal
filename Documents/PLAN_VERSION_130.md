@@ -7784,6 +7784,13 @@ Stale stub text was corrected at the same time:
 - **Verification:** a test with kitty flag 8 set that a click produces the SGR report bytes
   unchanged; existing mouse tests green.
 - **Scheduling:** within Task 147, after 147.5 (same `input.rs`).
+- **Status: Resolved (2026-11-19).** `handle_pointer_button`/`_moved`/`_scroll` return the
+  framed report bytes; `send_mouse_report` sends them as `InputEvent::Key` (the button path
+  keeps its broadcast and recording tail, minus the encoding). The alternate-screen
+  wheel-to-arrow path stays on the key encoder. Flag 2 had the same effect as flag 8 on
+  release/repeat-typed bytes; both are gone. New tests under flags 8 and 1|2|8 fail on the
+  old path. The orchestrator deleted the now-unused `raw_ascii_bytes_to_terminal_input` and
+  its re-export.
 
 ### 147 Status notes
 

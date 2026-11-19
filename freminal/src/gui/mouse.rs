@@ -3,17 +3,13 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 #![allow(clippy::module_name_repetitions)]
-use std::borrow::Cow;
-
 use conv2::ConvUtil;
 use egui::{Modifiers, PointerButton, Vec2};
 use freminal_common::buffer_states::modes::{
     mouse::{MouseEncoding, MouseTrack},
     s8c1t::S8c1t,
 };
-use freminal_terminal_emulator::input::{
-    Introducer, TerminalInput, raw_ascii_bytes_to_terminal_input,
-};
+use freminal_terminal_emulator::input::Introducer;
 
 /// Snapshot of the mouse button and position state from the previous frame.
 ///
@@ -287,7 +283,7 @@ pub fn handle_pointer_button(
     mouse_track: &MouseTrack,
     encoding: &MouseEncoding,
     s8c1t: S8c1t,
-) -> Option<Cow<'static, [TerminalInput]>> {
+) -> Option<Vec<u8>> {
     match mouse_track {
         MouseTrack::XtMsex10 => {
             if current_state.button_pressed {
@@ -380,7 +376,7 @@ pub fn handle_pointer_moved(
     mouse_track: &MouseTrack,
     encoding: &MouseEncoding,
     s8c1t: S8c1t,
-) -> Option<Cow<'static, [TerminalInput]>> {
+) -> Option<Vec<u8>> {
     // Task 124.3a: `?1016` (SgrPixels) motion must be distinguishable at
     // pixel granularity — two moves that stay within one cell must still
     // compare unequal — so the position-changed check is granularity-aware
@@ -418,7 +414,7 @@ pub fn handle_pointer_scroll(
     mouse_track: &MouseTrack,
     encoding: &MouseEncoding,
     s8c1t: S8c1t,
-) -> Option<Cow<'static, [TerminalInput]>> {
+) -> Option<Vec<u8>> {
     match mouse_track {
         MouseTrack::XtMseX11
         | MouseTrack::XtMseHilite
@@ -435,18 +431,16 @@ pub fn handle_pointer_scroll(
 }
 
 /// A CSI-introduced mouse report: the S8C1T-aware introducer, then `body`.
-fn csi_report(s8c1t: S8c1t, body: &[u8]) -> Cow<'static, [TerminalInput]> {
-    raw_ascii_bytes_to_terminal_input(&Introducer::Csi.frame(s8c1t, body))
+///
+/// Mouse reports are not key events: every function in this module returns
+/// the finished wire bytes, which the caller sends raw rather than through
+/// the key encoder (which would re-encode each byte under kitty flag 8).
+fn csi_report(s8c1t: S8c1t, body: &[u8]) -> Vec<u8> {
+    Introducer::Csi.frame(s8c1t, body)
 }
 
 /// A CSI-introduced SGR-style (`CSI <`) mouse report with a text body.
-fn csi_sgr_report(
-    s8c1t: S8c1t,
-    cb: usize,
-    x: usize,
-    y: usize,
-    final_char: char,
-) -> Cow<'static, [TerminalInput]> {
+fn csi_sgr_report(s8c1t: S8c1t, cb: usize, x: usize, y: usize, final_char: char) -> Vec<u8> {
     csi_report(s8c1t, format!("<{cb};{x};{y}{final_char}").as_bytes())
 }
 
@@ -529,7 +523,7 @@ fn encode_x11_mouse_wheel(
     pos: &FreminalMousePosition,
     encoding: &MouseEncoding,
     s8c1t: S8c1t,
-) -> Option<Cow<'static, [TerminalInput]>> {
+) -> Option<Vec<u8>> {
     // Guard: ignore events with no vertical scroll component.  The terminal
     // mouse wheel protocol only defines vertical scroll (buttons 64/65).  If
     // `delta.y` is zero we must bail out *before* encoding, because:
@@ -590,7 +584,7 @@ fn encode_x11_mouse_button(
     report_motion: bool,
     encoding: &MouseEncoding,
     s8c1t: S8c1t,
-) -> Cow<'static, [TerminalInput]> {
+) -> Vec<u8> {
     //Normal tracking mode sends an escape sequence on both button press and release. Modifier key (shift, ctrl, meta) information is also sent. It is enabled by specifying parameter 1000 to DECSET. On button press or release, xterm sends CSI M C b C x C y . The low two bits of C b encode button information: 0=MB1 pressed, 1=MB2 pressed, 2=MB3 pressed, 3=release. The next three bits encode the modifiers which were down when the button was pressed and are added together: 4=Shift, 8=Meta, 16=Control
 
     let padding = if *encoding == MouseEncoding::X11 {
@@ -644,17 +638,6 @@ mod tests {
     use super::*;
     use egui::Vec2;
 
-    // Helper: extract the raw bytes from a Cow<[TerminalInput]> for comparison.
-    fn inputs_to_bytes(inputs: &[TerminalInput]) -> Vec<u8> {
-        inputs
-            .iter()
-            .map(|i| match i {
-                TerminalInput::Ascii(b) => *b,
-                other => panic!("unexpected TerminalInput variant: {other:?}"),
-            })
-            .collect()
-    }
-
     // ── Regression tests: correct encoding is used based on separate encoding param ──
 
     #[test]
@@ -671,8 +654,8 @@ mod tests {
         )
         .expect("SGR button press should produce output");
 
-        // The whole sequence must arrive as a single Cow slice.
-        let bytes = inputs_to_bytes(result.as_ref());
+        // The whole sequence must arrive as a single contiguous report.
+        let bytes = result;
         // Expected: ESC [ < 0 ; 5 ; 3 M  (1-based, col+1=5, row+1=3)
         let expected = b"\x1b[<0;5;3M";
         assert_eq!(
@@ -697,7 +680,7 @@ mod tests {
         )
         .expect("wide-terminal SGR button press should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert!(
             s.contains(";301;"),
@@ -721,7 +704,7 @@ mod tests {
         )
         .expect("wide-terminal SGR scroll should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert!(
             s.ends_with(";261M"),
@@ -785,7 +768,7 @@ mod tests {
             result.is_some(),
             "non-zero SGR scroll should produce output"
         );
-        let bytes = inputs_to_bytes(result.unwrap().as_ref());
+        let bytes = result.unwrap();
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button code 64 for scroll-up, 1-based coords (5+1=6, 5+1=6)
         assert_eq!(s, "\x1b[<64;6;6M", "SGR scroll-up sequence wrong: {s:?}");
@@ -844,7 +827,7 @@ mod tests {
             S8c1t::SevenBit,
         )
         .expect("unit scroll-up should produce output");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button 64 = scroll up, col 3+1=4, row 7+1=8
         assert_eq!(s, "\x1b[<64;4;8M", "SGR unit scroll-up wrong: {s:?}");
@@ -863,7 +846,7 @@ mod tests {
             S8c1t::SevenBit,
         )
         .expect("unit scroll-down should produce output");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button 65 = scroll down, col 3+1=4, row 7+1=8
         assert_eq!(s, "\x1b[<65;4;8M", "SGR unit scroll-down wrong: {s:?}");
@@ -882,7 +865,7 @@ mod tests {
             S8c1t::SevenBit,
         )
         .expect("unit scroll-up X11 should produce output");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         // X11: ESC [ M <cb> <x> <y>
         // cb = 32 (padding) + 64 (button) = 96
         // x = 0 + 1 + 32 = 33
@@ -903,7 +886,7 @@ mod tests {
             S8c1t::SevenBit,
         )
         .expect("unit scroll-down X11 should produce output");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         // cb = 32 + 65 = 97 = 'a'
         assert_eq!(bytes, b"\x1b[Ma!!", "X11 unit scroll-down wrong: {bytes:?}");
     }
@@ -948,7 +931,7 @@ mod tests {
         )
         .expect("any-tracking + SGR encoding should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Must be SGR format, not X11 binary
         assert!(
@@ -979,7 +962,7 @@ mod tests {
         )
         .expect("any-tracking + SGR encoding should produce motion output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert!(
             s.starts_with("\x1b[<"),
@@ -1004,7 +987,7 @@ mod tests {
         )
         .expect("any-tracking + SGR encoding should produce scroll output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert!(
             s.starts_with("\x1b[<"),
@@ -1029,7 +1012,7 @@ mod tests {
         )
         .expect("any-tracking + X11 encoding should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         // Must be X11 binary format: ESC [ M <cb> <x> <y>
         assert_eq!(
             bytes[0..3],
@@ -1164,7 +1147,7 @@ mod tests {
         )
         .expect("SgrPixels button press should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         // 1-based pixel coords: 37+1=38, 19+1=20. Cell coords (5, 3) must
         // NOT appear.
         assert_eq!(bytes, b"\x1b[<0;38;20M");
@@ -1184,7 +1167,7 @@ mod tests {
         )
         .expect("SgrPixels scroll should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button 64 = scroll up, 1-based pixel coords 124, 46.
         assert_eq!(s, "\x1b[<64;124;46M");
@@ -1215,7 +1198,7 @@ mod tests {
         )
         .expect("SgrPixels motion should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // motion bit = 32, button 0 -> cb = 32; pixel coords 201, 101.
         assert_eq!(s, "\x1b[<32;201;101m");
@@ -1257,8 +1240,8 @@ mod tests {
         )
         .expect("second sub-cell move should report");
 
-        let first_bytes = inputs_to_bytes(first.as_ref());
-        let second_bytes = inputs_to_bytes(second.as_ref());
+        let first_bytes = first;
+        let second_bytes = second;
         assert_ne!(
             first_bytes, second_bytes,
             "two distinct sub-cell pixel positions must produce two distinct reports"
@@ -1282,7 +1265,7 @@ mod tests {
         )
         .expect("SGR button press should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let expected = b"\x1b[<0;5;3M";
         assert_eq!(
             bytes, expected,
@@ -1363,7 +1346,7 @@ mod tests {
             S8c1t::SevenBit,
         )
         .expect("first motion at the cell origin must report under XtMseAny");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // motion bit 32, button 0 (Primary, not held) -> cb=32; 1-based
         // coords (0+1, 0+1) = (1, 1). Lowercase 'm' since button not held.
@@ -1387,7 +1370,7 @@ mod tests {
             S8c1t::SevenBit,
         )
         .expect("first motion at the pixel origin must report under XtMseAny/SgrPixels");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert_eq!(s, "\x1b[<32;1;1m");
     }
@@ -1445,7 +1428,7 @@ mod tests {
 
     fn assert_mouse_rows(
         rows: &[MouseRow],
-        encode: impl Fn(&MouseEncoding, S8c1t) -> Option<Cow<'static, [TerminalInput]>>,
+        encode: impl Fn(&MouseEncoding, S8c1t) -> Option<Vec<u8>>,
     ) {
         for r in rows {
             for (mode, expected) in [
@@ -1454,12 +1437,7 @@ mod tests {
             ] {
                 let out = encode(&r.encoding, mode)
                     .unwrap_or_else(|| panic!("{}: {mode:?} produced no report", r.name));
-                assert_eq!(
-                    inputs_to_bytes(out.as_ref()),
-                    expected,
-                    "{}: {mode:?}",
-                    r.name
-                );
+                assert_eq!(out, expected, "{}: {mode:?}", r.name);
             }
         }
     }

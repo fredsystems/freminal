@@ -379,15 +379,6 @@ pub fn collect_text(text: &str) -> Cow<'static, [TerminalInput]> {
         .into()
 }
 
-/// Convert a raw byte slice into a sequence of [`TerminalInput::Ascii`] values.
-#[must_use]
-pub fn raw_ascii_bytes_to_terminal_input(buf: &[u8]) -> Cow<'static, [TerminalInput]> {
-    buf.iter()
-        .map(|c| TerminalInput::Ascii(*c))
-        .collect::<Vec<_>>()
-        .into()
-}
-
 /// Modifier key state for xterm-style modified key encoding.
 ///
 /// When any modifier is set, special keys (arrows, Home/End, function keys,

@@ -1183,10 +1183,11 @@ impl InputModes {
 /// consumer thread.
 ///
 /// Sending all bytes in a single message is critical for multi-byte
-/// sequences such as mouse reports (`\x1b[<0;5;3M`) — if each byte were
-/// sent as a separate `InputEvent` the PTY application would receive them
-/// as individual characters rather than as literal typed text, causing
-/// them to be interpreted as individual typed characters.
+/// sequences — if each byte were sent as a separate `InputEvent` the PTY
+/// application would receive them as individual characters.
+///
+/// Key events only: mouse reports are not keys and are sent raw with
+/// [`send_mouse_report`].
 ///
 /// Encode terminal inputs into raw bytes using the given mode flags.
 ///
@@ -1238,6 +1239,22 @@ pub(super) fn send_terminal_inputs(
         input_tx,
         InputEvent::Key(bytes),
         "Failed to send key input to PTY consumer"
+    );
+}
+
+/// Send an already-framed mouse report to the PTY consumer thread, raw.
+///
+/// A mouse report is not a key event, so it must not go through the key
+/// encoder: with kitty keyboard flag 8 (report all keys as escape codes)
+/// that would turn every byte of the report into its own `CSI u`.
+pub(super) fn send_mouse_report(bytes: Vec<u8>, input_tx: &Sender<InputEvent>) {
+    if bytes.is_empty() {
+        return;
+    }
+    send_or_log!(
+        input_tx,
+        InputEvent::Key(bytes),
+        "Failed to send mouse report to PTY consumer"
     );
 }
 
@@ -1925,6 +1942,10 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             _ => KeyEventMeta::PRESS,
         };
 
+        // A finished mouse report (`Event::PointerButton`), sent as-is rather
+        // than encoded as keys.
+        let mut raw_report: Option<Vec<u8>> = None;
+
         let inputs: Cow<'static, [TerminalInput]> = match event {
             // LIMITATION (egui#3653): egui unifies numpad and main-row keys.
             // Application keypad mode cannot distinguish them until egui exposes
@@ -2606,7 +2627,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     )
                 };
 
-                last_reported_mouse_pos = Some(new_mouse_position.clone());
+                last_reported_mouse_pos = Some(new_mouse_position);
 
                 // Record mouse button event.
                 if let Some(ctx) = recording_ctx {
@@ -2641,8 +2662,11 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     continue;
                 }
 
-                if let Some(response) = response {
-                    response
+                if let Some(report) = response {
+                    // Not a key event: carried to the send below as raw
+                    // bytes so the key encoder never sees it.
+                    raw_report = Some(report);
+                    Cow::Borrowed(&[])
                 } else {
                     // Mouse tracking is off (or overridden by Shift) — handle
                     // text selection and right-click context menu.
@@ -2856,12 +2880,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                                 mouse_encoding,
                                 snap.s8c1t,
                             ) {
-                                send_terminal_inputs(
-                                    response.as_ref(),
-                                    input_tx,
-                                    &InputModes::from_snapshot(snap),
-                                    &KeyEventMeta::PRESS,
-                                );
+                                send_mouse_report(response, input_tx);
                             }
                         }
                         continue;
@@ -2884,12 +2903,14 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             }
         };
 
-        if !inputs.is_empty() {
+        if raw_report.is_some() || !inputs.is_empty() {
             state_changed = true;
 
             // Capture encoded bytes for recording before sending.
-            let modes = InputModes::from_snapshot(snap);
-            let encoded = encode_terminal_inputs(&inputs, &modes, &event_meta);
+            let encoded = raw_report.unwrap_or_else(|| {
+                let modes = InputModes::from_snapshot(snap);
+                encode_terminal_inputs(&inputs, &modes, &event_meta)
+            });
 
             if !encoded.is_empty()
                 && let Err(e) = input_tx.send(InputEvent::Key(encoded.clone()))
@@ -3643,7 +3664,7 @@ mod input_modes_s8c1t_tests {
                 snap.s8c1t,
             )
             .expect("button press is reported");
-            assert_eq!(encode_for(&snap, report.as_ref()), expected);
+            assert_eq!(report, expected);
         }
     }
 
@@ -4454,6 +4475,168 @@ mod pointer_moved_frame_path_tests {
             "a pixel-granular position change under SgrPixels must be treated as \
              \"reportable\", so this arm must not fall through to extend the selection"
         );
+    }
+}
+
+/// Task 147.C1: mouse reports are not key events, so they reach the PTY as
+/// the exact report bytes whatever the kitty keyboard flags are. Under flag 8
+/// (report all keys as escape codes) the key encoder would otherwise turn each
+/// byte of a report into its own `CSI u`.
+#[cfg(test)]
+mod mouse_report_raw_path_tests {
+    use super::*;
+    use crate::gui::mouse::FreminalMousePosition;
+    use freminal_common::buffer_states::modes::mouse::MouseEncoding;
+
+    /// The flag combinations that make the key encoder rewrite plain bytes:
+    /// 8 alone, and 8 with press/repeat/release event types (1 | 2 | 8).
+    const REPORT_ALL_KEYS_FLAGS: [u32; 2] = [8, 1 | 2 | 8];
+
+    fn snapshot(encoding: MouseEncoding, kitty_flags: u32) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.mouse_tracking = MouseTrack::XtMseAny;
+        snap.mouse_encoding = encoding;
+        snap.kitty_keyboard_flags = kitty_flags;
+        snap.term_width = 80;
+        snap.term_height = 24;
+        snap.total_rows = 24;
+        snap
+    }
+
+    /// Cell (4, 2) at 8x16 px cells, aimed at its centre.
+    const CELL_4_2: egui::Pos2 = egui::pos2(36.0, 40.0);
+
+    fn drive(snap: &TerminalSnapshot, events: Vec<Event>, carry: InputCarryState) -> Vec<Vec<u8>> {
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+        let mut input_state = InputState::default();
+        input_state.raw.events.extend(events);
+        let binding_map = BindingMap::default();
+        let _ = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &binding_map,
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry,
+        });
+        input_rx
+            .try_iter()
+            .map(|event| match event {
+                InputEvent::Key(bytes) => bytes,
+                other => panic!("unexpected input event: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn fresh_carry() -> InputCarryState {
+        InputCarryState {
+            last_reported_mouse_pos: None,
+            previous_key: None,
+            scroll_amount: 0.0,
+            super_state: SuperKeyState::default(),
+        }
+    }
+
+    fn button(pressed: bool) -> Event {
+        Event::PointerButton {
+            pos: CELL_4_2,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn click_and_release_reports_are_sent_raw_under_report_all_keys() {
+        for flags in REPORT_ALL_KEYS_FLAGS {
+            for (encoding, press, release) in [
+                (
+                    MouseEncoding::Sgr,
+                    &b"\x1b[<0;5;3M"[..],
+                    &b"\x1b[<0;5;3m"[..],
+                ),
+                (MouseEncoding::X11, b"\x1b[M %#", b"\x1b[M#%#"),
+            ] {
+                let snap = snapshot(encoding.clone(), flags);
+                assert_eq!(
+                    drive(&snap, vec![button(true)], fresh_carry()),
+                    vec![press.to_vec()],
+                    "press, kitty flags {flags}, {encoding:?}"
+                );
+                assert_eq!(
+                    drive(&snap, vec![button(false)], fresh_carry()),
+                    vec![release.to_vec()],
+                    "release, kitty flags {flags}, {encoding:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wheel_reports_are_sent_raw_under_report_all_keys() {
+        for flags in REPORT_ALL_KEYS_FLAGS {
+            for (encoding, expected) in [
+                (MouseEncoding::Sgr, &b"\x1b[<64;5;3M"[..]),
+                (MouseEncoding::X11, b"\x1b[M`%#"),
+            ] {
+                let snap = snapshot(encoding.clone(), flags);
+                let carry = InputCarryState {
+                    last_reported_mouse_pos: Some(PreviousMouseState::new(
+                        PointerButton::Primary,
+                        false,
+                        FreminalMousePosition::new(4, 2),
+                        Modifiers::default(),
+                    )),
+                    ..fresh_carry()
+                };
+                let wheel = Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, 16.0),
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    modifiers: Modifiers::default(),
+                };
+                assert_eq!(
+                    drive(&snap, vec![wheel], carry),
+                    vec![expected.to_vec()],
+                    "wheel, kitty flags {flags}, {encoding:?}"
+                );
+            }
+        }
+    }
+
+    /// The alternate-screen wheel-to-arrow conversion sends cursor KEYS, so
+    /// it stays on the key encoder: it honours application cursor-key mode.
+    #[test]
+    fn alternate_scroll_arrows_still_go_through_the_key_encoder() {
+        let mut snap = snapshot(MouseEncoding::Sgr, 0);
+        snap.mouse_tracking = MouseTrack::NoTracking;
+        snap.is_alternate_screen = true;
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+
+        handle_scroll_fallback(16.0, 16.0, &snap, &input_tx, &mut view_state);
+        snap.cursor_key_app_mode = Decckm::Application;
+        handle_scroll_fallback(16.0, 16.0, &snap, &input_tx, &mut view_state);
+
+        let sent: Vec<Vec<u8>> = input_rx
+            .try_iter()
+            .map(|event| match event {
+                InputEvent::Key(bytes) => bytes,
+                other => panic!("unexpected input event: {other:?}"),
+            })
+            .collect();
+        assert_eq!(sent, vec![b"\x1b[A".to_vec(), b"\x1bOA".to_vec()]);
     }
 }
 

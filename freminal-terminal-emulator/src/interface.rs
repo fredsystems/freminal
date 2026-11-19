@@ -42,10 +42,7 @@ type VisibleImages = (
 
 // Re-export input types from `input` so existing `interface::` import paths
 // continue to compile without modification.
-pub use crate::input::{
-    KeyModifiers, TerminalInput, TerminalInputPayload, collect_text,
-    raw_ascii_bytes_to_terminal_input,
-};
+pub use crate::input::{KeyModifiers, TerminalInput, TerminalInputPayload, collect_text};
 
 use conv2::ValueFrom;
 
