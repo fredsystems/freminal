@@ -1053,7 +1053,7 @@ impl Row {
 
         self.dirty = true;
 
-        let end = (col + n).min(self.width);
+        let end = col.saturating_add(n).min(self.width);
 
         // Extend the backing storage up to `end` if needed, filling with default blanks.
         if self.cells_vec_mut().len() < end {
@@ -1248,7 +1248,7 @@ impl Row {
         // Extend deletion to cover any trailing continuations of a head at `start`.
         // `logical_end` is the unclamped end of the deleted columns; `end` is the
         // same bound clamped to the stored cells.
-        let mut logical_end = start + n;
+        let mut logical_end = start.saturating_add(n);
         let mut end = logical_end.min(cells.len());
 
         // If the cell at `start` is a wide head, make sure we include all of its

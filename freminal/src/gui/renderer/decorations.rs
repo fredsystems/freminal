@@ -15,8 +15,8 @@ use freminal_terminal_emulator::LineWidth;
 
 use super::super::{colors::internal_color_to_gl, shaping::ShapedRun};
 use super::vertex::{
-    BackgroundFrame, DECO_VERTEX_FLOATS, VERTS_PER_QUAD, effective_fg, gl_f32, gl_f32_u32,
-    push_quad, quad_vertices, run_col_count, x_scale,
+    BackgroundFrame, QUAD_FLOATS, QuadBounds, effective_fg, gl_f32, gl_f32_u32, push_quad,
+    quad_bounds, quad_vertices, run_col_count, x_scale,
 };
 
 /// Vertical layout of a row's decorations.
@@ -172,7 +172,6 @@ pub(super) fn push_run_decorations(
 /// Clip the quads appended to `deco` from index `start` onwards to the
 /// vertical range `[row_top, row_bottom)`, dropping any that end up empty.
 fn clip_quads_to_rows(deco: &mut Vec<f32>, start: usize, row_top: f32, row_bottom: f32) {
-    const QUAD_FLOATS: usize = VERTS_PER_QUAD * DECO_VERTEX_FLOATS;
     let mut read = start;
     let mut write = start;
     while let Some(Ok(quad)) = deco
@@ -180,15 +179,20 @@ fn clip_quads_to_rows(deco: &mut Vec<f32>, start: usize, row_top: f32, row_botto
         .map(<[f32; QUAD_FLOATS]>::try_from)
     {
         read += QUAD_FLOATS;
-        let [r, g, b, a] = [quad[2], quad[3], quad[4], quad[5]];
-        let (x0, x1) = (quad[0], quad[DECO_VERTEX_FLOATS]);
-        let y0 = quad[1].max(row_top);
-        let y1 = quad[2 * DECO_VERTEX_FLOATS + 1].min(row_bottom);
+        let QuadBounds {
+            x0,
+            y0,
+            x1,
+            y1,
+            color,
+        } = quad_bounds(&quad);
+        let y0 = y0.max(row_top);
+        let y1 = y1.min(row_bottom);
         if y1 <= y0 {
             continue;
         }
         if let Some(dst) = deco.get_mut(write..write + QUAD_FLOATS) {
-            dst.copy_from_slice(&quad_vertices(x0, y0, x1, y1, [r, g, b, a]));
+            dst.copy_from_slice(&quad_vertices(x0, y0, x1, y1, color));
         }
         write += QUAD_FLOATS;
     }
@@ -390,8 +394,7 @@ mod decoration_geometry {
         terminal::cursor_appearance::CursorAppearance,
     };
     use super::super::vertex::{
-        BackgroundFrame, CursorBlinkPhase, CursorDrawParams, DECO_VERTEX_FLOATS, VERTS_PER_QUAD,
-        build_background_instances,
+        BackgroundFrame, CursorBlinkPhase, CursorDrawParams, build_background_instances,
     };
     use super::*;
 
@@ -464,14 +467,17 @@ mod decoration_geometry {
     };
 
     fn decode_quads(deco: &[f32]) -> Vec<Quad> {
-        deco.as_chunks::<{ VERTS_PER_QUAD * DECO_VERTEX_FLOATS }>()
+        deco.as_chunks::<QUAD_FLOATS>()
             .0
             .iter()
-            .map(|q| Quad {
-                x0: q[0],
-                y0: q[1],
-                x1: q[DECO_VERTEX_FLOATS],
-                y1: q[2 * DECO_VERTEX_FLOATS + 1],
+            .map(|q| {
+                let b = quad_bounds(q);
+                Quad {
+                    x0: b.x0,
+                    y0: b.y0,
+                    x1: b.x1,
+                    y1: b.y1,
+                }
             })
             .collect()
     }

@@ -211,8 +211,8 @@ fn emoji(s: &str) -> TChar {
 
 #[test]
 fn dch_blanks_a_split_wide_glyph_with_the_background_only() {
-    // Plain DCH shrinks the row; the erase tag only reaches the remnant of a
-    // wide glyph whose continuation cell ends the deleted range.
+    // The cells vacated at the right edge take the erase tag, and so does the
+    // remnant of a wide glyph whose continuation cell ends the deleted range.
     let mut buf = Buffer::new(WIDTH, HEIGHT);
     buf.insert_text(&[TChar::Ascii(b'A'), TChar::Ascii(b'B'), emoji("🙂")]);
     buf.insert_text(&[TChar::Ascii(b'C')]);
@@ -417,4 +417,158 @@ fn a_default_format_keeps_erased_rows_sparse() {
     for (index, row) in buf.rows().iter().enumerate() {
         assert!(row.cells().is_empty(), "row {index} stays sparse");
     }
+}
+
+fn assert_default_blank(buf: &Buffer, row: usize, cols: std::ops::Range<usize>) {
+    for col in cols {
+        let cell = buf.rows()[row].resolve_cell(col);
+        assert_eq!(
+            cell.tag(),
+            &FormatTag::default(),
+            "row {row} col {col} stays a default blank"
+        );
+        assert_eq!(cell.tchar(), &TChar::Space, "row {row} col {col} is blank");
+    }
+}
+
+fn ascii(s: &[u8]) -> Vec<TChar> {
+    s.iter().map(|&b| TChar::Ascii(b)).collect()
+}
+
+#[test]
+fn dch_on_a_short_row_fills_the_right_edge_not_the_content_edge() {
+    let mut buf = Buffer::new(WIDTH, HEIGHT);
+    buf.insert_text(&ascii(b"ABCDE"));
+    buf.set_format(loud_tag());
+    buf.set_cursor_pos(Some(1), Some(0));
+    buf.delete_chars(2);
+
+    for (col, ch) in [(0, b'A'), (1, b'D'), (2, b'E')] {
+        assert_eq!(buf.rows()[0].resolve_cell(col).tchar(), &TChar::Ascii(ch));
+        assert_eq!(buf.rows()[0].resolve_cell(col).tag(), &FormatTag::default());
+    }
+    assert_default_blank(&buf, 0, 3..WIDTH - 2);
+    assert_erased(&buf, 0, WIDTH - 2..WIDTH);
+}
+
+#[test]
+fn dch_at_the_last_column_erases_just_that_column() {
+    let mut buf = filled(loud_tag());
+    buf.set_cursor_pos(Some(WIDTH - 1), Some(1));
+    buf.delete_chars(1);
+
+    assert_untouched(&buf, 1, 0..WIDTH - 1);
+    assert_erased(&buf, 1, WIDTH - 1..WIDTH);
+}
+
+#[test]
+fn dch_of_zero_with_a_loud_tag_changes_nothing() {
+    let mut buf = filled(loud_tag());
+    buf.set_cursor_pos(Some(2), Some(1));
+    buf.delete_chars(0);
+
+    for row in 0..HEIGHT {
+        assert_untouched(&buf, row, 0..WIDTH);
+    }
+}
+
+#[test]
+fn dch_with_a_huge_count_does_not_overflow() {
+    let mut buf = filled(loud_tag());
+    buf.set_cursor_pos(Some(2), Some(1));
+    buf.delete_chars(usize::MAX);
+
+    assert_untouched(&buf, 1, 0..2);
+    assert_erased(&buf, 1, 2..WIDTH);
+    assert_eq!(buf.rows()[1].cells().len(), WIDTH);
+    assert_untouched(&buf, 0, 0..WIDTH);
+}
+
+#[test]
+fn dch_with_a_huge_count_and_a_default_tag_truncates_the_row() {
+    let mut buf = filled(FormatTag::default());
+    buf.set_cursor_pos(Some(2), Some(1));
+    buf.delete_chars(usize::MAX);
+
+    assert_untouched(&buf, 1, 0..2);
+    assert_default_blank(&buf, 1, 2..WIDTH);
+    assert_eq!(buf.rows()[1].cells().len(), 2);
+}
+
+#[test]
+fn dch_with_a_huge_count_under_declrmm_does_not_overflow() {
+    let mut buf = filled(loud_tag());
+    buf.set_declrmm(Declrmm::Enabled);
+    buf.set_left_right_margins(3, 7); // 0-based columns [2, 6]
+    buf.set_cursor_pos(Some(2), Some(1));
+    buf.delete_chars(usize::MAX);
+
+    assert_untouched(&buf, 1, 0..2);
+    assert_erased(&buf, 1, 2..7);
+    assert_untouched(&buf, 1, 7..WIDTH);
+}
+
+#[test]
+fn ech_with_a_huge_count_does_not_overflow() {
+    let mut buf = filled(loud_tag());
+    buf.set_cursor_pos(Some(2), Some(1));
+    buf.erase_chars(usize::MAX);
+
+    assert_untouched(&buf, 1, 0..2);
+    assert_erased(&buf, 1, 2..WIDTH);
+}
+
+#[test]
+fn ich_with_a_huge_count_does_not_overflow() {
+    let mut buf = filled(loud_tag());
+    buf.set_cursor_pos(Some(2), Some(1));
+    buf.insert_spaces(usize::MAX);
+
+    assert_untouched(&buf, 1, 0..2);
+    assert_erased(&buf, 1, 2..WIDTH);
+}
+
+/// Stamp Kitty image cells across the whole of row 1 so the image-accounting
+/// paths in DCH and ECH run with a huge count.
+fn with_kitty_images_on_row_1(tag: FormatTag) -> Buffer {
+    use freminal_buffer::image_store::ImageProtocol;
+    let mut buf = filled(tag);
+    buf.place_image_at(
+        7,
+        1,
+        0,
+        WIDTH,
+        1,
+        ImageProtocol::Kitty,
+        None,
+        None,
+        0,
+        None,
+        1,
+        None,
+    );
+    buf
+}
+
+#[test]
+fn dch_with_a_huge_count_and_image_cells_does_not_overflow() {
+    let mut buf = with_kitty_images_on_row_1(loud_tag());
+    buf.set_cursor_pos(Some(3), Some(1));
+    buf.delete_chars(usize::MAX);
+    assert_erased(&buf, 1, 3..WIDTH);
+
+    let mut buf = with_kitty_images_on_row_1(loud_tag());
+    buf.set_declrmm(Declrmm::Enabled);
+    buf.set_left_right_margins(3, 7);
+    buf.set_cursor_pos(Some(3), Some(1));
+    buf.delete_chars(usize::MAX);
+    assert_erased(&buf, 1, 3..7);
+}
+
+#[test]
+fn ech_with_a_huge_count_and_image_cells_does_not_overflow() {
+    let mut buf = with_kitty_images_on_row_1(loud_tag());
+    buf.set_cursor_pos(Some(3), Some(1));
+    buf.erase_chars(usize::MAX);
+    assert_erased(&buf, 1, 3..WIDTH);
 }

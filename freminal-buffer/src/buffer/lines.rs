@@ -546,9 +546,9 @@ impl Buffer {
         // operation removes them without updating image_cell_count.
         let remaining_images = if self.image_cell_count > 0 {
             let end_col = if self.declrmm_enabled == Declrmm::Enabled {
-                (col + n).min(self.scroll_region_right + 1)
+                col.saturating_add(n).min(self.scroll_region_right + 1)
             } else {
-                col + n
+                col.saturating_add(n)
             };
             self.collect_and_clear_image_ids_in_rows(row, row + 1, Some(col), Some(end_col));
             // Count Kitty images that survived the sweep in the deleted range.

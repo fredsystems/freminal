@@ -105,3 +105,47 @@ fn reverse_video_with_a_default_background_erases_to_default_cells() {
         assert_eq!(row.resolve_cell(col).tag(), &FormatTag::default());
     }
 }
+
+#[test]
+fn dch_with_a_huge_count_does_not_panic_and_fills_the_edge() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"ABCDEFGH\x1b[1;4H");
+    state.handle_incoming_data(b"\x1b[1;4;31;44m");
+    state.handle_incoming_data(b"\x1b[18446744073709551615P");
+
+    let row = &buffer(&state).rows()[0];
+    assert_eq!(row.resolve_cell(0).into_utf8(), "A");
+    assert_eq!(row.resolve_cell(2).into_utf8(), "C");
+    for col in 3..20 {
+        let cell = row.resolve_cell(col);
+        assert_eq!(cell.tag(), &blue_background_only(), "col {col}");
+        assert_eq!(cell.into_utf8(), " ", "col {col} is blank");
+    }
+}
+
+#[test]
+fn dch_after_a_loud_sgr_fills_the_vacated_right_edge() {
+    let mut state = make_state();
+    state.handle_incoming_data(b"ABCDEFGH\x1b[1;2H");
+    state.handle_incoming_data(b"\x1b[1;4;31;44m\x1b[2P");
+
+    let row = &buffer(&state).rows()[0];
+    let text: String = (0..6)
+        .map(|col| row.resolve_cell(col).into_utf8())
+        .collect();
+    assert_eq!(text, "ADEFGH");
+    for col in 6..18 {
+        assert_eq!(
+            row.resolve_cell(col).tag(),
+            &FormatTag::default(),
+            "col {col}"
+        );
+    }
+    for col in 18..20 {
+        assert_eq!(
+            row.resolve_cell(col).tag(),
+            &blue_background_only(),
+            "col {col}"
+        );
+    }
+}

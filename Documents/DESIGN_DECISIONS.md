@@ -391,13 +391,14 @@ Which operations, and which attributes, are decided as follows (Task 140,
   reverse, blink or OSC 8 hyperlink is copied, so an open hyperlink no longer
   leaks into erased cells. The stored background is used as it is, so SGR 7 does
   not swap it (xterm's `cur_background`). With a default background the tag is
-  visually default and rows erased with it stay sparse. DCH fills the cells it
-  vacates at the right edge with the same tag (as xterm and kitty do; a default
-  background leaves the row sparse). This is the tie-break
-  the project applies when the reference terminals disagree: xterm and Ghostty
-  blank with the background only, kitty (`line_apply_cursor`) and WezTerm copy
-  the whole pen, and freminal follows xterm and Ghostty, consistent with the
-  Task 131 alternate-screen clear. It is a deliberate difference from kitty.
+  visually default and rows erased with it stay sparse. Background-only is the
+  tie-break the project applies when the reference terminals disagree: xterm
+  and Ghostty blank with the background only, kitty (`line_apply_cursor`) and
+  WezTerm copy the whole pen, and freminal follows xterm and Ghostty, consistent
+  with the Task 131 alternate-screen clear. It is a deliberate difference from
+  kitty.
+- **DCH fills the cells it vacates at the right edge** with the same tag, as
+  xterm and kitty do; with a default background the row stays sparse.
 - **Whole-row IL, DL, SU, SD and line-feed scrolling fill with default
   attributes, not BCE.** The rows they create are `Row::new` with no format
   (kitty parity), which keeps scrollback rows sparse. Earlier text here, and
@@ -416,16 +417,18 @@ Which operations, and which attributes, are decided as follows (Task 140,
 ## DECDWL / DECDHL Line Width (Task 49)
 
 DECDWL (double-width lines) and DECDHL (double-height lines) are modeled as a
-`LineWidth` enum on each row: `Single`, `Double`, `DoubleHeightTop`,
+`LineWidth` enum on each row: `Normal`, `DoubleWidth`, `DoubleHeightTop`,
 `DoubleHeightBottom`. The cursor column is **halved** when on a double-width
 line — writing at logical column 40 on a double-width line puts the cursor at
 physical column 80. Cursor horizontal movement commands (CUF, CUB) scale by
 the line's width.
 
-Only the top half of a DECDHL pair is rendered; the bottom half is blank and
-the top half is stretched vertically in the render pipeline. This matches VT100
-behavior and is the pragmatic choice — real double-height rendering would
-require two-pass text layout.
+Both halves of a DECDHL pair are rendered. Each row draws its glyphs scaled to
+twice the cell height from the pair's top (the bottom half is shifted up one
+cell), so each row shows its own half of the doubled glyph. Underline and
+strikethrough are laid out in the same doubled box and clipped to the row
+(Task 140). (Earlier text here said only the top half was rendered; that no
+longer describes the code.)
 
 ---
 

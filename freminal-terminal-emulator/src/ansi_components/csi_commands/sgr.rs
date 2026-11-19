@@ -545,6 +545,14 @@ mod tests {
     }
 
     #[test]
+    fn sgr_colon_form_21_with_a_non_numeric_subparam_is_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"21:x", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::Invalid]);
+    }
+
+    #[test]
     fn sgr_21_is_double_underline() {
         assert_eq!(
             parse_csi_sequence(b"21m"),

@@ -53,6 +53,7 @@ use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColor
 use freminal_common::config::Config;
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::CATPPUCCIN_MOCHA;
+use freminal_terminal_emulator::LineWidth;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use std::sync::Arc;
@@ -901,9 +902,15 @@ const fn decorated_cell(line: usize, col: usize) -> DecoratedCell {
 
 /// Build shaped lines whose text carries every underline style plus
 /// strikethrough, with foreground colour changes splitting the decorated runs.
+///
+/// `line_widths` is the per-line DEC line width handed to the shaping cache
+/// (`&[]` for all-normal lines). A `DoubleHeightBottom` line takes the same
+/// decorations as the `DoubleHeightTop` line above it, as a real DECDHL pair
+/// does.
 fn build_shaped_lines_for_decorated_size(
     width: usize,
     height: usize,
+    line_widths: &[LineWidth],
 ) -> (
     Vec<std::sync::Arc<freminal::gui::shaping::ShapedLine>>,
     FontManager,
@@ -929,7 +936,11 @@ fn build_shaped_lines_for_decorated_size(
             col = 0;
             continue;
         }
-        let cell = decorated_cell(line, col);
+        let decoration_line = match line_widths.get(line) {
+            Some(LineWidth::DoubleHeightBottom) => line.saturating_sub(1),
+            _ => line,
+        };
+        let cell = decorated_cell(decoration_line, col);
         col += 1;
         if cell != current {
             if range_start < char_index {
@@ -952,7 +963,7 @@ fn build_shaped_lines_for_decorated_size(
         &mut fm,
         cell_w,
         LigatureShaping::Disabled,
-        &[],
+        line_widths,
     );
     (lines, fm)
 }
@@ -1066,13 +1077,59 @@ fn bench_bg_instances(c: &mut Criterion) {
 // corpus dense in underline styles and strikethrough (Task 140.3 baseline).
 // ---------------------------------------------------------------
 fn bench_bg_instances_decorated(c: &mut Criterion) {
+    bench_bg_instances_decorated_group(c, "instanced_bg_decorated", LineWidthPattern::Normal);
+}
+
+// ---------------------------------------------------------------
+// bench_bg_instances_decorated_dhl — the decorated corpus with every row
+// pair set to DECDHL top/bottom, so the decorations are laid out in the
+// doubled box and clipped to each half (`clip_quads_to_rows`).
+// ---------------------------------------------------------------
+fn bench_bg_instances_decorated_dhl(c: &mut Criterion) {
+    bench_bg_instances_decorated_group(
+        c,
+        "instanced_bg_decorated_dhl",
+        LineWidthPattern::DoubleHeightPairs,
+    );
+}
+
+/// Per-line DEC line widths of a decorated corpus.
+#[derive(Clone, Copy)]
+enum LineWidthPattern {
+    Normal,
+    DoubleHeightPairs,
+}
+
+impl LineWidthPattern {
+    fn line_widths(self, height: usize) -> Vec<LineWidth> {
+        match self {
+            Self::Normal => Vec::new(),
+            Self::DoubleHeightPairs => (0..height)
+                .map(|line| {
+                    if line % 2 == 0 {
+                        LineWidth::DoubleHeightTop
+                    } else {
+                        LineWidth::DoubleHeightBottom
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+fn bench_bg_instances_decorated_group(
+    c: &mut Criterion,
+    group_name: &str,
+    pattern: LineWidthPattern,
+) {
     let colors = mocha_colors();
     let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
 
-    let mut group = c.benchmark_group("instanced_bg_decorated");
+    let mut group = c.benchmark_group(group_name);
 
     for &(width, height) in sizes {
-        let (lines, fm) = build_shaped_lines_for_decorated_size(width, height);
+        let (lines, fm) =
+            build_shaped_lines_for_decorated_size(width, height, &pattern.line_widths(height));
         let total_cells = (width * height) as u64;
 
         group.throughput(Throughput::Elements(total_cells));
@@ -1924,6 +1981,7 @@ criterion_group!(
         bench_shaping_crossframe,
         bench_bg_instances,
         bench_bg_instances_decorated,
+        bench_bg_instances_decorated_dhl,
         bench_fg_instances,
         bench_bg_instances_indexed,
         bench_fg_instances_indexed,

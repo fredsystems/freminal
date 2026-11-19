@@ -1601,12 +1601,40 @@ pub(super) const fn quad_vertices(
     x1: f32,
     y1: f32,
     color: [f32; 4],
-) -> [f32; VERTS_PER_QUAD * DECO_VERTEX_FLOATS] {
+) -> [f32; QUAD_FLOATS] {
     let [r, g, b, a] = color;
     [
         x0, y0, r, g, b, a, x1, y0, r, g, b, a, x0, y1, r, g, b, a, x1, y0, r, g, b, a, x1, y1, r,
         g, b, a, x0, y1, r, g, b, a,
     ]
+}
+
+/// Number of floats in one solid-colour quad (see [`quad_vertices`]).
+pub(super) const QUAD_FLOATS: usize = VERTS_PER_QUAD * DECO_VERTEX_FLOATS;
+
+/// The rectangle and colour a quad built by [`quad_vertices`] encodes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct QuadBounds {
+    pub(super) x0: f32,
+    pub(super) y0: f32,
+    pub(super) x1: f32,
+    pub(super) y1: f32,
+    pub(super) color: [f32; 4],
+}
+
+/// Decode a quad built by [`quad_vertices`] back into its rectangle and
+/// colour, reading the same layout `quad_vertices` writes: vertex 0 is
+/// `(x0, y0)`, vertex 1 is `(x1, y0)` and vertex 2 is `(x0, y1)`.
+pub(super) const fn quad_bounds(quad: &[f32; QUAD_FLOATS]) -> QuadBounds {
+    const V1: usize = DECO_VERTEX_FLOATS;
+    const V2: usize = 2 * DECO_VERTEX_FLOATS;
+    QuadBounds {
+        x0: quad[0],
+        y0: quad[1],
+        x1: quad[V1],
+        y1: quad[V2 + 1],
+        color: [quad[2], quad[3], quad[4], quad[5]],
+    }
 }
 
 /// Push a solid-color axis-aligned quad (2 triangles = 6 vertices) into `verts`.
@@ -3198,6 +3226,22 @@ mod tests {
         assert_eq!(
             quad_vertices(1.0, 2.0, 30.0, 40.0, color).as_slice(),
             pushed.as_slice()
+        );
+    }
+
+    #[test]
+    fn quad_bounds_round_trips_quad_vertices() {
+        let color = [0.25, 0.5, 0.75, 0.5];
+        let quad = quad_vertices(1.0, 2.0, 30.0, 40.0, color);
+        assert_eq!(
+            quad_bounds(&quad),
+            QuadBounds {
+                x0: 1.0,
+                y0: 2.0,
+                x1: 30.0,
+                y1: 40.0,
+                color,
+            }
         );
     }
 

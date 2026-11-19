@@ -10766,7 +10766,8 @@ markdownlint and `prettier --check` on the named files.
   curly continuity, dash joins, dot spacing); no existing assertion changed. Orchestrator rerun
   on an idle machine against `before_140_3`: worst `instanced_bg_indexed` 80x24 +9.5%,
   `instanced_bg_decorated` −17% to −20% and `instanced_bg` −20% to −27% (the baseline was taken
-  under load, so the improvements are overstated).
+  under load, so the improvements are overstated; superseded by the idle re-measure in the
+  140.C4 status).
 - **140.4 (done).** `Su`, `Smulx` and `Setulc` added to `xterm-freminal` with XTGETTCAP's strings.
   **Scope widened at execution:** `build.rs` ran `tic` without `-x`, which drops user-defined
   capabilities with only a warning, so the new entries would never have reached
@@ -10782,7 +10783,8 @@ markdownlint and `prettier --check` on the named files.
 - **140.5 (done).** COVERAGE, GAPS, `SGR.md`, the BCE section of `DESIGN_DECISIONS.md` (which
   wrongly called IL/DL BCE-aware and described the format as an erase parameter) and a new
   "Underlines and SGR parity" section in the kitty reference with five documented differences
-  from kitty (four after 140.C4: the narrow-cell dash turned out to match kitty). Orchestrator
+  from kitty (three after 140.C4 and 140.C5: the narrow-cell dash and the whole-row fills
+  turned out to match kitty). Orchestrator
   fix: COVERAGE said every dashed cell under 8 px may be solid; only 6–7 px and sub-4 px cells
   are.
 
@@ -10851,8 +10853,9 @@ this section and the repo rules. No blocker. Every finding, nit and above, is fi
   row sparse. Five new DCH tests, four of which fail on the old code (the sparse-row one pins
   existing behaviour). R3: `parse_colon_parts` saturates only the first `4:` subparameter;
   colour overflow and `4:x` stay `Invalid`. R11 is covered by
-  `sgr_normal_intensity_clears_bold_and_faint` and the CSI `22m` assertion. No DCH benchmark
-  exists.
+  `sgr_normal_intensity_clears_bold_and_faint` and the CSI `22m` assertion. R4: `erase_tag`
+  moved to `erase.rs`; R10: hoisted out of the ED row loops (EL touches one row). No DCH
+  benchmark exists.
 
 #### 140.C3 — Renderer review fixes
 
@@ -10900,6 +10903,49 @@ this section and the repo rules. No blocker. Every finding, nit and above, is fi
   `instanced_bg` −3.5% / +0.5%, `instanced_bg_decorated` −0.2% / −0.8% (no change),
   `instanced_bg_indexed` −2.1% / −0.6%, `instanced_bg_partial_dirty` +1.0% to +9.0% (worst
   `one_row` `sparse_10_percent` +9.0%). The earlier −20% figures were load artefacts.
+
+### 140 Confirmation review (2026-11-19)
+
+A second CODE-REVIEW pass over `fd0870ec..HEAD` and `main...HEAD`: R1–R13 FIXED (R3 and R12
+with a nit each, R7 not reproducible by reading), R14 PARTIAL. No blocker. New findings, all
+fixed in 140.C5:
+
+| ID  | Sev   | Finding (short)                                                         |
+| --- | ----- | ----------------------------------------------------------------------- |
+| N1  | minor | whole-row IL/DL fills match kitty, yet are listed as a difference       |
+| N2  | nit   | DCH sentence broke the BCE tie-break antecedent; ragged wrap            |
+| N3  | nit   | stale comment in the split-wide-glyph DCH test                          |
+| N4  | minor | `CSI <huge> P` overflows `col + n` / `start + n` (debug panic)          |
+| N5  | nit   | Task 151 cites a `DESIGN_DECISIONS.md` TERM section that does not exist |
+| N6  | nit   | Task 151 list misses the FREC `term` metadata and `FREC_FORMAT.md`      |
+| N7  | nit   | `DESIGN_DECISIONS.md` DECDWL/DECDHL section is stale                    |
+| N8  | nit   | R3 says `21:x` is tested; the test is `21:5` (`21:x` is `Invalid`)      |
+| N9  | nit   | DCH tests miss a short row, last column, `n = 0`, end-to-end `CSI P`    |
+| N10 | nit   | quad layout indices duplicated in `clip_quads_to_rows` and test helper  |
+| N11 | nit   | no benchmark exercises the DECDHL decoration clip                       |
+| N12 | nit   | plan notes: 140.C2 status omits R4/R10, 140.3 note lacks a pointer      |
+
+#### 140.C5 — Confirmation-review fixes
+
+- **Orchestrator (docs and plan):** N1 (three differences; the whole-row fills recorded as a
+  match), N2 and N7 (`DESIGN_DECISIONS.md`), N5 and N6 (Task 151 stub), N12 (status notes).
+  The 140.C4 commit is typed `docs:` although it also reordered `res/freminal.ti` (no
+  compiled change); recorded here rather than rewriting history.
+- **Sub-agent (code):** N4 saturating arithmetic at every count-driven DCH/ICH/ECH site, with
+  huge-count tests and a `terminal_state` fuzz reproducer; N3; N8 (`21:x` is `Invalid`, tested);
+  N9 tests; N10 a shared quad-decode helper beside `quad_vertices`; N11 a DECDHL decorated
+  bench.
+- **Status: done.** N4 used `saturating_add` at `row.rs` (`delete_cells_at`,
+  `erase_cells_at`), `lines.rs` (the DCH image sweep, both branches) and `erase.rs` (the ECH
+  image sweep, which also overflowed); the ICH paths and DECLRMM DCH already clamped `n`.
+  The huge-count tests panic on the old arithmetic; reproducer
+  `fuzz/regressions/terminal_state/dch-huge-count-overflow`, and `fuzz-replay` is clean for
+  every target. N9: for `ABCDE`, col 1, `n = 2`, the remaining text is `ADE` in columns 0–2,
+  columns 3–7 are default blanks and 8–9 take the fill (the entry above had the blank range
+  wrong). N10: `QUAD_FLOATS`, `QuadBounds` and `quad_bounds` beside `quad_vertices`, with a
+  round-trip test. N11: `instanced_bg_decorated_dhl` (every row pair DECDHL): 35.3 µs at 80x24
+  and 194.5 µs at 200x50, against 27.6 µs and 152.2 µs for the same corpus without DECDHL
+  (first measurement, no earlier baseline exists). Tests: 9748.
 
 ---
 
@@ -11164,7 +11210,8 @@ under "Task 140 — Underline & SGR Parity" above.
 capabilities from terminfo, not only from XTGETTCAP. Children get `TERM=xterm-freminal` by
 default, the bundled entry is accurate, and hosts that do not install freminal can be given
 the entry. Created 2026-11-19 from 140.C1; reverses the recorded "TERM Strategy" decision
-(`io/pty.rs`, `DESIGN_DECISIONS.md`) that Task 92 was dropped under.
+(the comment in `io/pty.rs` and the Task 12 and Task 92 notes in `MASTER_PLAN.md`) that Task 92
+was dropped under.
 
 **Findings (140.C1).**
 
@@ -11205,7 +11252,8 @@ the entry. Created 2026-11-19 from 140.C1; reverses the recorded "TERM Strategy"
   the per-PTY `TERMINFO_DIRS` extraction so it resolves even where nothing is installed.
 - **One table of truth** shared by the `.ti` and `lookup_termcap`, or a test that compares them
   for every capability (140.4's test covers three).
-- Docs: the `DESIGN_DECISIONS.md` TERM strategy (reversed, with reasons), the ssh consequence
+- Docs: a new `DESIGN_DECISIONS.md` section for the TERM strategy (none exists today; the
+  reversed decision, with reasons), the ssh consequence
   and how to fix it (install the terminfo package,
   `infocmp -x xterm-freminal | ssh host tic -x -`, or set `[shell] term`), COVERAGE/GAPS,
   README.
@@ -11233,6 +11281,9 @@ the entry. Created 2026-11-19 from 140.C1; reverses the recorded "TERM Strategy"
     the `cmd.env("TERM", "xterm-256color")` block, ~605-633) and
     `freminal-terminal-emulator/src/terminal_handler/dcs.rs` (the `TN` comment, "Freminal
     deliberately presents as `xterm-256color`", and the Task 76.6 regression test near it).
+  - FREC recording metadata hard-codes the value: `freminal/src/main.rs` (`term:
+    "xterm-256color"`) and `freminal/src/gui/recording.rs` (the same), plus the example in
+    `Documents/FREC_FORMAT.md`; record the pane's actual `TERM` instead.
 
 **Open questions.**
 

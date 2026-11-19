@@ -69,11 +69,16 @@ impl Buffer {
         };
 
         // Sweep image cells that are about to be erased (non-Kitty images).
-        self.collect_and_clear_image_ids_in_rows(row, row + 1, Some(col), Some(col + effective_n));
+        self.collect_and_clear_image_ids_in_rows(
+            row,
+            row + 1,
+            Some(col),
+            Some(col.saturating_add(effective_n)),
+        );
 
         // Count remaining image cells (e.g. Kitty) in the range being erased.
         let remaining = if self.image_cell_count > 0 {
-            self.rows[row].count_image_cells_in_range(col, col + effective_n)
+            self.rows[row].count_image_cells_in_range(col, col.saturating_add(effective_n))
         } else {
             0
         };

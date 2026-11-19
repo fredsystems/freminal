@@ -8,8 +8,8 @@ erase tag, the terminfo entry, freminal's deliberate differences from kitty and
 where it is implemented. The roadmap row now reads "Filled in; conformant". No
 other section changed. Review fixes: DCH fills its vacated right edge, an
 overflowing `4:N` is dashed, DECDHL rows lay decorations out in the doubled box,
-and the narrow-cell solid dash is recorded as matching kitty (four differences
-remain).
+and the narrow-cell solid dash and the whole-row IL/DL/SU/SD fills are recorded as
+matching kitty (three differences remain).
 
 Earlier: 2026-11-19 — Task 139 — new "Pointer shapes (OSC 22)" section,
 distilled from the kitty 0.49.2 page and written to the shipped behaviour, which
@@ -1082,9 +1082,9 @@ so neither needed a storage change.
    underline and so on) into erased cells; freminal copies only the background
    colour, as xterm and Ghostty do. A reverse-video erase does not swap the stored
    background.
-4. **Whole-row IL, DL, SU and SD do not take the background.** They fill with
-   default attributes, which matches kitty; they are listed because freminal's own
-   earlier documentation claimed they were BCE-aware.
+
+Not a difference: whole-row IL, DL, SU and SD fill with default attributes, as kitty does.
+freminal's own earlier documentation wrongly called them BCE-aware.
 
 ### freminal current-state: underlines and SGR parity — conformant (Task 140, v0.13.0)
 

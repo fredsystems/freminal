@@ -12,10 +12,10 @@ resolved too: erased cells take only the current background colour. See
 recorded in `KITTY_PROTOCOL_REFERENCE.md`: an empty `4:;` is a single underline
 (kitty gives no underline there, an artefact of its parser, and freminal's SGR
 tokeniser cannot tell it from a trailing `4:`); erase is background-only (kitty
-copies the whole pen); whole-row IL/DL/SU/SD and line-feed fills use default
-attributes (as kitty does); and double-underline lines use the font stroke
-thickness rather than kitty's 1 px rows. A dashed cell too narrow to hold two
-separate dashes is drawn solid, which matches kitty. Nothing in underlines or SGR
+copies the whole pen); and double-underline lines use the font stroke thickness
+rather than kitty's 1 px rows. Whole-row IL/DL/SU/SD and line-feed fills use
+default attributes, and a dashed cell too narrow to hold two separate dashes is
+drawn solid; both match kitty. Nothing in underlines or SGR
 21/221/222 remains open.
 
 Last updated: 2026-11-19 — Task 139 (OSC 22 pointer shapes), closed. The OSC 22
