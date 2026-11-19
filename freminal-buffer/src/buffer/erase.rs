@@ -19,8 +19,9 @@ use crate::buffer::Buffer;
 impl Buffer {
     /// Implements ECH – Erase Characters.
     ///
-    /// Replaces `n` cells starting at the cursor column with blanks using the current
-    /// format tag.  Cells to the right of the erased range are **not** shifted.
+    /// Replaces `n` cells starting at the cursor column with blanks carrying only the
+    /// current background colour ([`Buffer::erase_tag`]).  Cells to the right of the
+    /// erased range are **not** shifted.
     /// The cursor does not move.
     ///
     /// When DECLRMM is active, `n` is clamped so the erase never crosses the
@@ -54,7 +55,7 @@ impl Buffer {
             0
         };
 
-        let tag = self.current_tag.clone();
+        let tag = self.erase_tag();
         self.rows[row].erase_cells_at(col, effective_n, &tag);
         self.image_cell_count -= remaining;
 
@@ -153,13 +154,13 @@ impl Buffer {
 
         // Clear from cursor to end of current row
         if cursor_y < self.rows.len() {
-            let tag = self.current_tag.clone();
+            let tag = self.erase_tag();
             self.rows[cursor_y].clear_from(cursor_x, &tag);
         }
 
         // Clear all rows below cursor in the visible window
         for i in (cursor_y + 1)..visible_end.min(self.rows.len()) {
-            let tag = self.current_tag.clone();
+            let tag = self.erase_tag();
             self.rows[i].clear_with_tag(&tag);
         }
 
@@ -195,13 +196,13 @@ impl Buffer {
 
         // Clear all rows above cursor in the visible window
         for i in visible_start..cursor_y.min(self.rows.len()) {
-            let tag = self.current_tag.clone();
+            let tag = self.erase_tag();
             self.rows[i].clear_with_tag(&tag);
         }
 
         // Clear from beginning of current row to cursor
         if cursor_y < self.rows.len() {
-            let tag = self.current_tag.clone();
+            let tag = self.erase_tag();
             self.rows[cursor_y].clear_to(cursor_x + 1, &tag);
         }
 
@@ -229,7 +230,7 @@ impl Buffer {
         }
 
         for i in visible_start..visible_end.min(self.rows.len()) {
-            let tag = self.current_tag.clone();
+            let tag = self.erase_tag();
             self.rows[i].clear_with_tag(&tag);
         }
 
@@ -257,7 +258,7 @@ impl Buffer {
                 0
             };
 
-            let tag = self.current_tag.clone();
+            let tag = self.erase_tag();
             self.rows[cursor_y].clear_from(cursor_x, &tag);
             self.image_cell_count -= remaining;
         }
@@ -281,7 +282,7 @@ impl Buffer {
                 0
             };
 
-            let tag = self.current_tag.clone();
+            let tag = self.erase_tag();
             self.rows[cursor_y].clear_to(cursor_x + 1, &tag);
             self.image_cell_count -= remaining;
         }
@@ -304,7 +305,7 @@ impl Buffer {
                 0
             };
 
-            let tag = self.current_tag.clone();
+            let tag = self.erase_tag();
             self.rows[cursor_y].clear_with_tag(&tag);
             self.image_cell_count -= remaining;
         }

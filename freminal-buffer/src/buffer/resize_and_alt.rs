@@ -1200,6 +1200,27 @@ impl Buffer {
         &self.current_tag
     }
 
+    /// The format tag given to cells blanked by an erase (back-colour erase).
+    ///
+    /// It carries the stored background colour of the current format and
+    /// nothing else: no foreground, weight, decoration, blink, reverse flag or
+    /// hyperlink. The stored background is used as is, so SGR 7 (reverse video)
+    /// does not swap it, as in xterm's `cur_background`. With a default
+    /// background the tag is visually default, so rows erased with it stay
+    /// sparse.
+    ///
+    /// Used by ED, EL, ECH, ICH, DCH, the DECLRMM column-confined scroll fills
+    /// and [`Self::clear_alternate_screen`]. Whole-row fills (IL, DL, SU, SD
+    /// and line feeds) deliberately use the default format instead.
+    #[must_use]
+    pub(in crate::buffer) fn erase_tag(&self) -> FormatTag {
+        FormatTag {
+            colors: StateColors::default()
+                .with_background_color(self.current_tag.colors.background_color),
+            ..FormatTag::default()
+        }
+    }
+
     /// Set whether Line Feed Mode (LNM) is enabled.
     ///
     /// `Lnm::NewLine`: LF behaves like CRLF (cursor moves to column 0 on line feed).
@@ -1405,19 +1426,14 @@ impl Buffer {
     /// foreground, weight, decoration, hyperlink or blink). The blanks are
     /// stored with the same mechanism ED uses ([`Row::clear_with_tag`]): with a
     /// default background the rows stay sparse, otherwise every cell is an
-    /// explicit blank. Note that ED itself currently copies the whole format
-    /// into the blanks, not just the background; whether that is right is the
-    /// open erase-format question routed to Task 140.
+    /// explicit blank. ED, EL and the other erases blank with the same
+    /// tag ([`Self::erase_tag`]).
     pub fn clear_alternate_screen(&mut self) {
         if self.kind != BufferType::Alternate {
             return;
         }
 
-        let blank_tag = FormatTag {
-            colors: StateColors::default()
-                .with_background_color(self.current_tag.colors.background_color),
-            ..FormatTag::default()
-        };
+        let blank_tag = self.erase_tag();
         let width = self.width;
         self.rows = RowStore::from_rows_at(
             self.rows.next_number(),

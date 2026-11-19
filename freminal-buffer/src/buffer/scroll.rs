@@ -551,7 +551,7 @@ impl Buffer {
         } else {
             0
         };
-        let tag = self.current_tag.clone();
+        let tag = self.erase_tag();
         for row_idx in first..last {
             // Copy cells [left_col, right_col] from row_idx+1 into row_idx.
             // Use resolve_cell to handle sparse rows correctly — columns
@@ -621,7 +621,7 @@ impl Buffer {
         } else {
             0
         };
-        let tag = self.current_tag.clone();
+        let tag = self.erase_tag();
         for row_idx in (first + 1..=last).rev() {
             // Copy cells [left_col, right_col] from row_idx-1 into row_idx.
             // Use resolve_cell to handle sparse rows correctly — columns

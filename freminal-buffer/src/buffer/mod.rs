@@ -2881,9 +2881,10 @@ mod insert_space_tests {
 
         let tags_check = tag_vec(&buf, 0);
 
-        // Inserted blanks should use new_tag
-        assert_eq!(tags_check[1], new_tag);
-        assert_eq!(tags_check[2], new_tag);
+        // Inserted blanks take only the background (Task 140.2); the bold
+        // new_tag has a default background, so they are default-formatted.
+        assert_eq!(tags_check[1], FormatTag::default());
+        assert_eq!(tags_check[2], FormatTag::default());
 
         // Now verify proper tag retention for shifted cells:
         // B, C use tag1 (original)

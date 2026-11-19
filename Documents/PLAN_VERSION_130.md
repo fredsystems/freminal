@@ -10743,6 +10743,16 @@ markdownlint and `prettier --check` on the named files.
   (`MAX_UNDERLINE_STYLE_PARAM`), and an empty `4:` is single. Changed expectation:
   `sgr_colon_underline_style_unknown_value_clears` became
   `sgr_colon_underline_style_above_five_is_dashed` (decision 2).
+- **140.2 (done).** `Buffer::erase_tag()` (background only, not swapped by SGR 7) is used by
+  ED, EL, ECH, ICH, DCH, the DECLRMM column-confined fills (so IL/DL under DECLRMM take it) and
+  `clear_alternate_screen`. Whole-row IL/DL/SU/SD and line feeds are unchanged. Plain DCH writes
+  no fill; its tag only reaches a split wide glyph's remnant, which is tested. New
+  `freminal-buffer/tests/erase_bce_tests.rs` (17) and
+  `freminal-terminal-emulator/tests/erase_bce_end_to_end.rs` (4); 19 of the 21 fail on the old
+  code (the two that pass are the sparse-row and whole-row guards). Changed expectation:
+  `insert_space_tests::ich_preserves_shifted_tags` (ICH blanks of a bold tag are now default;
+  decision 3). Benchmarks (no change detected by Criterion): `erase_display` −7.8%,
+  `erase_display_full` −2.7%, `erase_display_bce` +4.7%.
 
 ---
 

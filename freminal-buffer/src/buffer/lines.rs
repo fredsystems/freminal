@@ -503,7 +503,7 @@ impl Buffer {
             0
         };
 
-        let tag = self.current_tag.clone();
+        let tag = self.erase_tag();
         if self.declrmm_enabled == Declrmm::Enabled {
             // ICH: shift only within [col, scroll_region_right]; cells that
             // fall off the right margin are discarded.
@@ -557,15 +557,15 @@ impl Buffer {
             0
         };
 
+        let tag = self.erase_tag();
         if self.declrmm_enabled == Declrmm::Enabled {
             self.rows[row].delete_cells_at_with_right_limit(
                 col,
                 n,
                 self.scroll_region_right + 1,
-                &self.current_tag.clone(),
+                &tag,
             );
         } else {
-            let tag = self.current_tag.clone();
             self.rows[row].delete_cells_at(col, n, &tag);
         }
 
