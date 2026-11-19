@@ -373,17 +373,40 @@ stored separately on the format run so it can differ from foreground color.
 
 ---
 
-## Background Color Erase (BCE) (Task 48)
+## Background Color Erase (BCE) (Task 48, refined by Task 140)
 
-All erase operations (ED, EL, ECH, DCH, ICH, IL, DL) must fill erased cells
-with the **current** SGR background color, not a fixed default. The current
-SGR format is threaded as an explicit parameter into every erase method on
-`Buffer` — this makes the dependency visible at every call site and avoids a
-hidden read of mutable state during erase.
+Cells blanked by an erase take the **current** SGR background color, not a
+fixed default. The old behavior of writing `default_cell()` was incorrect and
+user-visible: `tput clear` with a non-default background produces a one-color
+field in other terminals but not in pre-Task-48 Freminal.
 
-The old behavior of writing `default_cell()` is incorrect and user-visible:
-`tput clear` with a non-default background produces a one-color field in
-other terminals but not in pre-Task-48 Freminal.
+Which operations, and which attributes, are decided as follows (Task 140,
+2026-11-19):
+
+- **Erased cells take only the background.** ED, EL, ECH, ICH, DCH, the
+  column-confined fills used while DECLRMM is enabled (these also cover IL, DL,
+  SU, SD and margin-triggered scrolls) and the alternate-screen clear all blank
+  with one tag, built by `Buffer::erase_tag()`: the stored background colour of
+  the current format and nothing else. No foreground, weight, underline,
+  reverse, blink or OSC 8 hyperlink is copied, so an open hyperlink no longer
+  leaks into erased cells. The stored background is used as it is, so SGR 7 does
+  not swap it (xterm's `cur_background`). With a default background the tag is
+  visually default and rows erased with it stay sparse. This is the tie-break
+  the project applies when the reference terminals disagree: xterm and Ghostty
+  blank with the background only, kitty (`line_apply_cursor`) and WezTerm copy
+  the whole pen, and freminal follows xterm and Ghostty, consistent with the
+  Task 131 alternate-screen clear. It is a deliberate difference from kitty.
+- **Whole-row IL, DL, SU, SD and line-feed scrolling fill with default
+  attributes, not BCE.** The rows they create are `Row::new` with no format
+  (kitty parity), which keeps scrollback rows sparse. Earlier text here, and
+  the escape-sequence coverage table, said IL and DL were BCE-aware; that was
+  wrong and was corrected in Task 140. Only the DECLRMM column-confined variants
+  take the background, because they blank cells inside an existing row rather
+  than creating one.
+- **The erase methods read the format from `Buffer`**, through `erase_tag()`,
+  rather than taking it as a parameter. The earlier design threaded the format
+  through every erase call; one helper that every blanking site uses is what
+  keeps the rule above uniform.
 
 ---
 

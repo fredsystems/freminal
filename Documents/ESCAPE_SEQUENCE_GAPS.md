@@ -1,5 +1,22 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-11-19 — Task 140 (underline and SGR parity), closed. The
+"CSI 221 m / CSI 222 m" row in "CSI Gaps" is removed: SGR 221 (bold off only) and
+SGR 222 (faint off only) are implemented, SGR 21 is double underline instead of
+bold-off, `4:N` follows kitty (N above 5 is dashed), underlines are clamped to the
+cell and laid out per cell, and the bundled `xterm-freminal` terminfo entry lists
+`Su` / `Smulx` / `Setulc` (programs get `TERM=xterm-256color`, so what they
+discover at runtime comes from XTGETTCAP). The open "erase format" question is
+resolved too: erased cells take only the current background colour. See
+`ESCAPE_SEQUENCE_COVERAGE.md`. Not gaps, but deliberate differences from kitty,
+recorded in `KITTY_PROTOCOL_REFERENCE.md`: an empty `4:;` is a single underline
+(kitty gives no underline there, an artefact of its parser, and freminal's SGR
+tokeniser cannot tell it from a trailing `4:`); erase is background-only (kitty
+copies the whole pen); whole-row IL/DL/SU/SD and line-feed fills use default
+attributes (as kitty does); double-underline lines use the font stroke thickness
+rather than kitty's 1 px rows; and a dashed cell too narrow to hold two separate
+dashes is drawn solid. Nothing in underlines or SGR 21/221/222 remains open.
+
 Last updated: 2026-11-19 — Task 139 (OSC 22 pointer shapes), closed. The OSC 22
 row in "OSC Gaps" is removed: set, push, pop and query now work on per-screen
 stacks cleared by RIS and DECSTR, with kitty's name table and parsing rules (see
@@ -326,12 +343,12 @@ keypad/media/print/pause/menu keys) has a sound encoder, but the GUI layer feedi
 drops Alt/Super on text keys and modified Enter; that is Task 137 (v0.13.1). The
 lock-key half of Task 114 was reverted (see below). OSC 99 is conformant with kitty 0.49.2
 (Task 138, v0.13.0, including 138.C4 and 138.C5), and so is OSC 22 pointer shapes
-(Task 139, v0.13.0). The remaining gaps are:
+(Task 139, v0.13.0). Underlines and SGR parity (Task 140, v0.13.0) are closed. The
+remaining gaps are:
 
 - **Kitty protocol compliance (v0.13.x):** see the 2026-10-08 audit in
   `PLAN_VERSION_130.md` and the "Kitty Protocol Gaps" tables below. Graphics (Tasks 135,
-  136), keyboard (Task 137), underlines and
-  SGR (Task 140), misc extensions (Task 141), unscroll (Task 142), DECCARA/DECSACE
+  136), keyboard (Task 137), misc extensions (Task 141), unscroll (Task 142), DECCARA/DECSACE
   (Task 143), colour control (Task 144), multiple cursors (Task 103), text sizing
   (Task 104), file transfer (Task 102), clipboard (Task 146), drag and drop (Task 105)
 - **OSC gaps:** OSC 66 (kitty text sizing; a vestigial no-op, Task 104)
@@ -490,7 +507,6 @@ ignored (warn-logged, no output) until its task lands; none of them misroutes an
 | `CSI ? Pm s` / `CSI ? Pm r` (XTSAVE / XTRESTORE)                           | ⬜         | ⬜   | v0.13.2 Task 141 | Missing, including the bare `CSI ? s` / `CSI ? r` forms. Recognised and ignored since Task 128 (before, they were routed to DECSLRM / DECSTBM and failed as Invalid) |
 | `CSI 22 J`                                                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Move screen to scrollback, then ED 2; no `EraseDisplayMode` variant. Prerequisite for multiple cursors                                                               |
 | `CSI < 288 ; x ; y M` (mouse-leave report)                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Not sent on window leave or pane-to-pane transitions under SGR-pixel mouse encoding                                                                                  |
-| `CSI 221 m` / `CSI 222 m` (SGR)                                            | ⬜         | ⬜   | v0.13.0 Task 140 | Independent bold-off / faint-off — missing. SGR 21 also means bold-off where kitty means double underline (Task 140, needs maintainer sign-off)                      |
 | `CSI > … SP q` (multiple cursors)                                          | 🟨         | ⬜   | v0.13.2 Task 103 | Missing. Recognised and ignored since 126.3 (before, it triggered an unsolicited XTVERSION reply); Task 128 makes this a routing rule                                |
 | `CSI … $ t` (DECRARA)                                                      | ⬜         | ⬜   | —                | Not implemented and not planned. Recognised and ignored since Task 128 (before, it was handled as a window operation)                                                |
 

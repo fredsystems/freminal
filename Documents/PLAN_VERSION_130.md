@@ -10772,7 +10772,16 @@ markdownlint and `prettier --check` on the named files.
   existing entry unchanged (`infocmp -x` identical). `infocmp -x` on the entry extracted from the
   regenerated tar shows all three. New test
   `terminfo_source_advertises_styled_underline_caps_matching_xtgettcap` ties the source to
-  `lookup_termcap`. A rebuild leaves the tar byte-identical.
+  `lookup_termcap`. A rebuild leaves the tar byte-identical. **Caveat found after commit
+  (maintainer question):** children run with `TERM=xterm-256color`, so no program looks up the
+  bundled `xterm-freminal` entry; the capabilities reach programs only through XTGETTCAP. The
+  docs say so. Making the bundled terminfo actually reach programs is outside Task 140; see
+  140.C1.
+- **140.5 (done).** COVERAGE, GAPS, `SGR.md`, the BCE section of `DESIGN_DECISIONS.md` (which
+  wrongly called IL/DL BCE-aware and described the format as an erase parameter) and a new
+  "Underlines and SGR parity" section in the kitty reference with five documented differences
+  from kitty. Orchestrator fix: COVERAGE said every dashed cell under 8 px may be solid; only
+  6–7 px and sub-4 px cells are.
 
 ---
 
