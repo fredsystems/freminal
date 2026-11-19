@@ -22,7 +22,7 @@ one plan document, grouped into milestones that ship as point releases:
 
 | Milestone | Codename                                   | Tasks                        |
 | --------- | ------------------------------------------ | ---------------------------- |
-| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147–150    |
+| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147–151    |
 | v0.13.1   | Shipped-Protocol Conformance (heavy)       | 134, 135, 136, 137           |
 | v0.13.2   | New Protocols: Small & Medium              | 103, 141, 142, 143, 144, 145 |
 | v0.13.3   | New Protocols: Text Sizing, Transfer, Clip | 133, 104, 102, 146           |
@@ -59,6 +59,7 @@ enriched stubs again and get re-decomposed at activation.
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
 | 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
 | 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete      | 149                                |
+| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | Planned       | 140                                |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
@@ -10805,7 +10806,8 @@ markdownlint and `prettier --check` on the named files.
   production environment (the same code path as `run_terminal`) and runs `tput`/`infocmp -x`
   inside it, asserting what the child actually resolves. Under today's code it would show the
   entry is unreachable.
-- **Scheduling:** awaiting the maintainer's choice; not blocking the Task 140 PR.
+- **Scheduling:** moved to Task 151 (maintainer decision 2026-11-19: freminal defaults to its
+  own `TERM` and ships the terminfo entry for remote hosts). Not blocking the Task 140 PR.
 
 ---
 
@@ -11061,6 +11063,67 @@ under "Task 139 — Pointer Shapes (OSC 22) Completion" above.
 
 Activated and decomposed on 2026-11-19. The audit findings, decisions and subtasks now live
 under "Task 140 — Underline & SGR Parity" above.
+
+---
+
+### Task 151 — Own TERM & Terminfo Distribution (stub, v0.13.0)
+
+**Goal.** Programs running in freminal know they are in freminal, and get freminal's real
+capabilities from terminfo, not only from XTGETTCAP. Children get `TERM=xterm-freminal` by
+default, the bundled entry is accurate, and hosts that do not install freminal can be given
+the entry. Created 2026-11-19 from 140.C1; reverses the recorded "TERM Strategy" decision
+(`io/pty.rs`, `DESIGN_DECISIONS.md`) that Task 92 was dropped under.
+
+**Findings (140.C1).**
+
+- `res/terminfo.tar` is embedded and extracted per PTY into a temp dir on `TERMINFO_DIRS`, but
+  children get `TERM=xterm-256color`, so nothing reads it.
+- The flake package does not install the entry (`postInstall` copies icons only), and neither
+  module installs it.
+- The `.ti` file was kept "as a reference" (source comment in `io/pty.rs`), so it has never
+  been exercised: it must be audited before it becomes authoritative.
+- XTGETTCAP `TN` is pinned to `xterm-256color` by a regression test (Task 76.6), so that it
+  cannot desync from `TERM`.
+- Task 86 (SSH integration, which would copy the entry to remote hosts) is a v0.15.0 stub; it is
+  not done.
+
+**Durable decisions (maintainer, 2026-11-19).**
+
+1. **Children get `TERM=xterm-freminal` by default.** The `xterm-` prefix keeps programs that
+   match `xterm*` working (as `xterm-kitty` and `xterm-ghostty` do).
+2. **`[shell] term` config option**, default `xterm-freminal`, so a user can go back to
+   `xterm-256color` (or anything). Full `freminal-config-options` wiring. Layout and pane `env`
+   still override it.
+3. **Flake `packages.<system>.terminfo`**: only `$out/share/terminfo`, with no GUI
+   dependencies, for servers that do not install freminal. The main package also installs the
+   entry under `$out/share/terminfo`.
+4. **A NixOS module option** (for example `programs.freminal.terminfo.enable`) that adds the
+   terminfo package to the system for headless servers. The home-manager module stays for
+   desktops.
+5. **XTGETTCAP `TN` reports the pane's actual `TERM`**, so it can never desync. The Task 76.6
+   regression test changes accordingly.
+
+**Required at activation.**
+
+- **Audit the entry first** (READ-ONLY): every capability in `res/freminal.ti` checked against
+  what the parser and handler do, and every capability XTGETTCAP answers present in the entry.
+  A wrong capability is worse than a missing one once programs trust it.
+- **The PTY-spawn test** from 140.C1: spawn a real child with the production environment and run
+  `tput` / `infocmp -x` inside it, asserting the entry resolves with the expected values; keep
+  the per-PTY `TERMINFO_DIRS` extraction so it resolves even where nothing is installed.
+- **One table of truth** shared by the `.ti` and `lookup_termcap`, or a test that compares them
+  for every capability (140.4's test covers three).
+- Docs: the `DESIGN_DECISIONS.md` TERM strategy (reversed, with reasons), the ssh consequence
+  and how to fix it (install the terminfo package, `infocmp -x xterm-freminal | ssh host tic -x
+  -`, or set `[shell] term`), COVERAGE/GAPS, README.
+
+**Open questions.**
+
+- macOS: does the system ncurses read the extended (`tic -x`) entry from `TERMINFO_DIRS`?
+  Verify on the macOS CI job before relying on it.
+- Windows (ConPTY): whether `TERM` is set at all today, and whether anything changes.
+- What freminal does if `[shell] term` names an entry it does not ship (pass through, with a
+  warning).
 
 ---
 
