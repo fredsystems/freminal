@@ -7840,6 +7840,21 @@ Stale stub text was corrected at the same time:
   payload-free `debug!`; `CSI u` still restores; the kitty prefixed forms are unchanged.
   Changed test: `numeric_params_are_scorc` became three "ignored" tests. New end-to-end test
   through `TerminalState`.
+- **147.8 (done).** New `ParserOutcome::FinishedAtEsc`: an OSC, DCS or APC sub-parser that
+  sees ESC followed by anything but `\` dispatches the body (DCS and APC as if ST had
+  arrived; an over-cap string is dropped with its one warn), and the top-level parser
+  re-enters the escape state with the following byte (`restart_escape_with`), within a read
+  or across reads. Decisions at execution: inside `DCS tmux;` an `ESC ESC` pair is still data
+  and only an unpaired ESC followed by a byte other than `\` ends the string (tmux tests
+  unchanged); in OSC, `ESC BEL` now ends the string at the ESC and `BEL` is the second byte of
+  a new escape (as for a top-level `ESC BEL`), while a plain BEL still terminates; CAN/SUB
+  and the ignored C0 bytes keep the 129.C5 rules. Changed tests: the ESC-kept-in-body and
+  ESC-then-BEL cap tests and three overflow tests (each renamed to the new rule). New
+  `tests/string_bare_esc.rs`: 15 behaviour tests fail on the old tree, 6 guards pass. The
+  orchestrator made the new `FinishedAtEsc` arms in the CSI and standard-parser matches
+  handle the outcome instead of `unreachable!()`. Benchmarks (vs `before_147_8`, before run
+  load-affected): plain text −4%, SGR −8.7%, OSC 9 −5% / +2%, kitty APC −28%, sixel −37%; no
+  regression. `fuzz-replay` clean.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

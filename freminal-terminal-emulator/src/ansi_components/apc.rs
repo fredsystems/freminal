@@ -87,18 +87,43 @@ impl ApcParser {
     /// returns `ParserOutcome::Finished`. A sequence over [`MAX_APC_BYTES`]
     /// is consumed through its terminator and returns `Finished` without
     /// emitting anything.
+    ///
+    /// An ESC followed by anything other than `\` (a bare ESC) also ends the
+    /// sequence. It is dispatched (or dropped, if over the cap) as if ST had
+    /// arrived, and the parser returns `ParserOutcome::FinishedAtEsc` without
+    /// consuming `b`: the top-level parser parses it as the second byte of the
+    /// new escape sequence that ESC starts.
     pub fn apc_parser_inner(&mut self, b: u8, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
         if let ApcState::Overflow { total, prev } = &mut self.state {
-            *total = total.saturating_add(1);
-            let terminated = *prev == PrevByte::Esc && b == b'\\';
+            let after_esc = *prev == PrevByte::Esc;
+            let bare_esc = after_esc && b != b'\\';
+            if !bare_esc {
+                *total = total.saturating_add(1);
+            }
+            let terminated = after_esc && b == b'\\';
             *prev = PrevByte::of(b);
-            if terminated {
+            if terminated || bare_esc {
                 tracing::warn!(
                     "APC sequence over the {MAX_APC_BYTES}-byte cap dropped: total length {total} bytes"
                 );
-                return ParserOutcome::Finished;
+                return if bare_esc {
+                    ParserOutcome::FinishedAtEsc
+                } else {
+                    ParserOutcome::Finished
+                };
             }
             return ParserOutcome::Continue;
+        }
+
+        // A stored ESC is always the last stored byte: the next byte either
+        // completes `ESC \` or, being anything else, shows the ESC was bare.
+        // The sequence is then dispatched exactly as if it ended in ST.
+        if b != b'\\' && self.sequence.last() == Some(&0x1b) {
+            self.sequence.push(b'\\');
+            output.push(TerminalOutput::ApplicationProgramCommand(std::mem::take(
+                &mut self.sequence,
+            )));
+            return ParserOutcome::FinishedAtEsc;
         }
 
         self.sequence.push(b);
@@ -286,19 +311,77 @@ mod tests {
     }
 
     #[test]
-    fn overflow_ends_only_at_a_real_st() {
-        let mut parser = ApcParser::new();
+    fn overflow_ends_only_at_a_real_st_or_a_bare_esc() {
+        let overflowed = || {
+            let mut parser = ApcParser::new();
+            let mut output = Vec::new();
+            push_all(&mut parser, &vec![b'x'; MAX_APC_BYTES], &mut output);
+            parser
+        };
         let mut output = Vec::new();
-        push_all(&mut parser, &vec![b'x'; MAX_APC_BYTES], &mut output);
-        // A lone backslash, and an ESC followed by something else, do not end it.
-        push_all(&mut parser, b"\\", &mut output);
-        push_all(&mut parser, b"\x1bx", &mut output);
-        // ESC ESC \ does: the second ESC is the start of the terminator.
-        push_all(&mut parser, b"\x1b", &mut output);
+
+        // A lone backslash does not end it; ESC `\` does.
+        let mut parser = overflowed();
+        push_all(&mut parser, b"\\\\", &mut output);
         push_all(&mut parser, b"\x1b", &mut output);
         let outcome = parser.apc_parser_inner(b'\\', &mut output);
         assert!(matches!(outcome, ParserOutcome::Finished));
         assert_eq!(output, []);
+
+        // An ESC followed by anything else is a bare ESC: it ends the
+        // sequence (dropped), leaving the following byte unconsumed.
+        for next in [b'x', b'[', 0x1b] {
+            let mut parser = overflowed();
+            push_all(&mut parser, b"\x1b", &mut output);
+            let outcome = parser.apc_parser_inner(next, &mut output);
+            assert!(matches!(outcome, ParserOutcome::FinishedAtEsc), "{next:#x}");
+            assert_eq!(output, []);
+        }
+    }
+
+    #[test]
+    fn bare_esc_dispatches_the_body_as_if_st_had_arrived() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"Ga=q,i=1;\x1b", &mut output);
+        assert_eq!(output, []);
+        let outcome = parser.apc_parser_inner(b'[', &mut output);
+        assert!(matches!(outcome, ParserOutcome::FinishedAtEsc));
+        // Same bytes as the `ESC \`-terminated form.
+        assert_eq!(
+            output,
+            vec![TerminalOutput::ApplicationProgramCommand(
+                b"_Ga=q,i=1;\x1b\\".to_vec()
+            )]
+        );
+    }
+
+    #[test]
+    fn esc_followed_by_backslash_still_terminates() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"Gx\x1b", &mut output);
+        let outcome = parser.apc_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(
+            output,
+            vec![TerminalOutput::ApplicationProgramCommand(
+                b"_Gx\x1b\\".to_vec()
+            )]
+        );
+    }
+
+    #[test]
+    fn bare_esc_over_the_cap_drops_the_sequence_and_the_next_byte_starts_a_new_one() {
+        let mut bytes = b"\x1b_G".to_vec();
+        bytes.extend(std::iter::repeat_n(b'A', MAX_APC_BYTES + 10));
+        bytes.extend_from_slice(b"\x1b[31mhello");
+
+        let mut parser = FreminalAnsiParser::new();
+        let output = parser.push(&bytes);
+        assert_eq!(output.len(), 2, "{output:?}");
+        assert!(matches!(&output[0], TerminalOutput::Sgr(_)), "{output:?}");
+        assert_eq!(output[1], TerminalOutput::Data(b"hello".to_vec()));
     }
 
     #[test]

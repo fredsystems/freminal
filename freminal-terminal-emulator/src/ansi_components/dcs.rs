@@ -128,6 +128,38 @@ impl DcsParser {
         esc_count % 2 == 1
     }
 
+    /// Returns `true` when `b`, arriving next, shows that the stored trailing
+    /// ESC is a bare ESC: one that starts neither `ESC \` nor (in tmux
+    /// passthrough) a doubled `ESC ESC`. A bare ESC ends the string.
+    ///
+    /// A stored ESC is always the last stored byte, because the byte after it
+    /// either completes the terminator or ends the string here.
+    ///
+    /// - **Plain DCS:** any byte but `\` after the ESC, `ESC` included.
+    /// - **tmux passthrough:** an `ESC ESC` pair is data, so only an unpaired
+    ///   ESC (an odd run of ESC bytes) followed by a byte that is neither `\`
+    ///   (the real ST) nor ESC (which would pair it) is bare. Runs are counted
+    ///   only when a non-ESC byte arrives, so a flood of ESC bytes costs
+    ///   nothing per byte.
+    fn ends_at_bare_esc(&self, b: u8) -> bool {
+        if b == b'\\' || self.sequence.last() != Some(&0x1b) {
+            return false;
+        }
+        if !self.is_tmux_passthrough() {
+            return true;
+        }
+        if b == 0x1b {
+            return false;
+        }
+        let run = self
+            .sequence
+            .iter()
+            .rev()
+            .take_while(|&&c| c == 0x1b)
+            .count();
+        run % 2 == 1
+    }
+
     /// Returns `true` when this parser is accumulating a tmux DCS
     /// passthrough sequence (the sequence buffer starts with `Ptmux;`).
     #[must_use]
@@ -152,32 +184,56 @@ impl DcsParser {
     /// `ParserOutcome::Finished`. A sequence over [`MAX_DCS_BYTES`] is
     /// consumed through its terminator and returns `Finished` without
     /// emitting anything.
+    ///
+    /// A bare ESC (one not followed by `\`) also ends the sequence: it is
+    /// dispatched (or dropped, if over the cap) as if ST had arrived, and the
+    /// parser returns `ParserOutcome::FinishedAtEsc` without consuming `b`. The
+    /// top-level parser parses `b` as the second byte of the new escape
+    /// sequence that ESC starts. In `DCS tmux;` passthrough a doubled
+    /// `ESC ESC` is data and does not end the sequence.
     pub fn dcs_parser_inner(&mut self, b: u8, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
         if let DcsState::Overflow { total, terminator } = &mut self.state {
-            *total = total.saturating_add(1);
-            let terminated = match terminator {
+            let (terminated, bare_esc) = match terminator {
                 DcsOverflowTerminator::Plain { prev } => {
-                    let terminated = *prev == PrevByte::Esc && b == b'\\';
+                    let after_esc = *prev == PrevByte::Esc;
                     *prev = PrevByte::of(b);
-                    terminated
+                    (after_esc && b == b'\\', after_esc && b != b'\\')
                 }
                 DcsOverflowTerminator::Tmux { esc_run } => {
-                    let terminated = b == b'\\' && *esc_run % 2 == 1;
+                    // An odd run leaves one unpaired ESC: `\` ends the string
+                    // (real ST) and any byte but ESC shows the ESC was bare.
+                    let unpaired = *esc_run % 2 == 1;
                     *esc_run = if b == 0x1b {
                         esc_run.saturating_add(1)
                     } else {
                         0
                     };
-                    terminated
+                    (unpaired && b == b'\\', unpaired && b != b'\\' && b != 0x1b)
                 }
             };
-            if terminated {
+            if !bare_esc {
+                *total = total.saturating_add(1);
+            }
+            if terminated || bare_esc {
                 tracing::warn!(
                     "DCS sequence over the {MAX_DCS_BYTES}-byte cap dropped: total length {total} bytes"
                 );
-                return ParserOutcome::Finished;
+                return if bare_esc {
+                    ParserOutcome::FinishedAtEsc
+                } else {
+                    ParserOutcome::Finished
+                };
             }
             return ParserOutcome::Continue;
+        }
+
+        if self.ends_at_bare_esc(b) {
+            // Dispatch exactly as if the ESC had been the start of ST.
+            self.sequence.push(b'\\');
+            output.push(TerminalOutput::DeviceControlString(std::mem::take(
+                &mut self.sequence,
+            )));
+            return ParserOutcome::FinishedAtEsc;
         }
 
         self.sequence.push(b);
@@ -417,17 +473,134 @@ mod tests {
     }
 
     #[test]
-    fn overflowed_plain_dcs_ends_only_at_a_real_st() {
+    fn overflowed_plain_dcs_ends_only_at_a_real_st_or_a_bare_esc() {
         let mut parser = parser_with_stored_len(b"P", MAX_DCS_BYTES);
         let mut output = Vec::new();
         push_all(&mut parser, b"x", &mut output);
-        // A lone backslash, and an ESC followed by something else, do not end it.
+        // A lone backslash does not end it.
         push_all(&mut parser, b"\\", &mut output);
-        push_all(&mut parser, b"\x1bx", &mut output);
-        // ESC ESC \ ends a plain DCS: the second ESC starts the terminator.
-        push_all(&mut parser, b"\x1b\x1b", &mut output);
+        // ESC `\` does.
+        push_all(&mut parser, b"\x1b", &mut output);
         let outcome = parser.dcs_parser_inner(b'\\', &mut output);
         assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(output, []);
+
+        // An ESC followed by anything else (ESC included) is a bare ESC: it
+        // ends the sequence, dropped, leaving the next byte unconsumed.
+        for next in [b'x', b'[', 0x1b] {
+            let mut parser = parser_with_stored_len(b"P", MAX_DCS_BYTES);
+            push_all(&mut parser, b"x\x1b", &mut output);
+            let outcome = parser.dcs_parser_inner(next, &mut output);
+            assert!(matches!(outcome, ParserOutcome::FinishedAtEsc), "{next:#x}");
+            assert_eq!(output, []);
+        }
+    }
+
+    #[test]
+    fn overflowed_tmux_dcs_ends_at_an_unpaired_esc_but_not_a_doubled_one() {
+        let overflowed = || {
+            let mut parser = parser_with_stored_len(b"Ptmux;", MAX_DCS_BYTES);
+            let mut output = Vec::new();
+            push_all(&mut parser, b"x", &mut output);
+            parser
+        };
+        let mut output = Vec::new();
+
+        // A doubled ESC followed by a non-`\` byte is data.
+        let mut parser = overflowed();
+        push_all(&mut parser, b"\x1b\x1b[", &mut output);
+        // An unpaired ESC (run of one, or of three) ends it...
+        for run in [&b"\x1b"[..], b"\x1b\x1b\x1b"] {
+            let mut parser = overflowed();
+            push_all(&mut parser, run, &mut output);
+            let outcome = parser.dcs_parser_inner(b'[', &mut output);
+            assert!(matches!(outcome, ParserOutcome::FinishedAtEsc), "{run:?}");
+        }
+        // ...and the ST is still an unpaired ESC followed by `\`.
+        push_all(&mut parser, b"\x1b", &mut output);
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(output, []);
+    }
+
+    // ------------------------------------------------------------------
+    // A bare ESC ends the string (Task 147.8)
+    // ------------------------------------------------------------------
+
+    fn dcs_of(output: &[TerminalOutput]) -> &[u8] {
+        let [TerminalOutput::DeviceControlString(seq)] = output else {
+            panic!("expected a single DCS, got {output:?}");
+        };
+        seq
+    }
+
+    #[test]
+    fn bare_esc_dispatches_the_body_as_if_st_had_arrived() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"$qm\x1b", &mut output);
+        assert_eq!(output, []);
+        let outcome = parser.dcs_parser_inner(b'[', &mut output);
+        assert!(matches!(outcome, ParserOutcome::FinishedAtEsc));
+        // The same bytes as the `ESC \`-terminated form.
+        assert_eq!(dcs_of(&output), b"P$qm\x1b\\");
+    }
+
+    #[test]
+    fn esc_followed_by_backslash_still_terminates() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"$qm\x1b", &mut output);
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(dcs_of(&output), b"P$qm\x1b\\");
+    }
+
+    #[test]
+    fn esc_esc_in_a_plain_dcs_ends_it_at_the_second_esc() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"$qm\x1b", &mut output);
+        let outcome = parser.dcs_parser_inner(0x1b, &mut output);
+        assert!(matches!(outcome, ParserOutcome::FinishedAtEsc));
+        assert_eq!(dcs_of(&output), b"P$qm\x1b\\");
+    }
+
+    #[test]
+    fn tmux_doubled_esc_is_data_and_only_an_unpaired_esc_ends_the_string() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        // A doubled `ESC ESC [` is the wrapped CSI introducer: data.
+        push_all(&mut parser, b"tmux;\x1b\x1b[31m\x1b\x1b\\", &mut output);
+        assert_eq!(output, []);
+        // The outer ST is an unpaired ESC followed by `\`.
+        parser.dcs_parser_inner(0x1b, &mut output);
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(dcs_of(&output), b"Ptmux;\x1b\x1b[31m\x1b\x1b\\\x1b\\");
+    }
+
+    #[test]
+    fn tmux_unpaired_esc_followed_by_another_byte_ends_the_string() {
+        // `ESC ESC ESC [`: the first two are a pair (data), the third is bare.
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"tmux;a\x1b\x1b\x1b", &mut output);
+        let outcome = parser.dcs_parser_inner(b'[', &mut output);
+        assert!(matches!(outcome, ParserOutcome::FinishedAtEsc));
+        assert_eq!(dcs_of(&output), b"Ptmux;a\x1b\x1b\x1b\\");
+    }
+
+    #[test]
+    fn tmux_long_even_esc_run_is_data() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"tmux;", &mut output);
+        let esc_run = 200_000;
+        push_all(&mut parser, &vec![0x1b; esc_run], &mut output);
+        let outcome = parser.dcs_parser_inner(b'[', &mut output);
+        // An even run is all doubled pairs: data, no end.
+        assert!(matches!(outcome, ParserOutcome::Continue));
         assert_eq!(output, []);
     }
 

@@ -29,6 +29,13 @@ pub enum ParserOutcome {
     /// least one `TerminalOutput`, but need not: a sequence that is recognised
     /// and ignored, or one dropped for exceeding its byte cap, produces none.
     Finished,
+    /// A string sequence (OSC, DCS or APC) ended because a bare ESC, one not
+    /// followed by `\`, preceded this byte. The sequence is complete: it was
+    /// dispatched (or dropped, if it was over its cap) exactly as if ST had
+    /// arrived. The byte just pushed was **not** consumed: it is the second byte
+    /// of a new escape sequence started by that ESC, and the top-level parser
+    /// must re-enter the escape state and feed it that byte.
+    FinishedAtEsc,
     /// The byte resulted in an invalid sequence or parse error (error string provided).
     Invalid(String),
     InvalidParserFailure(ParserFailures),
@@ -39,6 +46,7 @@ impl fmt::Display for ParserOutcome {
         match self {
             Self::Continue => write!(f, "Continue"),
             Self::Finished => write!(f, "Finished"),
+            Self::FinishedAtEsc => write!(f, "FinishedAtEsc"),
             Self::Invalid(msg) => write!(f, "Invalid: {msg}"),
             Self::InvalidParserFailure(msg) => {
                 write!(f, "InvalidParserFailure: {msg:?}")
@@ -390,6 +398,11 @@ impl FreminalAnsiParser {
                     }
 
                     ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
+                    // The standard parser never returns this; if it ever did,
+                    // its meaning is still well defined.
+                    ParserOutcome::FinishedAtEsc => {
+                        self.restart_escape_with(b, data_output, output);
+                    }
 
                     ParserOutcome::Invalid(message) => {
                         // All invalid sequences emit `TerminalOutput::Invalid` here.
@@ -404,6 +417,23 @@ impl FreminalAnsiParser {
                 }
             }
         }
+    }
+
+    /// A string sequence (OSC, DCS or APC) just ended at a bare ESC: the ESC
+    /// that preceded `b` starts a new escape sequence, and `b` is its second
+    /// byte.
+    ///
+    /// The string itself has already been dispatched by its sub-parser. This
+    /// re-enters the escape state (the ESC the sub-parser consumed) and feeds
+    /// `b` to it, so `b` is parsed exactly as it would be after any ESC.
+    fn restart_escape_with(
+        &mut self,
+        b: u8,
+        data_output: &mut Vec<u8>,
+        output: &mut Vec<TerminalOutput>,
+    ) {
+        self.inner = ParserInner::Escape;
+        self.ansiparser_inner_escape(b, data_output, output);
     }
 
     /// Feed a raw byte slice from the PTY into the parser, returning all
@@ -430,10 +460,15 @@ impl FreminalAnsiParser {
     ///                  to the appropriate csi_commands sub-handler.
     /// Osc            — collecting the OSC string until BEL (0x07) or ST
     ///                  (ESC '\') terminates it; then dispatches to osc.rs.
+    ///                  A bare ESC (not followed by '\') also ends it: the
+    ///                  body so far is dispatched and the ESC starts a new
+    ///                  escape sequence (Escape state, next byte its second).
     /// Standard       — handles two-byte Fe sequences (ESC # Pn, ESC ( G, …).
-    /// Dcs            — Device Control String; passes bytes to dcs.rs until ST.
+    /// Dcs            — Device Control String; passes bytes to dcs.rs until ST
+    ///                  or a bare ESC (as for Osc; inside `DCS tmux;` an
+    ///                  `ESC ESC` pair is data).
     /// Apc            — Application Program Command; passes bytes to apc.rs
-    ///                  until ST (used by tmux passthrough passthrough).
+    ///                  until ST or a bare ESC (as for Osc).
     /// Vt52Escape     — waiting for the single command byte after ESC in VT52
     ///                  mode; 'Y' transitions to Vt52CursorAddress.
     /// Vt52CursorAddress — collects the row byte then column byte for the
@@ -485,6 +520,11 @@ impl FreminalAnsiParser {
                         ParserOutcome::Continue => (),
                         // we cannot hit this branch right now because the standard parser does not return ParserOutcome::InvalidParserFailure
                         ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
+                        // Not returned by the standard parser; handled for
+                        // completeness rather than as a panic path.
+                        ParserOutcome::FinishedAtEsc => {
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
                         ParserOutcome::Invalid(message) => {
                             // All invalid sequences emit `TerminalOutput::Invalid` here.
                             output.push(TerminalOutput::Invalid);
@@ -501,6 +541,9 @@ impl FreminalAnsiParser {
                     ParserOutcome::Finished => {
                         self.inner = ParserInner::Empty;
                     }
+                    ParserOutcome::FinishedAtEsc => {
+                        self.restart_escape_with(b, &mut data_output, &mut output);
+                    }
                     ParserOutcome::Continue => (),
                     ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
                         output.push(TerminalOutput::Invalid);
@@ -510,6 +553,9 @@ impl FreminalAnsiParser {
                 ParserInner::Apc(parser) => match parser.apc_parser_inner(b, &mut output) {
                     ParserOutcome::Finished => {
                         self.inner = ParserInner::Empty;
+                    }
+                    ParserOutcome::FinishedAtEsc => {
+                        self.restart_escape_with(b, &mut data_output, &mut output);
                     }
                     ParserOutcome::Continue => (),
                     ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
@@ -544,6 +590,11 @@ impl FreminalAnsiParser {
                             }
                         }
                         ParserOutcome::Continue => (),
+                        // CSI aborts on ESC above and never returns this;
+                        // handled for completeness rather than as a panic path.
+                        ParserOutcome::FinishedAtEsc => {
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
                         ParserOutcome::InvalidParserFailure(message) => {
                             debug!(
                                 "Invalid ANSI sequence: {}; recent={}",
@@ -573,6 +624,9 @@ impl FreminalAnsiParser {
                                 self.current_trace_escaped()
                             );
                         }
+                    }
+                    ParserOutcome::FinishedAtEsc => {
+                        self.restart_escape_with(b, &mut data_output, &mut output);
                     }
                     ParserOutcome::Continue => (),
                     // we cannot hit this branch right now because the osc parser does not return ParserOutcome::InvalidParserFailure
