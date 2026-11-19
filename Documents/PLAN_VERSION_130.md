@@ -10387,6 +10387,11 @@ Verification: markdownlint and `prettier --check` on the three files.
   OSC 22 left `tokenising_targets_with_non_utf8_byte_still_invalid`, since a non-UTF-8 name is
   now an unknown name, not `Invalid`. Plan correction: an empty set on a one-entry stack
   replaces that entry, so "empty set then pop restores the lower shape" needs two entries.
+- **139.4 (done).** `tests/osc22_pointer_shapes.rs` (16 tests through `TerminalEmulator` and
+  `build_snapshot`: per-screen stacks for `?47` / `?1047` / `?1049`, alternate persistence,
+  RIS and DECSTR, tmux passthrough with an unwrapped reply, mixed ops in one read, reply order
+  between DSR and DA1, S8C1T framing) and two `terminal_state` fuzz seeds; `fuzz-replay` is
+  clean. No production bug found.
 
 ### 139 Cleanup entries
 
