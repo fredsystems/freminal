@@ -247,7 +247,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 144 | Color Control (OSC 21) & Colour Stack       | `PLAN_VERSION_130.md` (Task 144)              | Planned       | Tasks 128–130, 132            |
 | 145 | Kitty Shell-Integration Compatibility       | `PLAN_VERSION_130.md` (Task 145)              | Planned       | Task 129; decision            |
 | 146 | Kitty Clipboard (OSC 5522)                  | `PLAN_VERSION_130.md` (Task 146)              | Planned       | Tasks 129, 130, 133           |
-| 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | Planned       | Tasks 130, 131                |
+| 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | In progress   | Tasks 130, 131                |
 | 148 | Security & Fuzz Findings Remediation        | `PLAN_VERSION_130.md` (Task 148)              | Complete      | None                          |
 | 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | Complete      | Task 138                      |
 | 150 | Desktop Notification Backend Extraction     | `PLAN_VERSION_130.md` (Task 150)              | Complete      | Task 149                      |
@@ -854,6 +854,7 @@ Update this section as tasks complete:
 | 139  | 2026-11-19 | 2026-11-19 | 139.1-139.5, C1-C3, two review passes; merged via PR #586 (`9fb9d63a`)             |
 | 140  | 2026-11-19 | 2026-11-19 | 140.1-140.5, C1-C6, two review passes; merged via PR #587 (`13f73832`)             |
 | 151  | 2026-11-19 |            | 151.1-151.12, C1-C4, two review passes; PR pending                                 |
+| 147  | 2026-11-19 |            | Branch `task-147/correctness-cleanup`                                              |
 
 ---
 

@@ -55,7 +55,7 @@ enriched stubs again and get re-decomposed at activation.
 | 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
 | 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Complete      | 129, 130, 131                      |
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Complete      | None                               |
-| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | In progress   | 130, 131                           |
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
 | 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
 | 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete      | 149                                |
@@ -10988,6 +10988,8 @@ fixed in 140.C5:
   use emoji status cells throughout (196 in COVERAGE, 29 in `SGR.md`). **Maintainer decision:**
   keep them in the new rows for consistency and convert the whole files in one pass, scheduled
   as 147.33.
+
+**Merged** 2026-11-19 via PR #587 (`13f73832`).
 
 ---
 
