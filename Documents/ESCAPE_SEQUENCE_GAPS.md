@@ -1,5 +1,11 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-11-19 — Task 151.3 (terminfo entry corrections). New row in
+"CSI Gaps": SGR 8 (conceal) is parsed to `Conceal` but `apply_sgr` ignores it, so
+`res/freminal.ti` no longer declares `invis` and the `sgr` string no longer has
+the `%?%p7%t;8%;` part. The entry now matches what freminal implements, and the
+XTGETTCAP `Se` answer is `CSI 0 SP q` (DECSCUSR 0 restores the configured style).
+
 Last updated: 2026-11-19 — Task 140 (underline and SGR parity), closed. The
 "CSI 221 m / CSI 222 m" row in "CSI Gaps" is removed: SGR 221 (bold off only) and
 SGR 222 (faint off only) are implemented, SGR 21 is double underline instead of
@@ -361,7 +367,8 @@ remaining gaps are:
 - **DECRQM for ANSI modes:** a query for an unknown ANSI mode is answered in
   the DEC-private form (issue #528); LNM and IRM are correct since Task 130
 - **Rare/low-priority:** SRM and KAM standard modes, ?1034, functional ?1001
-  hilite tracking, DECSCA/selective-erase (no per-cell protected bit);
+  hilite tracking, DECSCA/selective-erase (no per-cell protected bit),
+  SGR 8 conceal (parsed, ignored);
   three narrow xterm divergences in cursor save/restore (DECOM scroll-region
   re-clamp, the pending-wrap flag, resize with the alternate screen active) and
   Sixel placement under DECSDM (see below)
@@ -510,6 +517,7 @@ ignored (warn-logged, no output) until its task lands; none of them misroutes an
 | `CSI < 288 ; x ; y M` (mouse-leave report)                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Not sent on window leave or pane-to-pane transitions under SGR-pixel mouse encoding                                                                                  |
 | `CSI > … SP q` (multiple cursors)                                          | 🟨         | ⬜   | v0.13.2 Task 103 | Missing. Recognised and ignored since 126.3 (before, it triggered an unsolicited XTVERSION reply); Task 128 makes this a routing rule                                |
 | `CSI … $ t` (DECRARA)                                                      | ⬜         | ⬜   | —                | Not implemented and not planned. Recognised and ignored since Task 128 (before, it was handled as a window operation)                                                |
+| `CSI 8 m` (SGR conceal)                                                    | ⬜         | ⬜   | —                | Parsed to `Conceal` and ignored by `apply_sgr`; text stays visible. The terminfo entry does not declare `invis` (Task 151.3)                                         |
 
 ---
 

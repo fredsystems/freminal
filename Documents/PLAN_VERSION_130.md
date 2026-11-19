@@ -11542,6 +11542,15 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   entry, which already had both) and `query-os-name`/`query-os_name` through the pure
   `os_name_for_target`. `kitty-query-os_name` is not answered. The `.ti`-vs-XTGETTCAP test
   now also checks `indn` and `rin`. <!-- codespell:ignore rin -->
+- **151.3 (done).** Every "151 Audit" decision applied. `acsc` now equals `xterm-256color`'s;
+  `Se` is `\E[0 q` on both sides; the added capabilities were each checked against the
+  code. The test parses `res/freminal.ti` and reads `lookup_termcap`'s arms from `dcs.rs`, so
+  a new arm on either side fails it: every XTGETTCAP name must match the entry except four
+  listed XTGETTCAP-only names, every entry capability is either answered identically or in an
+  explicit `TERMINFO_ONLY` list, and every `k*` value equals the encoder's bytes. `tic -x -c`
+  leaves four warnings, all shared with `xterm-256color` or kitty (`kind`/`kDN` and
+  `kri`/`kUP` duplicates, `tsl` parameter count, `%;` in `Setulc`, undocumented extended
+  names). The SGR 8 GAPS row is new.
 
 ---
 
