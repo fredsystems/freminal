@@ -11400,6 +11400,32 @@ Activated and decomposed on 2026-11-19 on branch `task-151/own-term`, from `main
   XTGETTCAP `TN` and the FREC `term` metadata.
 - **No new install command.** Task 92 stays dropped; remote copying stays with Task 86.
 
+#### 151 Audit (151.1, 2026-11-19)
+
+A read-only audit compared every capability in `res/freminal.ti` with the parser, handler and
+input encoder, and every `lookup_termcap` name with the entry (system ncurses 6.6 `infocmp -x`
+for `xterm-256color`, `xterm-kitty`, `xterm-ghostty`, `foot`, `wezterm`; `tic -x -c -v2`).
+The entry is standalone (no `use=`); `tic` accepts it with four warnings. Every capability not
+listed below is implemented and value-correct.
+
+| Item                                     | Finding                                                                                                                                                                   | Decision (151.3)                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `invis`, `sgr` p7                        | SGR 8 parses to `Conceal`, which `apply_sgr` ignores                                                                                                                      | Remove both; record SGR 8 as a GAPS row                             |
+| `km`                                     | Alt sends no 8th bit and there is no `smm`/`rmm` (`?1034` not implemented)                                                                                                | Remove (foot omits it)                                              |
+| `acsc` `hh`, `++,,--..00`                | `h` maps to U+2424, not a board glyph; `+ , - . 0` print as ASCII                                                                                                         | Remove; match `xterm-256color`                                      |
+| `ich1`                                   | Works, but no reference entry has it and `tic` warns                                                                                                                      | Remove                                                              |
+| `kcbt`, `kent`                           | Standard values, never sent (Shift+Tab sends HT; keypad Enter sends CR)                                                                                                   | Keep (as `xterm-256color`); the encoder is Task 137 B3/B11          |
+| `kHOM` `kEND` `kNXT` `kPRV` `kind` `kri` | Correct, but default keybindings consume the keys first                                                                                                                   | Keep; documented                                                    |
+| Header                                   | Description is one word; line 1 cites a stale macOS path                                                                                                                  | Fix                                                                 |
+| XTGETTCAP `Se`                           | `\E[2 q` (steady block); freminal's DECSCUSR 0 restores the configured style                                                                                              | `\E[0 q` (kitty, Ghostty, Alacritty)                                |
+| XTGETTCAP `TN`                           | `xterm-256color`                                                                                                                                                          | The effective `TERM` (151.6)                                        |
+| Undeclared, implemented                  | `Tc` `setrgbf` `setrgbb` `Ss` `Se` `Ms` `Cs` `Cr` `BD` `BE` `PS` `PE` `fd` `fe` `kxIN` `kxOUT` `E3` `XR` `XM` `Sync` `smxx` `rmxx` `AX` `XF` `nel`, modified-key families | Add, each value checked against freminal and cited from a reference |
+| Undeclared, not added                    | `RGB` (string form unverified), `xm`, `RV`, `is2`/`rs2`, `smglp`/`smglr`/`smgrp` (DECSLRM argument handling unverified)                                                   | Not added; listed in the table-of-truth test with the reason        |
+
+Where both sides answer a capability, the entry and `lookup_termcap` use identical strings
+(OSC 52 `Ms` keeps ST, as kitty and foot do; `setrgbf`/`setrgbb` keep the semicolon form
+freminal already answers). `Sync` is the `?2026` form, not kitty's DCS form.
+
 #### 151 Subtasks
 
 Every subtask leaves `cargo xtask test` and
@@ -11411,7 +11437,7 @@ outside tests, no raw numeric `as` casts, no new `bool` fields or parameters, no
 behaviour change. A `flake.nix` change that alters a dev shell stops for `nix develop`
 (`flake-dev-shell-discipline`).
 
-##### 151.1 — Terminfo entry audit (READ-ONLY)
+##### 151.1 — Terminfo entry audit (READ-ONLY) (done; see "151 Audit")
 
 Every capability in `res/freminal.ti` is checked against what the parser and handler actually
 do (with the code location that implements it, or "missing"), and every name
@@ -11428,8 +11454,8 @@ two cannot disagree. `query-os-name` is XTGETTCAP-only (it is not a terminfo cap
 
 ##### 151.3 — Entry corrections and one table of truth
 
-Scope: `res/freminal.ti`, `lookup_termcap`, their tests. Fix every wrong or missing
-capability the 151.1 audit found (each fix cites its audit row). Replace the three-capability
+Scope: `res/freminal.ti`, `lookup_termcap`, their tests, and the SGR 8 row in
+`ESCAPE_SEQUENCE_GAPS.md`. Apply every decision in "151 Audit" (each change cites its row). Replace the three-capability
 test from 140.4 with one that parses `res/freminal.ti` (`include_str!`) and checks, for every
 name `lookup_termcap` answers that is a terminfo capability, that the entry has the same
 value, and the reverse for every string capability in the entry that XTGETTCAP should answer.
