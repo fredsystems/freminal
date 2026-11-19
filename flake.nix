@@ -197,6 +197,11 @@
 
                   # Icon — use pre-generated .icns (multi-resolution, Retina-ready).
                   cp assets/macos/freminal.icns "$OUT_APP/Resources/freminal.icns"
+
+                  # Terminfo for the bundled `xterm-freminal` entry, found by
+                  # freminal itself relative to its executable (letter and
+                  # hex directory layouts).
+                  cp -R res/terminfo "$OUT_APP/Resources/terminfo"
                 ''
               else
                 ''

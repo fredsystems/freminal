@@ -127,6 +127,91 @@ fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {
     Ok(temp_dir)
 }
 
+/// The platforms that differ in where a child finds the `xterm-freminal` entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminfoPlatform {
+    /// Looks for a terminfo tree inside a `.app` bundle.
+    MacOs,
+    /// Has no terminfo database, so nothing is made available.
+    Windows,
+    /// Extracts the embedded entry per pane.
+    Other,
+}
+
+impl TerminfoPlatform {
+    const fn current() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// Where the child's terminfo directory comes from.
+#[derive(Debug, PartialEq, Eq)]
+enum TerminfoSource {
+    /// No terminfo directory is set up.
+    Unused,
+    /// The terminfo tree shipped inside the `.app` bundle; nothing is extracted.
+    Bundle(PathBuf),
+    /// The embedded tarball is extracted into a per-pane temporary directory.
+    PerPaneExtraction,
+}
+
+/// The terminfo tree of the `.app` bundle containing `exe`, if `exe` has the shape
+/// `<dir>/<Name>.app/Contents/MacOS/<exe>`.
+///
+/// Pure: it only inspects the path, so whether the directory exists is checked
+/// separately and the shape can be tested on every platform.
+fn bundle_terminfo_dir(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    let contents_dir = macos_dir.parent()?;
+    let app_dir = contents_dir.parent()?;
+    if macos_dir.file_name()? != "MacOS" || contents_dir.file_name()? != "Contents" {
+        return None;
+    }
+    // `extension` is `None` for a bare `.app` (no stem), which is not a bundle name.
+    if app_dir.extension()? != "app" {
+        return None;
+    }
+    Some(contents_dir.join("Resources").join("terminfo"))
+}
+
+/// The existing terminfo directory of the bundle the running executable lives in.
+///
+/// The executable path is canonicalised first: the Nix Darwin package makes
+/// `$out/bin/freminal` a symlink into `Freminal.app/Contents/MacOS/freminal`.
+///
+/// A `.app` built locally with `cargo bundle` has no such directory (the release
+/// workflows copy the tree in after bundling), so this returns `None` there and
+/// the entry is extracted per pane instead.
+fn running_bundle_terminfo_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    bundle_terminfo_dir(&exe).filter(|dir| dir.is_dir())
+}
+
+/// Decide where the child's terminfo directory comes from.
+///
+/// `bundle_dir` is an existing bundle terminfo directory, if there is one; it is
+/// only consulted on macOS. When it is used, per-pane extraction is skipped.
+fn terminfo_source(platform: TerminfoPlatform, bundle_dir: Option<PathBuf>) -> TerminfoSource {
+    match (platform, bundle_dir) {
+        (TerminfoPlatform::Windows, _) => TerminfoSource::Unused,
+        (TerminfoPlatform::MacOs, Some(dir)) => TerminfoSource::Bundle(dir),
+        (TerminfoPlatform::MacOs | TerminfoPlatform::Other, _) => TerminfoSource::PerPaneExtraction,
+    }
+}
+
+/// The `TERMINFO_DIRS` value for a child: `dir` (the bundle directory when there is
+/// one, otherwise the per-pane temporary directory) first, then the empty entry,
+/// which ncurses reads as the system default.
+fn terminfo_dirs_value(dir: &Path) -> String {
+    format!("{}:", dir.display())
+}
+
 #[derive(Error, Debug)]
 enum ExtractTerminfoError {
     #[error("failed to extract")]
@@ -637,8 +722,7 @@ pub fn run_terminal(
     // TERMINFO_DIRS, ncurses checks our directory first but falls back to the
     // system terminfo so readline and other programs can find those entries.
     if let Some(termcaps) = termcaps {
-        let termcaps_str = termcaps.display();
-        cmd.env("TERMINFO_DIRS", format!("{termcaps_str}:"));
+        cmd.env("TERMINFO_DIRS", terminfo_dirs_value(termcaps));
         cmd.env_remove("TERMINFO");
     }
     // TERM Strategy: children get `TERM=xterm-freminal` by default (Task 151).  The
@@ -649,7 +733,8 @@ pub fn run_terminal(
     // nothing is installed.  The value is configurable with `[shell] term`, and a
     // `TERM` in the pane's `env` wins over it.  On Windows the default stays
     // `xterm-256color`: there is no terminfo distribution path and MSYS2/Cygwin
-    // programs read their own databases.
+    // programs read their own databases.  Inside a macOS `.app` the entry ships
+    // in `Contents/Resources/terminfo` and is used instead of the per-pane copy.
     //
     // `term` is the already-resolved single value (`TermName::resolve`); it is also
     // what XTGETTCAP `TN` and the FREC metadata report.  The per-pane `extra_env`
@@ -952,15 +1037,28 @@ impl FreminalPtyInputOutput {
         initial_size: &FreminalTerminalSize,
         pane_id: u32,
     ) -> Result<Self, PtyInitError> {
-        // don't use it.  Skip extraction entirely on Windows: there is no
-        // terminfo database there, so nothing would read the extracted tree.
-        let termcaps = if cfg!(target_os = "windows") {
-            None
+        // Skip extraction entirely on Windows: there is no terminfo database there,
+        // so nothing would read the extracted tree.  Inside a macOS `.app` the
+        // bundled tree is used and nothing is extracted.
+        let platform = TerminfoPlatform::current();
+        let bundle_dir = if platform == TerminfoPlatform::MacOs {
+            running_bundle_terminfo_dir()
         } else {
+            None
+        };
+        let source = terminfo_source(platform, bundle_dir);
+        let termcaps = if source == TerminfoSource::PerPaneExtraction {
             Some(extract_terminfo().map_err(|e| {
                 error!("Failed to extract terminfo: {e}");
                 PtyInitError::ExtractTerminfo(e.to_string())
             })?)
+        } else {
+            None
+        };
+        let terminfo_dir = match &source {
+            TerminfoSource::Unused => None,
+            TerminfoSource::Bundle(dir) => Some(dir.as_path()),
+            TerminfoSource::PerPaneExtraction => termcaps.as_ref().map(TempDir::path),
         };
 
         let result = run_terminal(
@@ -968,7 +1066,7 @@ impl FreminalPtyInputOutput {
             replies,
             send_tx,
             spawn_cfg,
-            termcaps.as_ref().map(TempDir::path),
+            terminfo_dir,
             initial_size,
             pane_id,
         )?;
@@ -1031,6 +1129,174 @@ fn normalize_locale(raw: &str) -> String {
             || format!("{normalised}.UTF-8"),
             |m| format!("{normalised}.UTF-8@{m}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod bundle_terminfo_tests {
+    use super::*;
+
+    #[test]
+    fn exe_inside_an_app_bundle_resolves_to_its_resources_terminfo() {
+        let exe = Path::new("/Applications/Freminal.app/Contents/MacOS/freminal");
+        assert_eq!(
+            bundle_terminfo_dir(exe),
+            Some(PathBuf::from(
+                "/Applications/Freminal.app/Contents/Resources/terminfo"
+            ))
+        );
+    }
+
+    #[test]
+    fn app_bundle_name_may_contain_spaces_and_dots() {
+        let exe = Path::new("/Users/me/My Apps/Freminal 1.2.app/Contents/MacOS/freminal");
+        assert_eq!(
+            bundle_terminfo_dir(exe),
+            Some(PathBuf::from(
+                "/Users/me/My Apps/Freminal 1.2.app/Contents/Resources/terminfo"
+            ))
+        );
+    }
+
+    #[test]
+    fn raw_binary_is_not_a_bundle() {
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/usr/local/bin/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/home/me/target/release/freminal")),
+            None
+        );
+        assert_eq!(bundle_terminfo_dir(Path::new("freminal")), None);
+        assert_eq!(bundle_terminfo_dir(Path::new("/")), None);
+    }
+
+    #[test]
+    fn contents_macos_outside_an_app_directory_is_not_a_bundle() {
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/freminal/Contents/MacOS/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/Freminal.apps/Contents/MacOS/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/.app/Contents/MacOS/freminal")),
+            None
+        );
+    }
+
+    #[test]
+    fn app_directory_without_the_contents_macos_layout_is_not_a_bundle() {
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/Freminal.app/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/Freminal.app/Contents/bin/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/Freminal.app/Other/MacOS/freminal")),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_bin_entry_resolves_through_the_canonical_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let root_path = root.path().canonicalize().expect("canonical root");
+        let macos_dir = root_path.join("Applications/Freminal.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos_dir).expect("create MacOS dir");
+        let real_exe = macos_dir.join("freminal");
+        std::fs::write(&real_exe, b"").expect("write exe");
+        let bin_dir = root_path.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let link = bin_dir.join("freminal");
+        std::os::unix::fs::symlink(&real_exe, &link).expect("symlink");
+
+        // The symlink path itself has no bundle shape ...
+        assert_eq!(bundle_terminfo_dir(&link), None);
+        // ... but its canonical path does.
+        let canonical = link.canonicalize().expect("canonicalize link");
+        assert_eq!(
+            bundle_terminfo_dir(&canonical),
+            Some(root_path.join("Applications/Freminal.app/Contents/Resources/terminfo"))
+        );
+    }
+
+    #[test]
+    fn macos_with_a_bundle_dir_uses_it_and_skips_extraction() {
+        let dir = PathBuf::from("/Applications/Freminal.app/Contents/Resources/terminfo");
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::MacOs, Some(dir.clone())),
+            TerminfoSource::Bundle(dir)
+        );
+    }
+
+    #[test]
+    fn macos_without_a_bundle_dir_extracts_per_pane() {
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::MacOs, None),
+            TerminfoSource::PerPaneExtraction
+        );
+    }
+
+    #[test]
+    fn other_platforms_ignore_a_bundle_dir_and_extract_per_pane() {
+        let dir = PathBuf::from("/Applications/Freminal.app/Contents/Resources/terminfo");
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::Other, Some(dir)),
+            TerminfoSource::PerPaneExtraction
+        );
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::Other, None),
+            TerminfoSource::PerPaneExtraction
+        );
+    }
+
+    #[test]
+    fn windows_sets_up_no_terminfo() {
+        let dir = PathBuf::from("C:/Freminal.app/Contents/Resources/terminfo");
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::Windows, Some(dir)),
+            TerminfoSource::Unused
+        );
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::Windows, None),
+            TerminfoSource::Unused
+        );
+    }
+
+    #[test]
+    fn terminfo_dirs_has_the_chosen_dir_first_and_the_system_default_last() {
+        let bundle = Path::new("/Applications/Freminal.app/Contents/Resources/terminfo");
+        assert_eq!(
+            terminfo_dirs_value(bundle),
+            "/Applications/Freminal.app/Contents/Resources/terminfo:"
+        );
+        let pane = Path::new("/run/user/1000/.tmpAbC123");
+        assert_eq!(terminfo_dirs_value(pane), "/run/user/1000/.tmpAbC123:");
+    }
+
+    #[test]
+    fn bundle_present_dirs_do_not_mention_a_per_pane_dir() {
+        // With a bundle dir the source is `Bundle`, so no temp dir exists to
+        // appear in the search path: the value is exactly bundle dir + default.
+        let dir = PathBuf::from("/Applications/Freminal.app/Contents/Resources/terminfo");
+        let TerminfoSource::Bundle(chosen) =
+            terminfo_source(TerminfoPlatform::MacOs, Some(dir.clone()))
+        else {
+            panic!("expected the bundle source");
+        };
+        let value = terminfo_dirs_value(&chosen);
+        assert_eq!(
+            value.split(':').collect::<Vec<_>>(),
+            [dir.to_str().unwrap_or(""), ""]
+        );
     }
 }
 

@@ -11491,7 +11491,8 @@ the child's value in each case.
 
 ##### 151.7 — macOS bundle terminfo
 
-Scope: `freminal/Cargo.toml` (cargo-bundle `resources`), `io/pty.rs` (a pure function from the
+Scope (amended at execution, see the 151.7 status note): the release workflows' macOS
+staging step instead of cargo-bundle `resources`, `io/pty.rs` (a pure function from the
 executable path to an optional bundle terminfo directory, and the `TERMINFO_DIRS` order as
 decided), `flake.nix` (the Darwin `postInstall` copies the tree into
 `Freminal.app/Contents/Resources/terminfo`). Tests: the pure resolver on every platform
@@ -11576,6 +11577,18 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   (`recording_term`); a pane-level `env` `TERM` is not visible in the header. `reset()` grew
   one line past `too_many_lines` with the new reset-table row and carries an `#[expect]`
   with the reason. A Unix test spawns a real `/bin/sh` and checks `$TERM` in each case.
+- **151.7 (done).** Plan correction: cargo-bundle's `resources` key cannot place files at
+  `Contents/Resources/terminfo/` (it keeps the source path, so `res/terminfo` would land at
+  `Contents/Resources/res/terminfo`), the key is global, and it would also add a copy to the
+  `.deb` and the AppImage (`usr/lib/freminal/…`, cargo-bundle `osx_bundle.rs`,
+  `deb_bundle.rs`, `appimage/app_dir.rs`), against decision 3. Orchestrator decision: no
+  `resources` key; the release workflows (`deploy.yaml`, `nightly.yml`) copy `res/terminfo`
+  into the staged `.app` before `codesign --deep`, and the flake's Darwin `postInstall` does
+  the same. A locally built `cargo bundle` `.app` has no tree and uses per-pane extraction.
+  `pty.rs` gains the pure `bundle_terminfo_dir` (exe path → `X.app/Contents/Resources/terminfo`),
+  `TerminfoPlatform`, `TerminfoSource { Unused, Bundle, PerPaneExtraction }` and
+  `terminfo_dirs_value`; on macOS a present bundle directory replaces per-pane extraction.
+  Neither `cargo bundle` nor the macOS workflow was run locally.
 
 ---
 

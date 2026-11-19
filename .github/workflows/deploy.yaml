@@ -233,6 +233,11 @@ jobs:
       - name: Stage .app for signing
         run: |
           cp -R target/release/bundle/osx/Freminal.app ./Freminal.app
+          # cargo-bundle cannot place a resource directory at an arbitrary
+          # path, so the committed terminfo tree is copied in here, before
+          # signing, so that `codesign --deep` seals it.
+          mkdir -p Freminal.app/Contents/Resources
+          cp -R res/terminfo Freminal.app/Contents/Resources/terminfo
           echo "::group::Staged .app structure"
           find Freminal.app -type f | head -50
           echo "::endgroup::"
