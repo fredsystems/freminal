@@ -7457,7 +7457,7 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
     report.
 - **Depends on:** 147.1 (the ANSI DECRQM form; same file).
 
-#### 147.22 — XTGETTCAP answers `indn`, `rin` and `query-os-name` <!-- codespell:ignore rin -->
+#### 147.22 — XTGETTCAP answers `indn`, `rin` and `query-os-name` (moved to Task 151 as 151.2) <!-- codespell:ignore rin -->
 
 - **Source:** GAPS "XTGETTCAP capability expansion" (pre-v0.13.0; added to 147 by maintainer
   decision 2026-10-11). The GAPS row calls `indn` "indent N"; it is "scroll forward N lines".
@@ -11368,7 +11368,8 @@ Activated and decomposed on 2026-11-19 on branch `task-151/own-term`, from `main
    `res/freminal.ti` outright and the table-of-truth check covers `indn` and `rin`. <!-- codespell:ignore rin -->
 2. **macOS `.app`: bundle copy plus fallback** (the kitty and Ghostty model). The entry ships
    in `Contents/Resources/terminfo/` in both letter and hex layouts, signed with the app.
-   freminal finds it from `current_exe()` and puts it first on `TERMINFO_DIRS`. The raw
+   freminal finds it from `current_exe()` and puts it first on `TERMINFO_DIRS` (superseded by
+   151.C1: it is named by `TERMINFO`). The raw
    binary (no bundle) keeps the per-pane extraction. `sudo` (drops `TERMINFO_DIRS`) is a
    known limit, as in kitty and Ghostty.
 3. **AppImage: per-pane extraction only.** Nothing extra ships in the AppImage. Users who
@@ -11406,7 +11407,8 @@ Activated and decomposed on 2026-11-19 on branch `task-151/own-term`, from `main
   layouts, deterministic) in step with `res/freminal.ti`, as it already does for the tar, and
   the tar is packed from that tree. cargo-bundle's `resources` and the rpm `assets` point at
   the committed files, so packaging needs no `tic` at bundle time.
-- **`TERMINFO_DIRS` order** is: the `.app` bundle directory (macOS, when it exists), then the
+- **`TERMINFO_DIRS` order** (superseded by 151.C1, which names the pane's directory with
+  `TERMINFO` and leaves `TERMINFO_DIRS` alone) is: the `.app` bundle directory (macOS, when it exists), then the
   per-pane temp dir (only when there is no bundle directory), then the system default (the
   trailing empty entry). An installed system copy is found through the default.
 - **Windows keeps `xterm-256color` as its default.** There is no terminfo distribution path on
@@ -11630,6 +11632,88 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   and `sudo -e -u root file` is not (pinned by a test, noted in `DESIGN_DECISIONS.md`). Script
   tests run all three shells against a fake `sudo`.
 
+#### 151 Adversarial review (2026-11-19)
+
+One CODE-REVIEW pass over `main...HEAD` against this section and the repo rules. No blocker.
+`cargo xtask test`, clippy, `check-windows`, `machete`, markdownlint and the Nix lints were
+clean; the committed entry is byte-identical to a fresh `tic -x` (ncurses 6.6); the sudo
+wrappers match Ghostty at `d69f9ed8` line for line.
+
+| ID  | Sev   | Finding (short)                                                              | Disposition |
+| --- | ----- | ---------------------------------------------------------------------------- | ----------- |
+| R1  | major | `tic -x` inside a pane writes into the pane's `$TERMINFO` (temp/bundle dir)  | 151.C3      |
+| R2  | minor | a user's own `TERMINFO` is overwritten; decision not recorded                | 151.C2      |
+| R3  | minor | `FREMINAL_SHELL_FEATURES` is removed only on an injected spawn               | 151.C2      |
+| R4  | minor | "every `k*` value is compared" overstated; `kf*`/unmodified keys untested    | 151.C2      |
+| R5  | minor | `TerminalEmulator::new` grew to ten parameters under an existing allow       | 151.C2      |
+| R6  | minor | "single value … FREC" decision text not amended; stale doc example           | 151.C3      |
+| R7  | minor | 147.22 still reads as an open Task 147 subtask in this branch                | 151.C3      |
+| R8  | minor | decision 2 / `TERMINFO_DIRS` bullet / 151.7 note predate 151.C1              | 151.C3      |
+| R9  | minor | `shell-integration/README.md` does not mention the sudo wrapper              | 151.C3      |
+| R10 | minor | `sudo -u other`, `su`, `doas`, containers cannot read the 0700 pane dir      | 151.C3      |
+| R11 | minor | committed tree bytes are per `tic` version; not stated                       | 151.C3      |
+| R12 | nit   | stale test name; `TERMINFO_DIRS` test vacuous when the variable is unset     | 151.C2      |
+| R13 | nit   | table-of-truth scan of `dcs.rs` misses multi-line arms; parser in DCS tests  | 151.C2      |
+| R14 | nit   | pane `env` `TERM` key case-sensitive on Windows; empty value accepted        | 151.C2      |
+| R15 | nit   | sudo checkbox enabled while `set_term_program` is off                        | 151.C2      |
+| R16 | nit   | `query-os-name` maps DragonFly to `Unknown`                                  | 151.C2      |
+| R17 | nit   | `gui::recording` made `pub` instead of `pub(crate)`                          | 151.C2      |
+| R18 | nit   | `.ti` header "every capability implemented" (kcbt/kent); md5sums comment     | 151.C3      |
+| R19 | nit   | real-PTY tests leave `sleep 30` children                                     | 151.C2      |
+| R20 | nit   | `packages.terminfo` has no `meta.license`                                    | 151.C2      |
+| R21 | nit   | tool-missing skips pass vacuously on CI                                      | 151.C2      |
+| R22 | n/a   | `nix build .#freminal` (full check phase) not run                            | before PR   |
+
+Orchestrator decisions on the open points:
+
+- **R1:** the documented local installs name their target: `tic -x -o ~/.terminfo -` (per
+  user) and `sudo env -u TERMINFO tic -x -` (system-wide; the sudo wrapper keeps `TERMINFO`,
+  so it must be unset). The `ssh HOST -- tic -x -` forms are unaffected: ssh does not forward
+  `TERMINFO`.
+- **R2:** an inherited `TERMINFO` is kept reachable by putting it at the front of the child's
+  `TERMINFO_DIRS` (followed by the inherited `TERMINFO_DIRS`, or the system default when that
+  is unset); freminal's directory stays in `TERMINFO`. `TERMINFO` is set whatever `TERM` is:
+  it is not exclusive (151.C1), so a non-bundled `TERM` still resolves.
+- **R4:** the keypad `\x1b[OM` encoding no longer exists once Task 147 merges (147.5 deleted
+  `TerminalInput::KeyPad` and sends `SS3 M`); `kent` and `kcbt` go in an explicit "declared,
+  not sent" list with the reason.
+- **R5:** the per-pane spawn-environment values move into one struct passed to
+  `TerminalEmulator::new` (`freminal-extend-or-extract`). The `reset()` `#[expect]` stays: the
+  exhaustive destructuring is the reset table's compile-time check.
+- **R14:** on Windows the `TERM` key is matched case-insensitively; an empty pane-`env` `TERM`
+  is treated as absent.
+- **R21:** when the `CI` variable is set, a missing `tic` or `infocmp` fails the terminfo tests
+  instead of skipping (every Unix CI runner has them); missing `zsh`/`fish` still skip.
+
+#### 151 Cleanup entries (review)
+
+##### 151.C2 — Review fixes: code and tests
+
+R2, R3, R4, R5, R12, R13, R14, R15, R16, R17, R19, R20, R21, as decided above. Scope: the files
+each finding names, plus the `TerminalEmulator::new` call sites for R5.
+
+- **Status: done (2026-11-19).** R2: pure `terminfo_env` (an inherited non-empty `TERMINFO`
+  heads the child's `TERMINFO_DIRS`, then the inherited list or the system default), tested
+  over every combination. R3: `apply_spawn_shell_features` runs on every spawn path. R4: every
+  `k*` capability is compared with `to_payload` output, except `kent`, `kcbt` and `kmous` in
+  `DECLARED_NOT_SENT` with reasons. R5: `PaneSpawnEnv` (`io/pane_spawn_env.rs`) cuts
+  `TerminalEmulator::new` to five parameters and removes its `too_many_arguments` allow; the
+  orchestrator also had the TOML bool carried as `TermProgramEnv { Advertise, Omit }`
+  (`io/term_program_env.rs`, in `PaneSpawnEnv` and `PtySpawnConfig`). R12: renamed and made
+  non-vacuous. R13: the parser and table-of-truth tests are
+  `terminal_handler/dcs/terminfo_truth_tests.rs`, and the arm scan panics on any line it does
+  not understand (a mutation test confirmed). R14: `TermName::is_env_key(platform, key)`
+  (case-insensitive on Windows), empty pane-`env` `TERM` ignored. R15, R16, R19, R20, R21 as
+  decided. **R17 not done, correctly:** `freminal/src/main.rs` is a separate crate root (the
+  binary) that reaches `freminal::gui::recording`, so the module stays `pub`.
+
+##### 151.C3 — Review fixes: docs and plan
+
+R1, R6, R7, R8, R9, R10, R11, R18. Scope: `README.md`, `Documents/DESIGN_DECISIONS.md`,
+`shell-integration/README.md`, `res/freminal.ti` (header), `assets/ci/fix-linux-icon-metadata.sh`
+(comment), `freminal-terminal-emulator/build.rs` (comment), `freminal-terminal-emulator/src/recording.rs`
+(doc example), `Documents/FREC_FORMAT.md`; the plan items are the orchestrator's.
+
 #### 151 Status notes
 
 - **151.1 (done).** See "151 Audit".
@@ -11681,7 +11765,8 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   the same. A locally built `cargo bundle` `.app` has no tree and uses per-pane extraction.
   `pty.rs` gains the pure `bundle_terminfo_dir` (exe path → `X.app/Contents/Resources/terminfo`),
   `TerminfoPlatform`, `TerminfoSource { Unused, Bundle, PerPaneExtraction }` and
-  `terminfo_dirs_value`; on macOS a present bundle directory replaces per-pane extraction.
+  `terminfo_dirs_value` (replaced by `apply_terminfo_env` in 151.C1); on macOS a present
+  bundle directory replaces per-pane extraction.
   Neither `cargo bundle` nor the macOS workflow was run locally.
 - **151.8 (done).** rpm `assets` and the repacked `.deb` (`fix-linux-icon-metadata.sh`
   `patch_deb` only; the AppImage is untouched) install `/usr/share/terminfo/{x,f}/…`.

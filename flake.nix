@@ -120,7 +120,13 @@
           # only needs the entry (for sudo, detached tmux servers, ssh targets)
           # installs this instead of the whole terminal.
           terminfo =
-            pkgs.runCommand "freminal-terminfo" { meta.description = "Freminal terminfo entries"; }
+            pkgs.runCommand "freminal-terminfo"
+              {
+                meta = {
+                  description = "Freminal terminfo entries";
+                  license = lib.licenses.mit;
+                };
+              }
               ''
                 mkdir -p $out/share
                 cp -r --no-preserve=mode ${

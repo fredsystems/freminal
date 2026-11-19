@@ -39,6 +39,7 @@ use freminal_common::{
 };
 use freminal_terminal_emulator::io::{
     FreminalPtyInputOutput, PtyRead, PtySpawnConfig, PtyWrite, ReplyQueue, SudoTerminfo,
+    TermProgramEnv,
 };
 
 const END_MARKER: &str = "END_OF_CHILD_OUTPUT";
@@ -94,6 +95,30 @@ else
 fi
 echo END_OF_CHILD_OUTPUT
 "#;
+
+/// Whether the `CI` variable marks this as a CI run: set and non-empty.
+fn is_ci(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
+}
+
+/// Report that a terminfo tool is missing.  Locally that skips the test; on CI
+/// (`CI` set and non-empty) every Unix runner has the tools, so a missing one
+/// fails instead of letting the test pass without checking anything.
+fn skip_unless_ci(reason: &str) {
+    assert!(
+        !is_ci(std::env::var_os("CI")),
+        "CI is set, so a missing terminfo tool is a failure, not a skip: {reason}"
+    );
+    eprintln!("SKIPPED: {reason}");
+}
+
+#[test]
+fn ci_is_a_set_and_non_empty_variable() {
+    assert!(!is_ci(None));
+    assert!(!is_ci(Some(std::ffi::OsString::new())));
+    assert!(is_ci(Some(std::ffi::OsString::from("true"))));
+    assert!(is_ci(Some(std::ffi::OsString::from("1"))));
+}
 
 /// Install a deliberately stale `xterm-freminal` (8 colours) under `home/.terminfo`.
 ///
@@ -161,7 +186,7 @@ fn run_child() -> Option<String> {
         cwd: None,
         extra_env: Some(&pane_env),
         term: &term,
-        set_term_program: false,
+        term_program: TermProgramEnv::Omit,
         sudo_terminfo: SudoTerminfo::Unchanged,
     };
     // Holds the per-pane terminfo directory; it must outlive the child.
@@ -210,12 +235,12 @@ fn run_child() -> Option<String> {
 #[test]
 fn a_real_child_resolves_xterm_freminal() {
     let Some(output) = run_child() else {
-        eprintln!("SKIPPED: tic is not installed, cannot build a stale ~/.terminfo entry");
+        skip_unless_ci("tic is not installed, cannot build a stale ~/.terminfo entry");
         return;
     };
 
     if output.contains(SKIP_MARKER) {
-        eprintln!("SKIPPED: infocmp or tput is not installed, cannot resolve terminfo in a child");
+        skip_unless_ci("infocmp or tput is not installed, cannot resolve terminfo in a child");
         return;
     }
 
@@ -306,11 +331,11 @@ fn a_real_child_resolves_xterm_freminal() {
 #[test]
 fn terminfo_does_not_hide_other_term_values() {
     let Some(output) = run_child() else {
-        eprintln!("SKIPPED: tic is not installed, cannot build a stale ~/.terminfo entry");
+        skip_unless_ci("tic is not installed, cannot build a stale ~/.terminfo entry");
         return;
     };
     if output.contains(SKIP_MARKER) {
-        eprintln!("SKIPPED: infocmp or tput is not installed");
+        skip_unless_ci("infocmp or tput is not installed");
         return;
     }
     assert!(

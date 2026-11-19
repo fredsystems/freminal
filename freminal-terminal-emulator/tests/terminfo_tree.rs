@@ -109,6 +109,30 @@ fn letter_and_hex_copies_are_identical() {
     assert!(by_path("x/xterm-freminal") == by_path("f/freminal"));
 }
 
+/// Whether the `CI` variable marks this as a CI run: set and non-empty.
+fn is_ci(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
+}
+
+/// Report that a terminfo tool is missing.  Locally that skips the test; on CI
+/// (`CI` set and non-empty) every Unix runner has the tools, so a missing one
+/// fails instead of letting the test pass without checking anything.
+fn skip_unless_ci(reason: &str) {
+    assert!(
+        !is_ci(std::env::var_os("CI")),
+        "CI is set, so a missing terminfo tool is a failure, not a skip: {reason}"
+    );
+    eprintln!("SKIPPED: {reason}");
+}
+
+#[test]
+fn ci_is_a_set_and_non_empty_variable() {
+    assert!(!is_ci(None));
+    assert!(!is_ci(Some(std::ffi::OsString::new())));
+    assert!(is_ci(Some(std::ffi::OsString::from("true"))));
+    assert!(is_ci(Some(std::ffi::OsString::from("1"))));
+}
+
 /// The source file is a public URL (linked from the README) and a release asset;
 /// `include_str!` pins that the path exists.
 const SOURCE: &str = include_str!("../../res/freminal.ti");
@@ -130,7 +154,9 @@ fn source_compiles_from_stdin_to_the_committed_entry() {
     {
         Ok(child) => child,
         Err(err) => {
-            eprintln!("SKIPPED: `tic` is not available ({err}); stdin compile not checked");
+            skip_unless_ci(&format!(
+                "`tic` is not available ({err}); stdin compile not checked"
+            ));
             return;
         }
     };

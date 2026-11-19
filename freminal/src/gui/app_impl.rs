@@ -848,7 +848,9 @@ impl freminal_windowing::App for FreminalGui {
                     term: TermName::resolve(&self.config.shell, TermPlatform::current(), None),
                     recording_swap: self.recording_swap.clone(),
                     recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
-                    set_term_program: self.config.shell_integration.set_term_program,
+                    term_program: super::pty::term_program_from_config(
+                        &self.config.shell_integration,
+                    ),
                     sudo_terminfo: super::pty::sudo_terminfo_from_config(
                         &self.config.shell_integration,
                     ),
@@ -4603,7 +4605,7 @@ impl FreminalGui {
                 term: TermName::resolve(&self.config.shell, TermPlatform::current(), None),
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
-                set_term_program: self.config.shell_integration.set_term_program,
+                term_program: super::pty::term_program_from_config(&self.config.shell_integration),
                 sudo_terminfo: super::pty::sudo_terminfo_from_config(
                     &self.config.shell_integration,
                 ),

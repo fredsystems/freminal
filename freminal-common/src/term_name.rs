@@ -67,7 +67,8 @@ const TERM_ENV_KEY: &str = "TERM";
 /// Computed once per pane at spawn by [`TermName::resolve`].  A `TERM` in the pane's (or the
 /// layout's) `env` map wins over `[shell] term`, which wins over the platform default.  The `env`
 /// value is taken verbatim: it is an explicit instruction for that pane, and honouring it exactly
-/// is what keeps the child, `TN` and the recording in agreement.
+/// is what keeps the child, `TN` and the recording in agreement.  An empty `TERM` value is treated
+/// as absent, so it falls through to `[shell] term` rather than blanking the child's `TERM`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TermName(String);
 
@@ -81,24 +82,35 @@ impl TermName {
         pane_env: Option<&HashMap<String, String>>,
     ) -> Self {
         let term = pane_env
-            .and_then(Self::env_override)
+            .and_then(|env| Self::env_override(platform, env))
             .unwrap_or_else(|| shell.effective_term(platform));
         Self(term.to_owned())
     }
 
-    /// The `TERM` set by a per-pane `env` map, if it has one.
+    /// The `TERM` set by a per-pane `env` map on `platform`, if it has a non-empty one.
+    ///
+    /// Keys are matched with [`TermName::is_env_key`].  When a Windows map holds the key in more
+    /// than one case, the exact `TERM` wins, then the lexicographically smallest key, so the
+    /// result does not depend on hash order.
     #[must_use]
-    pub fn env_override(env: &HashMap<String, String>) -> Option<&str> {
-        env.get(TERM_ENV_KEY).map(String::as_str)
+    pub fn env_override(platform: TermPlatform, env: &HashMap<String, String>) -> Option<&str> {
+        env.iter()
+            .filter(|(key, value)| Self::is_env_key(platform, key) && !value.is_empty())
+            .min_by_key(|(key, _)| (key.as_str() != TERM_ENV_KEY, key.as_str()))
+            .map(|(_, value)| value.as_str())
     }
 
-    /// Whether `key` names the `TERM` variable in a per-pane `env` map.
+    /// Whether `key` names the `TERM` variable in a per-pane `env` map on `platform`.
     ///
-    /// The spawn path skips this key when it applies the map, because the value is already
-    /// folded into the [`TermName`] it sets.
+    /// Windows environment variable names are case-insensitive, so `term` names `TERM` there;
+    /// elsewhere only the exact `TERM` does.  The spawn path skips every key this matches when it
+    /// applies the map, because the value is already folded into the [`TermName`] it sets.
     #[must_use]
-    pub fn is_env_key(key: &str) -> bool {
-        key == TERM_ENV_KEY
+    pub fn is_env_key(platform: TermPlatform, key: &str) -> bool {
+        match platform {
+            TermPlatform::Windows => key.eq_ignore_ascii_case(TERM_ENV_KEY),
+            TermPlatform::Other => key == TERM_ENV_KEY,
+        }
     }
 
     /// The default `TERM` on `platform`, for panes with no configuration to read.
@@ -194,7 +206,11 @@ mod tests {
     }
 
     fn env_with_term(term: &str) -> HashMap<String, String> {
-        HashMap::from([("TERM".to_owned(), term.to_owned())])
+        env_with_term_key("TERM", term)
+    }
+
+    fn env_with_term_key(key: &str, term: &str) -> HashMap<String, String> {
+        HashMap::from([(key.to_owned(), term.to_owned())])
     }
 
     #[test]
@@ -259,10 +275,86 @@ mod tests {
     }
 
     #[test]
-    fn env_key_is_exactly_term() {
-        assert!(TermName::is_env_key("TERM"));
-        assert!(!TermName::is_env_key("TERM_PROGRAM"));
-        assert!(!TermName::is_env_key("term"));
+    fn env_key_is_exactly_term_off_windows() {
+        let other = TermPlatform::Other;
+        assert!(TermName::is_env_key(other, "TERM"));
+        assert!(!TermName::is_env_key(other, "TERM_PROGRAM"));
+        assert!(!TermName::is_env_key(other, "term"));
+    }
+
+    #[test]
+    fn env_key_is_case_insensitive_on_windows() {
+        let windows = TermPlatform::Windows;
+        for key in ["TERM", "term", "Term", "tErM"] {
+            assert!(TermName::is_env_key(windows, key), "{key}");
+        }
+        assert!(!TermName::is_env_key(windows, "TERM_PROGRAM"));
+        assert!(!TermName::is_env_key(windows, "TERMS"));
+        assert!(!TermName::is_env_key(windows, ""));
+    }
+
+    #[test]
+    fn windows_pane_env_term_in_any_case_wins_over_config() {
+        let shell = shell_with_term(Some("xterm-256color"));
+        let env = env_with_term_key("Term", "screen-256color");
+        assert_eq!(
+            TermName::resolve(&shell, TermPlatform::Windows, Some(&env)).as_str(),
+            "screen-256color"
+        );
+    }
+
+    #[test]
+    fn lowercase_pane_env_term_is_not_a_term_override_off_windows() {
+        let shell = shell_with_term(Some("xterm-256color"));
+        let env = env_with_term_key("term", "screen-256color");
+        assert_eq!(
+            TermName::resolve(&shell, TermPlatform::Other, Some(&env)).as_str(),
+            "xterm-256color"
+        );
+    }
+
+    #[test]
+    fn windows_duplicate_keys_resolve_deterministically() {
+        let mut env = env_with_term_key("term", "lower");
+        env.insert("TERM".to_owned(), "upper".to_owned());
+        env.insert("Term".to_owned(), "mixed".to_owned());
+        assert_eq!(
+            TermName::env_override(TermPlatform::Windows, &env),
+            Some("upper")
+        );
+        env.remove("TERM");
+        // `Term` sorts before `term`.
+        assert_eq!(
+            TermName::env_override(TermPlatform::Windows, &env),
+            Some("mixed")
+        );
+    }
+
+    #[test]
+    fn empty_pane_env_term_is_treated_as_absent() {
+        let shell = shell_with_term(Some("xterm-256color"));
+        let env = env_with_term("");
+        for platform in [TermPlatform::Other, TermPlatform::Windows] {
+            assert_eq!(TermName::env_override(platform, &env), None);
+            assert_eq!(
+                TermName::resolve(&shell, platform, Some(&env)).as_str(),
+                "xterm-256color"
+            );
+        }
+        assert_eq!(
+            TermName::resolve(&shell_with_term(None), TermPlatform::Other, Some(&env)).as_str(),
+            "xterm-freminal"
+        );
+    }
+
+    #[test]
+    fn empty_windows_duplicate_does_not_mask_a_non_empty_term() {
+        let mut env = env_with_term_key("term", "");
+        env.insert("Term".to_owned(), "screen".to_owned());
+        assert_eq!(
+            TermName::env_override(TermPlatform::Windows, &env),
+            Some("screen")
+        );
     }
 
     #[test]

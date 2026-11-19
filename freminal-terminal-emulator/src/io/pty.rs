@@ -3,18 +3,20 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{collections::HashMap, io::Write, path::Path, path::PathBuf};
 
 use super::shell_features::{SudoTerminfo, apply_shell_features_env};
+use super::term_program_env::TermProgramEnv;
 use super::{PtyRead, PtyWrite};
 use arc_swap::ArcSwapOption;
 use conv2::ValueFrom;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use freminal_common::{
     pty_write::FreminalTerminalSize,
-    term_name::TermName,
+    term_name::{TermName, TermPlatform},
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
     terminfo::TERMINFO,
 };
@@ -206,19 +208,64 @@ fn terminfo_source(platform: TerminfoPlatform, bundle_dir: Option<PathBuf>) -> T
     }
 }
 
-/// Point the child's `TERMINFO` at `dir` (the bundle directory when there is one,
-/// otherwise the per-pane temporary directory).
+/// The terminfo variables the child is given: `TERMINFO` always, `TERMINFO_DIRS`
+/// only when a user-supplied `TERMINFO` has to stay reachable.
+#[derive(Debug, PartialEq, Eq)]
+struct TerminfoEnv {
+    terminfo: PathBuf,
+    /// `None` leaves the inherited `TERMINFO_DIRS` (set or not) untouched.
+    terminfo_dirs: Option<OsString>,
+}
+
+/// Decide the child's terminfo variables from the pane's directory and the
+/// variables the parent process has.
 ///
-/// `TERMINFO` is the first place ncurses looks and is not exclusive: the first
-/// directory in its search order that holds the requested entry wins, and a
-/// lookup that misses falls through to the rest (ncurses `db_iterator.c`:
-/// `$TERMINFO`, then `$HOME/.terminfo`, then `$TERMINFO_DIRS`, then the compiled-in
-/// default).  So a stale per-user `~/.terminfo` copy cannot shadow the pane's
-/// entry, and `TERM=xterm-256color` still resolves from the system database.
-/// The inherited `TERMINFO_DIRS` is left untouched.  This is what kitty and
-/// Ghostty do with their bundled directories.
+/// `TERMINFO` is always the pane's directory `dir` (the bundle directory when
+/// there is one, otherwise the per-pane temporary directory), whatever `TERM` is.
+/// It is the first place ncurses looks and is not exclusive: the first directory
+/// in its search order that holds the requested entry wins, and a lookup that
+/// misses falls through to the rest (ncurses `db_iterator.c`: `$TERMINFO`, then
+/// `$HOME/.terminfo`, then `$TERMINFO_DIRS`, then the compiled-in default).  So a
+/// stale per-user `~/.terminfo` copy cannot shadow the pane's entry, and
+/// `TERM=xterm-256color` still resolves from the system database.  This is what
+/// kitty and Ghostty do with their bundled directories.
+///
+/// Setting `TERMINFO` would hide a `TERMINFO` the user exported (a private
+/// database for a custom `TERM`).  So when the parent has a non-empty `TERMINFO`
+/// it is moved to the front of the child's `TERMINFO_DIRS`, followed by the
+/// parent's `TERMINFO_DIRS`; when that is unset (or empty) the value ends with an
+/// empty element, which ncurses reads as the compiled-in default, so the system
+/// database stays reachable.  Without an inherited `TERMINFO` the inherited
+/// `TERMINFO_DIRS` is left alone.
+fn terminfo_env(
+    dir: &Path,
+    inherited_terminfo: Option<&OsStr>,
+    inherited_terminfo_dirs: Option<&OsStr>,
+) -> TerminfoEnv {
+    let terminfo_dirs = inherited_terminfo
+        .filter(|inherited| !inherited.is_empty())
+        .map(|inherited| {
+            let mut dirs = inherited.to_os_string();
+            dirs.push(":");
+            if let Some(rest) = inherited_terminfo_dirs {
+                dirs.push(rest);
+            }
+            dirs
+        });
+    TerminfoEnv {
+        terminfo: dir.to_path_buf(),
+        terminfo_dirs,
+    }
+}
+
+/// Apply [`terminfo_env`] to `cmd`, reading the inherited values from the
+/// builder's environment (which starts as the parent's).
 fn apply_terminfo_env(cmd: &mut CommandBuilder, dir: &Path) {
-    cmd.env("TERMINFO", dir);
+    let env = terminfo_env(dir, cmd.get_env("TERMINFO"), cmd.get_env("TERMINFO_DIRS"));
+    cmd.env("TERMINFO", &env.terminfo);
+    if let Some(dirs) = env.terminfo_dirs {
+        cmd.env("TERMINFO_DIRS", dirs);
+    }
 }
 
 #[derive(Error, Debug)]
@@ -502,10 +549,11 @@ pub struct PtySpawnConfig<'a> {
     pub cwd: Option<&'a Path>,
     /// Extra environment variables to set on the child process.
     pub extra_env: Option<&'a HashMap<String, String>>,
-    /// When `true`, set `TERM_PROGRAM=freminal` and `TERM_PROGRAM_VERSION`
-    /// on the child process before applying `extra_env`.  Driven by
+    /// Whether to set `TERM_PROGRAM=freminal` and `TERM_PROGRAM_VERSION` on the
+    /// child process before applying `extra_env`, and to inject the
+    /// shell-integration scripts.  Driven by
     /// `config.shell_integration.set_term_program` (Task 72.6).
-    pub set_term_program: bool,
+    pub term_program: TermProgramEnv,
     /// Whether the shell-integration `sudo` wrapper that preserves `TERMINFO`
     /// is on.  Driven by `config.shell_integration.sudo_preserve_terminfo`
     /// (Task 151.12, on by default); only takes effect when shell integration
@@ -550,10 +598,13 @@ fn apply_term_env(cmd: &mut CommandBuilder, term: &TermName) {
 ///
 /// `TERM` is skipped: it was folded into the pane's [`TermName`] and already set by
 /// [`apply_term_env`], so setting it again could only introduce a value that
-/// disagrees with what XTGETTCAP `TN` and the FREC metadata report.
+/// disagrees with what XTGETTCAP `TN` and the FREC metadata report.  Every key
+/// [`TermName::is_env_key`] matches is skipped (on Windows that includes other
+/// letter cases), so an empty `TERM` in the map cannot blank the child's `TERM`.
 fn apply_extra_env(cmd: &mut CommandBuilder, env: &HashMap<String, String>) {
+    let platform = TermPlatform::current();
     for (key, value) in env {
-        if !TermName::is_env_key(key) {
+        if !TermName::is_env_key(platform, key) {
             cmd.env(key, value);
         }
     }
@@ -590,7 +641,7 @@ fn detect_shell(program: &str) -> Option<Shell> {
 /// Apply shell-integration env injection to `cmd` for `shell`, using
 /// `resources` as the shell-integration resources directory.  Called
 /// from [`run_terminal`] when (a) no explicit positional command was
-/// passed, (b) `set_term_program` is enabled, and (c) the program path
+/// passed, (b) `term_program` is `Advertise`, and (c) the program path
 /// matches a recognised shell.
 ///
 /// `shell_program` is the resolved shell executable path (from `--shell`,
@@ -660,6 +711,22 @@ fn inject_shell_integration_env(
     }
 }
 
+/// Set or clear [`SHELL_FEATURES_ENV`](super::shell_features::SHELL_FEATURES_ENV) for a spawn.
+///
+/// `injected` is the shell whose integration scripts this spawn injected, or
+/// `None` when none were (`term_program` is `Omit`, unknown shell, positional
+/// command).  Only an injected spawn can turn a feature on, because only the
+/// injected scripts read the variable; every other spawn gets `Unchanged`, which
+/// removes an inherited value.
+fn apply_spawn_shell_features(
+    cmd: &mut CommandBuilder,
+    injected: Option<Shell>,
+    requested: SudoTerminfo,
+) {
+    let sudo = injected.map_or(SudoTerminfo::Unchanged, |_| requested);
+    apply_shell_features_env(cmd, sudo);
+}
+
 /// Spawn the child process on a new PTY and run the PTY thread event loop.
 ///
 /// Integrates the PTY reader, GUI input channel, and window-command dispatch
@@ -689,7 +756,7 @@ pub fn run_terminal(
         shell,
         cwd,
         extra_env,
-        set_term_program,
+        term_program,
         sudo_terminfo,
         term,
     } = spawn_cfg;
@@ -757,7 +824,7 @@ pub fn run_terminal(
     // Shell integration: announce ourselves to scripts via TERM_PROGRAM.
     // Applied BEFORE `extra_env` so layout/user env wins on conflict.
     // Gated on `[shell_integration] set_term_program` (Task 72.6).
-    if set_term_program {
+    if term_program == TermProgramEnv::Advertise {
         for (key, value) in term_program_env_pairs() {
             cmd.env(key, value);
         }
@@ -765,7 +832,7 @@ pub fn run_terminal(
     // Spawn-time shell-integration env injection (Task 72.8b).
     //
     // When we're spawning a bare interactive shell (no positional command)
-    // and `set_term_program` is enabled, detect the shell flavour and inject
+    // and `term_program` is `Advertise`, detect the shell flavour and inject
     // the env that makes our shipped integration scripts auto-load.  The
     // scripts emit OSC 133 markers tagged `freminal=1; fid=<id>` so the
     // command-block tracker can recognise them.
@@ -778,8 +845,8 @@ pub fn run_terminal(
     // than appending `--posix` as a bare arg (which would make
     // `portable_pty` spawn a program literally named `--posix`; see the
     // function's docs).
-    if spawning_shell
-        && set_term_program
+    let injected_shell = if spawning_shell
+        && term_program == TermProgramEnv::Advertise
         && let (Some(prog), Some(resources)) = (
             shell_program.as_deref(),
             freminal_common::config::shell_integration_dir(),
@@ -787,9 +854,14 @@ pub fn run_terminal(
         && let Some(shell) = detect_shell(prog)
     {
         inject_shell_integration_env(&mut cmd, shell, resources.path(), prog);
-        // Tell the injected scripts which optional features are on (Task 151.12).
-        apply_shell_features_env(&mut cmd, sudo_terminfo);
-    }
+        Some(shell)
+    } else {
+        None
+    };
+    // Tell the injected scripts which optional features are on (Task 151.12).
+    // Runs on every spawn so an inherited list is always dropped unless this
+    // spawn turns the feature on.
+    apply_spawn_shell_features(&mut cmd, injected_shell, sudo_terminfo);
     cmd.env("__CFBundleIdentifier", "io.github.fredclausen.freminal");
 
     // NOTE: Some programs (e.g. ohmyposh, zsh) require LANG to be set.  On
@@ -1285,26 +1357,101 @@ mod bundle_terminfo_tests {
         );
     }
 
-    #[test]
-    fn terminfo_env_is_the_chosen_dir_alone() {
-        let bundle = Path::new("/Applications/Freminal.app/Contents/Resources/terminfo");
+    const SENTINEL_DIRS: &str = "/sentinel/one:/sentinel/two";
+
+    /// A builder whose inherited terminfo variables are exactly the given ones,
+    /// independent of the process environment.
+    fn cmd_inheriting(terminfo: Option<&str>, dirs: Option<&str>) -> CommandBuilder {
         let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env_remove("TERMINFO");
+        cmd.env_remove("TERMINFO_DIRS");
+        if let Some(terminfo) = terminfo {
+            cmd.env("TERMINFO", terminfo);
+        }
+        if let Some(dirs) = dirs {
+            cmd.env("TERMINFO_DIRS", dirs);
+        }
+        cmd
+    }
+
+    #[test]
+    fn terminfo_env_sets_terminfo_to_the_bundle_or_pane_dir() {
+        let bundle = Path::new("/Applications/Freminal.app/Contents/Resources/terminfo");
+        let mut cmd = cmd_inheriting(None, None);
         apply_terminfo_env(&mut cmd, bundle);
         assert_eq!(cmd.get_env("TERMINFO"), Some(bundle.as_os_str()));
 
         let pane = Path::new("/run/user/1000/.tmpAbC123");
-        let mut cmd = CommandBuilder::new("/bin/sh");
+        let mut cmd = cmd_inheriting(None, None);
         apply_terminfo_env(&mut cmd, pane);
         assert_eq!(cmd.get_env("TERMINFO"), Some(pane.as_os_str()));
     }
 
     #[test]
-    fn terminfo_env_leaves_terminfo_dirs_alone() {
-        let mut cmd = CommandBuilder::new("/bin/sh");
+    fn pure_terminfo_env_covers_every_inherited_combination() {
+        let dir = Path::new("/pane");
+        let user = OsStr::new("/home/u/my-terminfo");
+        let dirs = OsStr::new("/opt/a:/opt/b");
+        let case =
+            |terminfo: Option<&OsStr>, dirs: Option<&OsStr>| terminfo_env(dir, terminfo, dirs);
+        let expect = |terminfo_dirs: Option<&str>| TerminfoEnv {
+            terminfo: PathBuf::from("/pane"),
+            terminfo_dirs: terminfo_dirs.map(OsString::from),
+        };
+
+        // Neither inherited: TERMINFO_DIRS untouched.
+        assert_eq!(case(None, None), expect(None));
+        // Only TERMINFO_DIRS inherited: untouched.
+        assert_eq!(case(None, Some(dirs)), expect(None));
+        // Only TERMINFO: kept first, then the empty "system default" element.
+        assert_eq!(case(Some(user), None), expect(Some("/home/u/my-terminfo:")));
+        // Both: TERMINFO first, then the inherited list.
+        assert_eq!(
+            case(Some(user), Some(dirs)),
+            expect(Some("/home/u/my-terminfo:/opt/a:/opt/b"))
+        );
+        // An empty TERMINFO has nothing to keep.
+        assert_eq!(case(Some(OsStr::new("")), None), expect(None));
+        assert_eq!(case(Some(OsStr::new("")), Some(dirs)), expect(None));
+        // An empty inherited TERMINFO_DIRS reads the same as an unset one.
+        assert_eq!(
+            case(Some(user), Some(OsStr::new(""))),
+            expect(Some("/home/u/my-terminfo:"))
+        );
+    }
+
+    #[test]
+    fn terminfo_env_leaves_an_inherited_terminfo_dirs_alone_without_a_user_terminfo() {
+        let mut cmd = cmd_inheriting(None, Some(SENTINEL_DIRS));
         apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
         assert_eq!(
             cmd.get_env("TERMINFO_DIRS"),
-            std::env::var_os("TERMINFO_DIRS").as_deref()
+            Some(OsStr::new(SENTINEL_DIRS))
+        );
+
+        let mut cmd = cmd_inheriting(None, None);
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(cmd.get_env("TERMINFO_DIRS"), None);
+    }
+
+    #[test]
+    fn terminfo_env_keeps_a_user_terminfo_reachable_through_terminfo_dirs() {
+        let mut cmd = cmd_inheriting(Some("/home/u/my-terminfo"), Some(SENTINEL_DIRS));
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(cmd.get_env("TERMINFO"), Some(OsStr::new("/tmp/x")));
+        assert_eq!(
+            cmd.get_env("TERMINFO_DIRS"),
+            Some(OsStr::new(
+                "/home/u/my-terminfo:/sentinel/one:/sentinel/two"
+            ))
+        );
+
+        let mut cmd = cmd_inheriting(Some("/home/u/my-terminfo"), None);
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(cmd.get_env("TERMINFO"), Some(OsStr::new("/tmp/x")));
+        assert_eq!(
+            cmd.get_env("TERMINFO_DIRS"),
+            Some(OsStr::new("/home/u/my-terminfo:"))
         );
     }
 
@@ -1316,7 +1463,7 @@ mod bundle_terminfo_tests {
         else {
             panic!("expected the bundle source");
         };
-        let mut cmd = CommandBuilder::new("/bin/sh");
+        let mut cmd = cmd_inheriting(None, None);
         apply_terminfo_env(&mut cmd, &chosen);
         assert_eq!(cmd.get_env("TERMINFO"), Some(dir.as_os_str()));
     }
@@ -1523,7 +1670,7 @@ mod term_env_tests {
 #[cfg(all(test, unix))]
 mod child_term_real_pty_tests {
     use super::{PtySpawnConfig, ReplyQueue, run_terminal};
-    use crate::io::{PtyRead, PtyWrite, SudoTerminfo};
+    use crate::io::{PtyRead, PtyWrite, SudoTerminfo, TermProgramEnv};
     use freminal_common::{
         config::ShellConfig,
         pty_write::FreminalTerminalSize,
@@ -1547,14 +1694,14 @@ mod child_term_real_pty_tests {
                 String::from("/bin/sh"),
                 vec![
                     String::from("-c"),
-                    String::from("printf 'TERM=<%s>' \"$TERM\"; sleep 30"),
+                    String::from("printf 'TERM=<%s>' \"$TERM\""),
                 ],
             )),
             shell: None,
             cwd: None,
             extra_env: pane_env,
             term: &term,
-            set_term_program: false,
+            term_program: TermProgramEnv::Omit,
             sudo_terminfo: SudoTerminfo::Unchanged,
         };
         let _result = match run_terminal(
@@ -1579,19 +1726,23 @@ mod child_term_real_pty_tests {
             Err(e) => panic!("run_terminal failed: {e}"),
         };
 
+        // The child prints and exits by itself, so nothing outlives the test.  Read
+        // until the marker shows up or the reader hangs up (child gone, output
+        // drained), with a generous overall deadline.
         let mut collected = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            while let Ok(read) = send_rx.try_recv() {
-                collected.extend_from_slice(&read.buf);
-            }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
             let text = String::from_utf8_lossy(&collected).into_owned();
             if let Some(start) = text.find("TERM=<")
                 && let Some(len) = text[start..].find('>')
             {
                 return text[start + "TERM=<".len()..start + len].to_owned();
             }
-            std::thread::sleep(Duration::from_millis(10));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match send_rx.recv_timeout(remaining) {
+                Ok(read) => collected.extend_from_slice(&read.buf),
+                Err(_) => break,
+            }
         }
         panic!(
             "child never reported TERM; got {:?}",
@@ -1619,9 +1770,55 @@ mod child_term_real_pty_tests {
 
 #[cfg(test)]
 mod shell_integration_injection_tests {
-    use super::{Shell, detect_shell, inject_shell_integration_env};
+    use super::{
+        Shell, SudoTerminfo, apply_spawn_shell_features, detect_shell, inject_shell_integration_env,
+    };
+    use crate::io::shell_features::SHELL_FEATURES_ENV;
     use portable_pty::CommandBuilder;
+    use std::ffi::OsStr;
     use std::path::Path;
+
+    fn features_after(
+        inherited: Option<&str>,
+        injected: Option<Shell>,
+        requested: SudoTerminfo,
+    ) -> Option<String> {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env_remove(SHELL_FEATURES_ENV);
+        if let Some(value) = inherited {
+            cmd.env(SHELL_FEATURES_ENV, value);
+        }
+        apply_spawn_shell_features(&mut cmd, injected, requested);
+        cmd.get_env(SHELL_FEATURES_ENV)
+            .map(OsStr::to_string_lossy)
+            .map(std::borrow::Cow::into_owned)
+    }
+
+    #[test]
+    fn an_injected_spawn_turns_the_feature_on_only_when_requested() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            for inherited in [None, Some("sudo")] {
+                assert_eq!(
+                    features_after(inherited, Some(shell), SudoTerminfo::Preserve).as_deref(),
+                    Some("sudo")
+                );
+                assert_eq!(
+                    features_after(inherited, Some(shell), SudoTerminfo::Unchanged),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_spawn_without_injection_drops_an_inherited_feature_list() {
+        // term_program Omit, an unknown shell and a positional command all
+        // reach here as `injected == None`, whatever the toggle says.
+        for requested in [SudoTerminfo::Preserve, SudoTerminfo::Unchanged] {
+            assert_eq!(features_after(Some("sudo"), None, requested), None);
+            assert_eq!(features_after(None, None, requested), None);
+        }
+    }
 
     #[test]
     fn detect_shell_matches_basename() {
@@ -1725,7 +1922,7 @@ mod shell_integration_injection_tests {
 #[cfg(all(test, unix))]
 mod echo_off_event_driven_tests {
     use super::{PtySpawnConfig, PtyWrite, ReplyQueue, run_terminal};
-    use crate::io::{PtyRead, SudoTerminfo};
+    use crate::io::{PtyRead, SudoTerminfo, TermProgramEnv};
     use freminal_common::{pty_write::FreminalTerminalSize, term_name::TermName};
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
@@ -1787,7 +1984,7 @@ mod echo_off_event_driven_tests {
             cwd: None,
             extra_env: None,
             term: &TermName::default(),
-            set_term_program: false,
+            term_program: TermProgramEnv::Omit,
             sudo_terminfo: SudoTerminfo::Unchanged,
         };
 
@@ -1835,7 +2032,7 @@ mod echo_off_event_driven_tests {
             cwd: None,
             extra_env: None,
             term: &TermName::default(),
-            set_term_program: false,
+            term_program: TermProgramEnv::Omit,
             sudo_terminfo: SudoTerminfo::Unchanged,
         };
 
@@ -1884,7 +2081,7 @@ mod echo_off_event_driven_tests {
             cwd: None,
             extra_env: None,
             term: &TermName::default(),
-            set_term_program: false,
+            term_program: TermProgramEnv::Omit,
             sudo_terminfo: SudoTerminfo::Unchanged,
         };
 

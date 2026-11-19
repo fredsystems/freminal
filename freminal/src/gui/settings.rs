@@ -1756,11 +1756,21 @@ impl SettingsModal {
         );
         ui.add_space(8.0);
 
-        ui.checkbox(
-            &mut self.draft.shell_integration.sudo_preserve_terminfo,
-            "Keep TERMINFO under sudo",
+        // The sudo wrapper ships with the injected shell-integration scripts, which
+        // only load when the TERM_PROGRAM option above is on.
+        let integration_on = self.draft.shell_integration.set_term_program;
+        ui.add_enabled(
+            integration_on,
+            egui::Checkbox::new(
+                &mut self.draft.shell_integration.sudo_preserve_terminfo,
+                "Keep TERMINFO under sudo",
+            ),
         )
-        .clickable();
+        .on_disabled_hover_text(
+            "Needs \"Set TERM_PROGRAM=freminal\": the sudo wrapper is part of the \
+             shell-integration scripts, which only load when that option is on.",
+        )
+        .clickable_when(integration_on);
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
