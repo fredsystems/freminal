@@ -32,7 +32,7 @@ one plan document, grouped into milestones that ship as point releases:
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
 (activated 2026-10-10), **147** (created 2026-10-11), **132** (activated 2026-10-11), and
 **138** (activated 2026-10-12), **148** (created 2026-10-18), and **149** (created
-2026-10-22), and **150** (activated 2026-10-22).
+2026-10-22), **150** (activated 2026-10-22), and **139** (activated 2026-11-19).
 Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
@@ -53,7 +53,7 @@ enriched stubs again and get re-decomposed at activation.
 | 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
 | 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
 | 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | In progress   | 129, 130, 131                      |
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
@@ -10089,6 +10089,292 @@ confirmed by diffing against `main` that the moved code changes no behaviour.
 
 ---
 
+## Task 139 — Pointer Shapes (OSC 22) Completion
+
+### 139 Summary
+
+**Goal.** Full kitty OSC 22 (<https://sw.kovidgoyal.net/kitty/pointer-shapes/>): set (`=` or
+no prefix), push (`>`), pop (`<`) and query (`?`), on separate main and alternate screen
+stacks, cleared by RIS and DECSTR. Activated and decomposed on 2026-11-19 on branch
+`task-139/pointer-shapes`, from `main` at `07fd4030`.
+
+### 139 Activation recon (2026-11-19)
+
+Two read-only passes: freminal's OSC 22 path end to end, and kitty's reference implementation
+(`kitty/window.py` `set_pointer_shape`, `kitty/screen.c` `change_pointer_shape` /
+`current_pointer_shape` / `do_screen_reset`, `kitty/glfw.c` `is_css_pointer_name_valid`,
+`kitty/mouse.c`). Every stub finding was confirmed. Additional findings:
+
+- **Parser.** `OSC 22` goes through `with_osc_tokens` (`ansi_components/osc.rs`), which splits
+  the body on `;` and reads only token 1. `handle_osc_pointer_shape` emits
+  `AnsiOscType::SetPointerShape(PointerShape::from(name))`. `PointerShape::from(&str)` is
+  infallible and maps every unknown name, and every prefixed form, to `Default`.
+- **Handler.** One global `pointer_shape: PointerShape` field (`terminal_handler/mod.rs`), set
+  in `terminal_handler/osc.rs`. `reset.rs` already resets it on **both** RIS and DECSTR, as the
+  131 reset table records, so only the field's shape changes. `ScreenScoped<KittyKeyboardStack>`
+  is the template: indexed by `self.buffer.kind()`, cleared with `both_mut()`.
+- **Snapshot and GUI.** `TerminalSnapshot::pointer_shape: PointerShape` is read from the
+  handler getter in `build_snapshot`. The GUI (`widget.rs`) maps it to an `egui::CursorIcon`
+  only when the pointer is over terminal content (gutter, fold placeholder and URL hover take
+  precedence), writing `cursor_icon` once per frame from the pane under the pointer. Nothing
+  in the GUI changes the shape when mouse reporting is on, and nothing overrides it during a
+  selection drag. The GUI needs no change for this task.
+- **Kitty reference behaviour** (the spec is silent on most of these; kitty is the
+  tie-breaker):
+  - The first byte selects the op only if it is `=`, `>`, `<` or `?`; otherwise the op is set
+    and the byte is part of the name. Names are split on `,` with no trimming and matched
+    case-sensitively.
+  - **Set** replaces the top entry (an empty stack first grows to one entry); it never pushes
+    or clears. A set list is applied name by name, so the last valid name wins. An **empty
+    name** in a set stores an "unset" entry on top: the visible shape is the default, the
+    query reports `0`, and entries below survive (a later pop restores them). Unknown names
+    are ignored, one at a time.
+  - **Push** pushes each valid non-empty name in order; the last is the top. Capacity 16; a
+    push onto a full stack evicts the bottom. Empty and unknown names are skipped.
+  - **Pop** pops exactly one entry and ignores its names; a pop of an empty stack does nothing.
+  - **Query** always replies, with `OSC 22 ; <list> ST` (ST even for a BEL-terminated request),
+    one comma-joined item per queried name in order: `1`/`0` for support, the current shape's
+    canonical CSS name for `__current__` (`0` when the stack is empty or its top is unset), and
+    the CSS name of the default and grabbed shapes for `__default__` / `__grabbed__`. A set,
+    push or pop sends no reply.
+  - The alternate stack persists across alternate-screen switches; only RIS and DECSTR clear
+    the stacks, and both clear both.
+  - Kitty accepts 46 legacy X11 / internal aliases for set and push (table in "139 Decisions").
+    Its support query answers `0` for most of them (and `1` for `arrow`, `beam`, `hand`).
+- **Freminal-only names.** freminal accepts `none`, `context-menu`, `all-scroll` (CSS cursor
+  names absent from the kitty table) and the CSS names `col-resize` / `row-resize`, mapped to
+  `ew-resize` / `ns-resize`.
+
+### 139 Decisions (orchestrator, recorded so they are not re-litigated)
+
+Spec first, kitty code as tie-breaker. Each place freminal deliberately differs from kitty is
+marked **(differs from kitty)**.
+
+- **Parsing follows kitty** exactly: the op prefix rule, `,` splitting with no trimming,
+  case-sensitive names, per-name ignoring of unknown names. The body is the raw OSC body after
+  `22;` (a raw-body dispatch arm, no `;` tokenisation); `OSC 22` with no `;` is an empty set.
+  A non-UTF-8 name is unknown. Names are looked up in one table; there is no separate
+  `a-z0-9_-` check (kitty).
+- **Per-request name cap: 64** (`MAX_OSC22_NAMES`). Names past the cap are ignored, for every
+  op. Freminal policy, like the XTGETTCAP cap (148.11): it bounds the reply a single query can
+  produce. **(differs from kitty**, which has no cap; no real request comes near it.)
+- **Set, push, pop and the "unset" entry follow kitty** as described in the recon, including
+  that an empty set leaves lower entries in place.
+- **Stack capacity is 16** (`POINTER_SHAPE_STACK_DEPTH`), the spec minimum and kitty's value;
+  a push onto a full stack evicts the bottom.
+- **Name table.** Accepted for set, push and the support query:
+  - the 30 spec CSS names;
+  - freminal's existing extras `none`, `context-menu`, `all-scroll`, and `col-resize` /
+    `row-resize` as aliases of `ew-resize` / `ns-resize`;
+  - kitty's full alias table: `left_ptr`, `arrow` → default; `xterm`, `ibeam`, `beam` → text;
+    `pointing_hand`, `hand2`, `hand` → pointer; `question_arrow`, `whats_this` → help;
+    `clock`, `watch` → wait; `half-busy`, `left_ptr_watch` → progress; `tcross` → crosshair;
+    `plus`, `cross` → cell; `fleur`, `pointer-move` → move; `right_side` → e-resize;
+    `top_right_corner` → ne-resize; `top_left_corner` → nw-resize; `top_side` → n-resize;
+    `bottom_right_corner` → se-resize; `bottom_left_corner` → sw-resize; `bottom_side` →
+    s-resize; `left_side` → w-resize; `sb_h_double_arrow`, `split_h` → ew-resize;
+    `sb_v_double_arrow`, `split_v` → ns-resize; `size_bdiag`, `size-bdiag` → nesw-resize;
+    `size_fdiag`, `size-fdiag` → nwse-resize; `zoom_in` → zoom-in; `zoom_out` → zoom-out;
+    `dnd-link` → alias; `dnd-copy` → copy; `forbidden`, `crossed_circle` → not-allowed;
+    `dnd-no-drop` → no-drop; `openhand`, `hand1` → grab; `closedhand`, `dnd-none` → grabbing.
+- **Support query answers `1` for every name freminal accepts**, aliases and extras included.
+  A name that can be set is supported, so this is the truthful answer. **(differs from
+  kitty**, whose query answers `0` for most aliases while accepting them.)
+- **`Display` / the reply name is the canonical CSS name** (`ew-resize`, `ns-resize`; `none`,
+  `context-menu`, `all-scroll` for the extras). A shape set through an alias is reported by its
+  canonical name (kitty).
+- **`__default__` and `__grabbed__` both answer `default`.** freminal shows the default arrow
+  over terminal content when no shape is set, and does not change it when mouse reporting is
+  on. Truthful for freminal; kitty answers its own configured shapes (`text`, `default`).
+- **Replies** go through `write_osc_response(&format!("22;{list}"))` on the PTY thread, so they
+  are S8C1T-framed, ST-terminated and ordered before a following DA1 (Task 130).
+- **Logging.** An ignored name is logged at `debug!` with its length only (payload-free
+  logging, Task 129).
+- **Snapshot keeps `pointer_shape: PointerShape`**, the active screen's resolved shape:
+  `Default` for an empty stack or an unset top. The GUI is unchanged.
+- **Reset**: RIS and DECSTR clear both stacks (already decided in the 131 reset table). Screen
+  switches touch neither stack.
+
+### 139 Types (decided)
+
+In `freminal-common/src/buffer_states/pointer_shape.rs`:
+
+```rust
+impl PointerShape {
+    pub fn from_name(name: &str) -> Option<Self>;   // the one name table; case-sensitive
+    pub const fn css_name(self) -> &'static str;    // canonical name; Display delegates
+}
+pub const MAX_OSC22_NAMES: usize = 64;
+pub enum PointerShapeEntry { Shape(PointerShape), Unset }
+pub enum PointerShapeQuery { Supported, Unsupported, Current, Default, Grabbed }
+pub enum PointerShapeOp {
+    Set(Vec<PointerShapeEntry>),   // applied in order; unknown names already dropped
+    Push(Vec<PointerShape>),       // empty and unknown names already dropped
+    Pop,
+    Query(Vec<PointerShapeQuery>),
+}
+```
+
+`AnsiOscType::SetPointerShape(PointerShape)` is replaced by
+`AnsiOscType::PointerShape(PointerShapeOp)`.
+
+In `freminal-terminal-emulator/src/terminal_handler/pointer_shape_stack.rs`:
+
+```rust
+pub const POINTER_SHAPE_STACK_DEPTH: usize = 16;
+pub struct PointerShapeStack { entries: Vec<PointerShapeEntry> }
+// set(entry), push(shape), pop(), clear(), current() -> Option<PointerShape>
+```
+
+The handler field becomes `pointer_shape_stack: ScreenScoped<PointerShapeStack>`.
+
+### 139 Execution model
+
+Serial, on one checkout (`task-139/pointer-shapes`): the subtasks share the common pointer
+module and the handler. Each subtask is implemented by a sub-agent, reviewed in full by the
+orchestrator against this text (the whole diff, every new file read in full, the spec and the
+decisions above), verified again by the orchestrator, and only then committed by the
+orchestrator. Order: 139.1, 139.2, 139.3, 139.4, 139.5. An adversarial review of `main...HEAD`
+against this section and the kitty spec follows 139.5; every finding, nit and above, becomes a
+`139.Cn` entry and is fixed (or routed to the task that owns the code) before the PR.
+
+No benchmark subtask: OSC 22 is not on a `freminal-bench-table` path, and the change touches
+only the OSC 22 dispatch arm.
+
+### 139 Subtasks
+
+Every subtask's verification is `cargo xtask test` and
+`cargo clippy --all-targets --all-features -- -D warnings`. Prohibitions for every subtask: do
+NOT touch files outside scope, do NOT commit, do NOT update plan documents, do NOT proceed to
+the next subtask; no `unwrap`/`expect` outside tests, no raw numeric `as` casts, no new `bool`
+fields or parameters, no `#[allow(dead_code)]`; do not delete or weaken a test assertion
+except where the subtask says the pinned behaviour changes. Stop condition for all: report
+files changed, every test whose expectation changed (with the decision that changed it), and
+verification results, then await review.
+
+#### 139.1 — The name table and canonical names
+
+Scope: `freminal-common/src/buffer_states/pointer_shape.rs` (production and tests).
+
+What:
+
+- `PointerShape::from_name(&str) -> Option<Self>`: the name table in "139 Decisions",
+  case-sensitive, no trimming, `None` for anything else (including the empty string).
+- `PointerShape::css_name(self) -> &'static str`; `Display` delegates to it. `ResizeHorizontal`
+  is `ew-resize` and `ResizeVertical` is `ns-resize`.
+- `From<&str>` stays for this subtask only, as a shim with today's semantics
+  (`from_name(name.trim()).unwrap_or_default()`), so the parser keeps compiling; 139.3 removes
+  it. Its doc comment says so.
+- Tests: every table entry maps as listed; `css_name(from_name(n)) == n` for the 30 spec names
+  and the three extras; `from_name(css_name(v)) == Some(v)` for every variant; case and
+  whitespace variants are `None`; unknown names are `None`; the shim keeps today's behaviour.
+  `display_all_pointer_shape_variants` changes for the two resize names (decision: canonical
+  names). `unknown_name_maps_to_default` keeps testing the shim.
+
+#### 139.2 — Per-screen pointer-shape stacks in the handler
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/pointer_shape_stack.rs` (new) and its
+  declaration in `terminal_handler/mod.rs`;
+- `terminal_handler/mod.rs` (the field, its initialiser, its doc, `pointer_shape()`, the
+  `soft_reset` doc, and the OSC 22 handler tests);
+- `terminal_handler/osc.rs` (the `SetPointerShape` arm only);
+- `terminal_handler/reset.rs` (classification);
+- `freminal-common/src/buffer_states/pointer_shape.rs` (only to add `PointerShapeEntry`);
+- `freminal-terminal-emulator/tests/reset_table.rs`.
+
+What:
+
+- `PointerShapeEntry` as in "139 Types" (in `freminal-common`).
+- `PointerShapeStack` as in "139 Types", with the kitty semantics: `set` replaces the top (or
+  pushes onto an empty stack); `push` evicts the bottom at `POINTER_SHAPE_STACK_DEPTH`; `pop`
+  removes one entry and is a no-op when empty; `current` is `None` for an empty stack or an
+  `Unset` top.
+- The handler field is `ScreenScoped<PointerShapeStack>`. `pointer_shape()` returns the active
+  screen's `current().unwrap_or_default()` (drop `const` if needed).
+- Interim mapping until 139.3: `SetPointerShape(shape)` performs `set(Shape(shape))` on the
+  active screen's stack. This is behaviour-neutral for the visible shape.
+- `reset.rs`: both kinds clear both stacks (`both_mut()`), replacing the single-field reset.
+- Tests: the stack's own unit tests (set on empty, set replaces top, push order, eviction at
+  16 and 17, pop to empty, pop on empty, unset top hides lower entries and a pop reveals them);
+  handler tests that a set on the alternate screen does not change the primary's shape and
+  survives a `?1049l` / `?1049h` round trip; RIS and DECSTR each clear both screens' stacks
+  (`reset_table.rs`; there is no RIS pointer test there today).
+
+#### 139.3 — Typed OSC 22 operations, parser and replies
+
+Scope:
+
+- `freminal-common/src/buffer_states/pointer_shape.rs` (`PointerShapeQuery`, `PointerShapeOp`,
+  `MAX_OSC22_NAMES`; remove the `From<&str>` shim and the tests that pin only it);
+- `freminal-common/src/buffer_states/osc.rs` (`AnsiOscType` variant, its `Display`, the
+  `OscTarget::PointerShape` doc, tests);
+- `freminal-terminal-emulator/src/ansi_components/osc.rs` (a raw-body OSC 22 arm replacing
+  `with_osc_tokens` + `handle_osc_pointer_shape`; tests);
+- `freminal-terminal-emulator/src/terminal_handler/osc_pointer.rs` (new: applying an op and
+  building the reply) and its declaration in `terminal_handler/mod.rs`;
+- `terminal_handler/osc.rs` (the arm delegates to `osc_pointer.rs`);
+- `terminal_handler/mod.rs` (the OSC 22 handler tests).
+
+What:
+
+- The parser turns the body after `22;` into one `PointerShapeOp` following "139 Decisions":
+  the op prefix, `,` splitting, the 64-name cap, per-name lookup through `from_name`, empty
+  names kept only as `Unset` in a set, empty and unknown names dropped from a push, names
+  ignored for a pop, and each query item classified (`__current__`, `__default__`,
+  `__grabbed__`, otherwise `Supported` / `Unsupported` from `from_name`). A non-UTF-8 name is
+  unknown. Ignored names are logged at `debug!` with their length only.
+- The handler applies `Set` entries in order, `Push` shapes in order, `Pop` once, on the active
+  screen's stack. `Query` writes exactly one reply,
+  `write_osc_response(&format!("22;{list}"))`: `1` / `0`, the `css_name` of `current()` or `0`,
+  and `default` for both `__default__` and `__grabbed__`. Set, push and pop send nothing.
+- Tests, parser level: each op and prefix; no prefix with a list (last wins); `=` with an empty
+  name; `22` with no `;`; a name containing `;`; leading space is unknown; uppercase is unknown;
+  the cap (64 names honoured, the 65th ignored); non-UTF-8. Handler level, through
+  `handle_incoming_data`: the kitty examples (`?__current__` gives `0` on an empty stack,
+  `?pointer,crosshair,no-such-name,wait` gives `1,1,0,1`, `?__default__,__grabbed__` gives
+  `default,default`, an alias query gives `1`); `?__current__` after `=left_ptr` gives
+  `default` and after `>fleur` gives `move`; push of 17 evicts the bottom; empty set then pop
+  restores the lower shape; BEL-terminated query gets an ST reply; S8C1T framing (`0x9D … 0x9C`);
+  the reply precedes a following DA1; set/push/pop send nothing.
+- Update every test that pinned the old variant or the reset-on-unknown behaviour, listing each.
+
+#### 139.4 — End-to-end OSC 22 suite
+
+Scope: `freminal-terminal-emulator/tests/osc22_pointer_shapes.rs` (new), and
+`fuzz/seeds/terminal_state/` (one or two OSC 22 seed files; check the directory's naming
+convention first).
+
+What: an end-to-end suite through `TerminalState::handle_incoming_data` and `build_snapshot`
+asserting observable state only (snapshot `pointer_shape` and reply bytes): per-screen stacks
+across `?47`, `?1047` and `?1049`; the alternate stack persisting across sessions; RIS from the
+alternate screen clearing both and returning to the primary with the default shape; DECSTR on
+the alternate screen clearing both; OSC 22 inside tmux passthrough (reply unwrapped); a
+mixed-op single read (`>wait`, `>help`, `<`, `?__current__` gives `wait`). Seed files exercise
+every op.
+
+#### 139.5 — Documentation
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
+`Documents/KITTY_PROTOCOL_REFERENCE.md`.
+
+What: the dual-document update per `freminal-escape-sequence-docs`: the OSC 22 rows (now ✅,
+with the decided semantics, the cap and the two differences from kitty), the RIS and DECSTR
+rows ("both OSC 22 pointer-shape stacks"), the GAPS row removed or closed, both "Last updated"
+headers; a new OSC 22 section in the kitty reference (against kitty 0.49.2) and its roadmap row.
+Verification: markdownlint and `prettier --check` on the three files.
+
+### 139 Status notes
+
+(none yet)
+
+### 139 Cleanup entries
+
+(none yet)
+
+---
+
 ## Shipped-protocol conformance stubs (v0.13.0 / v0.13.1)
 
 ### Task 134 — Unicode Width & Segmentation Conformance (stub, v0.13.1)
@@ -10332,36 +10618,10 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 Activated and decomposed on 2026-10-12. The audit findings, decisions and subtasks now live
 under "Task 138 — Desktop Notifications (OSC 99) Conformance" above.
 
-### Task 139 — Pointer Shapes (OSC 22) Completion (stub, v0.13.0)
+### Task 139 — Pointer Shapes (OSC 22) Completion (activated)
 
-**Goal.** Full OSC 22: set (`=`), push (`>`), pop (`<`), query (`?`), per-screen stacks.
-
-**Audit findings.**
-
-- **Prefixed forms are not parsed.** Only plain `OSC 22;<name>` works. `=`, `>`, `<` and `?`
-  are fed into the name lookup and reset the shape to `Default`. A query gets no reply.
-- **No stack**, and no main/alternate separation.
-- **`Display` emits non-spec names** (`col-resize`/`row-resize` instead of
-  `ew-resize`/`ns-resize`).
-- **Unknown names reset the shape**; kitty ignores them.
-- **Legacy alias set:** about 40 X11 names in kitty versus about 7 in freminal.
-- **No coverage-doc row.**
-
-**Scope sketch.**
-
-- Typed `PointerShapeOp { Set, Push, Pop, Query }`.
-- `PointerShapeStack` (capacity ≥ 16, evict the bottom) registered as screen-scoped
-  (Task 131).
-- Query replies via `write_osc_response`, including `__current__`, `__default__` and
-  `__grabbed__`.
-- Canonical names; the snapshot carries only the stack top.
-- RIS and DECSTR clear both screens' stacks, as the Task 131 decision records for the other
-  screen-scoped kitty state (written here by Task 147).
-
-**Open questions.**
-
-- `__default__`/`__grabbed__` reporting policy.
-- Adopt kitty's full legacy alias table.
+Activated and decomposed on 2026-11-19. The audit findings, decisions and subtasks now live
+under "Task 139 — Pointer Shapes (OSC 22) Completion" above.
 
 ### Task 140 — Underline & SGR Parity (stub, v0.13.0)
 
