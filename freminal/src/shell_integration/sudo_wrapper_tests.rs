@@ -56,6 +56,15 @@ impl TestShell {
     }
 }
 
+/// The first executable file called `name` on `PATH`.
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
 /// Environment the scripts see: `None` leaves the variable unset.
 struct Env<'a> {
     features: Option<&'a str>,
@@ -81,9 +90,16 @@ fn run_sudo(shell: TestShell, env: &Env<'_>, prelude: &str, args: &[&str]) -> St
     let bin = tmp.path().join("bin");
     std::fs::create_dir_all(&bin).expect("mkdir bin");
     let fake = bin.join("sudo");
+    // The fake `sudo` is a generated test fixture, not a shipped script: it
+    // names the `sh` found on PATH absolutely, because build sandboxes (the Nix
+    // package check phase) have no `/usr/bin/env`.
+    let sh = find_on_path("sh").expect("an `sh` on PATH");
     std::fs::write(
         &fake,
-        "#!/usr/bin/env sh\nprintf 'ARGV:'\nfor a in \"$@\"; do printf ' [%s]' \"$a\"; done\nprintf '\\n'\n",
+        format!(
+            "#!{}\nprintf 'ARGV:'\nfor a in \"$@\"; do printf ' [%s]' \"$a\"; done\nprintf '\\n'\n",
+            sh.display()
+        ),
     )
     .expect("write fake sudo");
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");

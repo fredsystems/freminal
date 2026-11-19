@@ -11763,6 +11763,11 @@ N3, N4, N5 (a shared `tests/common` helper), N7, N8, N9.
   `FREMINAL_TERMINFO`, tested for nested panes, the bundle duplicate and a user value under a
   nested pane. N3–N5, N7–N9 as recorded (`tests/common/mod.rs` holds the CI-strict helper).
   `terminfo_child` passed 10 of 10, and with `CI=1`.
+- **R22 (`nix build .#freminal`, 2026-11-19).** The package's check phase failed seven
+  `sudo_wrapper_tests`: their generated fake `sudo` used `#!/usr/bin/env sh`, and the Nix
+  build sandbox has no `/usr/bin/env`. Fixed by the orchestrator: the generated fixture names
+  the `sh` found on `PATH` absolutely (it is a test fixture, not a shipped script, so
+  `shebang-env-discipline` does not apply).
 
 #### 151 Status notes
 
