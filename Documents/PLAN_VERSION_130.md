@@ -10809,6 +10809,64 @@ markdownlint and `prettier --check` on the named files.
 - **Scheduling:** moved to Task 151 (maintainer decision 2026-11-19: freminal defaults to its
   own `TERM` and ships the terminfo entry for remote hosts). Not blocking the Task 140 PR.
 
+### 140 Adversarial review (2026-11-19)
+
+One CODE-REVIEW pass over `main...HEAD` against the kitty underline and misc-protocol pages,
+this section and the repo rules. No blocker. Every finding, nit and above, is fixed:
+
+| ID  | Sev   | Finding (short)                                                         | Disposition |
+| --- | ----- | ----------------------------------------------------------------------- | ----------- |
+| R1  | major | plain DCH never fills the vacated right edge, docs say it does          | 140.C2      |
+| R2  | minor | DECDHL decorations are not scaled vertically like the glyphs            | 140.C3      |
+| R3  | minor | an overflowing `4:N` is `Invalid`, not dashed; no `4:2:3` / `21:x` test | 140.C2      |
+| R4  | minor | `erase_tag` lives in `resize_and_alt.rs`, not `erase.rs`                | 140.C2      |
+| R5  | minor | decoration geometry grew `vertex.rs`; give it `renderer/decorations.rs` | 140.C3      |
+| R6  | minor | narrow-cell solid dashes match kitty; docs call them a difference       | 140.C4      |
+| R7  | minor | 140.3 benchmarks compared against a baseline taken under load           | 140.C4      |
+| R8  | minor | geometry tests miss zero height, DECDHL, wide glyphs, tiny cells        | 140.C3      |
+| R9  | nit   | redundant decoration early-out in `push_run_decorations`                | 140.C3      |
+| R10 | nit   | `erase_tag()` rebuilt per row in the ED loops                           | 140.C2      |
+| R11 | nit   | `sgr_22_*` tests duplicate the existing `NormalIntensity` tests         | 140.C2      |
+| R12 | nit   | BCE history wording, meta-notes in COVERAGE rows, a ragged wrap         | 140.C4      |
+| R13 | nit   | 140.4 note lacks the `infocmp` output; new caps sit mid-entry in `.ti`  | 140.C4      |
+| R14 | nit   | Task 151 must list the "`TERM=xterm-256color`" doc sentences            | 140.C4      |
+
+#### 140.C2 — Emulator and buffer review fixes
+
+- **R1:** plain DCH (no DECLRMM) fills the `n` vacated cells at the right edge with
+  `erase_tag()`, as xterm and kitty do; with a default background the row stays sparse (no
+  explicit cells). Tests: a loud tag fills the right edge with the background only; a default
+  tag leaves the row sparse; a split wide glyph still works.
+- **R3:** a `4:` subparameter that overflows `usize` saturates (dashed) instead of making the
+  segment `Invalid`; tests for that, for `4:2:3` (double, extra colons ignored) and `21:x`
+  (double underline).
+- **R4:** `erase_tag` moves to `buffer/erase.rs`. **R10:** hoisted out of the ED/EL row loops.
+- **R11:** drop `sgr_22_clears_both_bold_and_faint` and the integration `sgr_22_resets_*`
+  (existing `NormalIntensity` tests cover them).
+
+#### 140.C3 — Renderer review fixes
+
+- **R5:** the decoration geometry (`push_run_decorations`, `UnderlineParams`, `clamp_to_cell`,
+  the style helpers) and its tests move to a new `freminal/src/gui/renderer/decorations.rs`;
+  pure move plus the R2 change.
+- **R2:** on DECDHL rows the decoration is laid out in the doubled box (the pair's top at the
+  top half's row top, height `2 * cell_height`, ascent, offsets and stroke doubled), exactly as
+  the glyph is scaled, then each quad is clipped to the row's own visible cell and dropped if
+  empty. So the underline appears once, on the half where the doubled glyph's underline falls.
+- **R8:** tests for `cell_height == 0` (no quads), DECDHL top and bottom halves, runs with a
+  two-column glyph, cells 2–4 px high for curly and double; the run-boundary test uses a stroke
+  whose old dot pitch did not divide the cell, so it fails on the old code.
+- **R9:** remove the redundant early-out.
+
+#### 140.C4 — Docs and plan review fixes
+
+- **R1:** DCH rows and BCE summaries match the fixed code. **R2:** COVERAGE notes DECDHL
+  decorations. **R6:** the narrow-cell dash is "matches kitty", not a difference (four
+  differences remain). **R12:** wording fixes. **R13:** the `infocmp` output in the 140.4 note;
+  move `Su`/`Smulx`/`Setulc` to the end of the entry. **R14:** list the docs to update in Task
+  151. **R7:** re-measure 140.3 against a baseline of the pre-140.3 commit taken on an idle
+  machine, and record it.
+
 ---
 
 ## Shipped-protocol conformance stubs (v0.13.0 / v0.13.1)
