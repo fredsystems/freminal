@@ -204,22 +204,6 @@ mod tests {
     }
 
     #[test]
-    fn seventeen_pushes_then_sixteen_pops_leave_an_empty_stack() {
-        let mut rig = Rig::new();
-        for _ in 0..17 {
-            assert_eq!(rig.feed(b"\x1b]22;>help\x1b\\"), NOTHING);
-        }
-        for _ in 0..16 {
-            assert_eq!(rig.feed(b"\x1b]22;<\x1b\\"), NOTHING);
-        }
-        assert_eq!(
-            rig.query("__current__"),
-            reply("0"),
-            "the 17th push evicted the bottom entry, so 16 pops empty the stack"
-        );
-    }
-
-    #[test]
     fn seventeenth_push_evicts_the_bottom() {
         let mut rig = Rig::new();
         rig.feed(b"\x1b]22;>text\x1b\\");

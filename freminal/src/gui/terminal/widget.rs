@@ -5415,11 +5415,6 @@ mod visual_preview_tests {
     }
 }
 
-/// Convert a [`PointerShape`] (from [`TerminalSnapshot`]) to the corresponding
-/// [`egui::CursorIcon`].
-///
-/// [`PointerShape::Default`] and any value that has no direct egui equivalent
-/// both produce [`CursorIcon::Default`].
 /// Whether the pointer is over a pane-split drag sensor this frame.
 ///
 /// The sensor rects are built and hit-tested in `app_impl`, which sets the
@@ -5501,6 +5496,11 @@ const fn cursor_icon_for(target: PointerTarget, osc22_shape: PointerShape) -> Cu
     }
 }
 
+/// Convert a [`PointerShape`] to the corresponding [`CursorIcon`].
+///
+/// Every shape maps to the egui icon of the same name, except
+/// [`PointerShape::Pointer`], which maps to [`CursorIcon::PointingHand`]. The
+/// match is exhaustive, so adding a shape forces a decision here.
 const fn pointer_shape_to_cursor_icon(shape: PointerShape) -> CursorIcon {
     match shape {
         PointerShape::Default => CursorIcon::Default,
@@ -8229,6 +8229,25 @@ mod pointer_target_tests {
                 cursor_icon_for(PointerTarget::TerminalContent, shape),
                 pointer_shape_to_cursor_icon(shape)
             );
+        }
+    }
+
+    #[test]
+    fn pointer_shape_to_cursor_icon_maps_each_shape_explicitly() {
+        for (shape, icon) in [
+            (PointerShape::Default, CursorIcon::Default),
+            (PointerShape::Pointer, CursorIcon::PointingHand),
+            (PointerShape::Text, CursorIcon::Text),
+            (PointerShape::Help, CursorIcon::Help),
+            (PointerShape::Wait, CursorIcon::Wait),
+            (PointerShape::Grab, CursorIcon::Grab),
+            (PointerShape::ResizeHorizontal, CursorIcon::ResizeHorizontal),
+            (PointerShape::ResizeVertical, CursorIcon::ResizeVertical),
+            (PointerShape::NotAllowed, CursorIcon::NotAllowed),
+            (PointerShape::ZoomIn, CursorIcon::ZoomIn),
+            (PointerShape::ZoomOut, CursorIcon::ZoomOut),
+        ] {
+            assert_eq!(pointer_shape_to_cursor_icon(shape), icon, "shape {shape:?}");
         }
     }
 }

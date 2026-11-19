@@ -7,8 +7,9 @@ stacks cleared by RIS and DECSTR, with kitty's name table and parsing rules (see
 Task 139 (the name table, the stack depth, the reply framing, the unset entry).
 Not gaps, but deliberate differences from kitty recorded in
 `KITTY_PROTOCOL_REFERENCE.md`: a 64-name cap per request, a support query that
-answers `1` for every accepted name including aliases, and `__default__` /
-`__grabbed__` reporting freminal's own `default`. Nothing in OSC 22 remains open.
+answers `1` for every accepted name including aliases, `__default__` /
+`__grabbed__` reporting freminal's own `default`, and `col-resize` / `row-resize`
+accepted as aliases. Nothing in OSC 22 remains open.
 
 Last updated: 2026-10-22 — Task 150 (desktop notification backend extraction).
 No gap row is added or removed and no behaviour changes: the notification

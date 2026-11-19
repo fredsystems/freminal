@@ -10143,7 +10143,8 @@ Two read-only passes: freminal's OSC 22 path end to end, and kitty's reference i
     Its support query answers `0` for most of them (and `1` for `arrow`, `beam`, `hand`).
 - **Freminal-only names.** freminal accepts `none`, `context-menu`, `all-scroll` (CSS cursor
   names absent from the kitty table) and the CSS names `col-resize` / `row-resize`, mapped to
-  `ew-resize` / `ns-resize`.
+  `ew-resize` / `ns-resize`. (The three extras were removed by review finding R7;
+  `col-resize` / `row-resize` stay, see the confirmation review.)
 
 ### 139 Decisions (orchestrator, recorded so they are not re-litigated)
 
@@ -10182,7 +10183,7 @@ marked **(differs from kitty)**.
   A name that can be set is supported, so this is the truthful answer. **(differs from
   kitty**, whose query answers `0` for most aliases while accepting them.)
 - **`Display` / the reply name is the canonical CSS name** (`ew-resize`, `ns-resize`; `none`,
-  `context-menu`, `all-scroll` for the extras). A shape set through an alias is reported by its
+  `context-menu`, `all-scroll` for the extras, which R7 removed). A shape set through an alias is reported by its
   canonical name (kitty).
 - **`__default__` and `__grabbed__` both answer `default`.** freminal shows the default arrow
   over terminal content when no shape is set, and does not change it when mouse reporting is
@@ -10480,6 +10481,38 @@ against kitty. Findings and dispositions:
   extras (now pinned as "not names"). 139.C2: as listed above; the MASTER_PLAN and 130 status
   tables were re-padded for the narrower Status column. The implementing sub-agent briefly ran
   `git stash` / `git stash pop`; the orchestrator confirmed every plan edit survived.
+  Orchestrator verification at `98cc4ac5`: `cargo xtask test` (9667 passed), clippy,
+  `cargo fmt --check`, `check-windows`, `cargo machete`, `fuzz-replay` (every target ok),
+  markdownlint and prettier on the touched docs, all clean.
+
+#### 139.C3 — Confirmation-review fixes
+
+- **Surfaced:** the confirmation review of `98cc4ac5` (below), findings N1–N10.
+- **Fix:** see "139 Confirmation review".
+
+### 139 Confirmation review (2026-11-19)
+
+A second CODE-REVIEW pass over `98cc4ac5` against R1–R19: R2, R4–R7, R10, R12–R16 and R19
+FIXED; R3 and R11 PARTIAL (closed by N5 and N3 below); R8, R9, R17 and R18
+ACCEPTED-AS-DOCUMENTED. No BLOCKER or MAJOR. New findings, all fixed in 139.C3:
+
+- **N1 (minor):** `col-resize` / `row-resize` are outside the spec table too, and kitty does
+  not know them, yet they were not listed as a difference. **Decision:** they stay. R7 removed
+  the extras because `__current__` would report a non-spec name and `none` could hide the
+  pointer; neither applies to these two, which are reported by their canonical spec names.
+  They are now the fourth documented difference from kitty (kitty reference, COVERAGE, GAPS).
+- **N2 (minor):** the recon and decision bullets about the extras now say R7 removed them.
+- **N3, N4, N6 (nits):** kitty reference header grammar; the 0.51.0 note now covers both halves
+  of #10838; three seeds and the cap tests are listed.
+- **N5 (minor):** the MASTER_PLAN Completion note.
+- **N7 (nit):** the duplicate eviction test and the vacuous half of
+  `all_variants_lists_every_variant_exactly_once` are removed. The per-shape name tests in
+  `pointer_shape.rs` are kept deliberately: `agents.md` accepts test duplication that improves
+  clarity, and each names one shape family.
+- **N8 (nit):** the R-table is re-padded (prettier-clean).
+- **N9 (nit, pre-existing):** the misplaced `pointer_shape_to_cursor_icon` doc comment in
+  `widget.rs` is moved and corrected, and a test pins explicit icons for that function.
+- **N10 (nit):** verification results are recorded above.
 
 ---
 

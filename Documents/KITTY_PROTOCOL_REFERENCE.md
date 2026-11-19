@@ -5,7 +5,7 @@ distilled from the kitty 0.49.2 page and written to the shipped behaviour, which
 is conformant: the wire format, the four operations, the query items, the
 per-screen stacks and their reset, the name table (the 30 CSS names, the
 `col-resize` / `row-resize` aliases and kitty's 46 aliases), the GUI
-interaction, freminal's three deliberate differences from kitty and where it is
+interaction, freminal's four deliberate differences from kitty and where it is
 implemented. The roadmap row now reads
 "Filled in; conformant". No other section changed.
 
@@ -49,10 +49,10 @@ Last updated: 2026-10-08 — Task 126.4 — roadmap table and future-version stu
 renumbered to the v0.13.x plan; current-state sections flagged as superseded
 (see the note below).
 
-**Superseded current-state sections.** Every "freminal current-state" section in
-this file except notifications and pointer shapes (that is, graphics and keyboard) predates the **2026-10-08
-compliance audit** in `PLAN_VERSION_130.md` ("Compliance audit (2026-10-08)").
-That audit found real spec deviations in every protocol freminal had claimed to
+**Superseded current-state sections.** The graphics and keyboard "freminal
+current-state" sections predate the **2026-10-08 compliance audit** in
+`PLAN_VERSION_130.md` ("Compliance audit (2026-10-08)"); the notifications and
+pointer-shape sections were written after it. That audit found real spec deviations in every protocol freminal had claimed to
 support, so statements here that a protocol is "implemented" or "done" describe
 the feature surface that shipped, not conformance to the kitty spec. Where this
 file and the audit disagree, the audit wins. Each protocol task in v0.13.x
@@ -756,9 +756,10 @@ programs still send.
 
 **Baseline: kitty 0.49.2** (this section was distilled from the upstream page on
 2026-11-19; the feature was added to kitty in 0.31.0, and the section was
-re-checked against kitty 0.51.0, whose only OSC 22 change, #10838, fixes kitty's
-own pointer refresh on a screen switch; freminal rebuilds the snapshot on every
-switch, so it has no such gap). freminal conforms to it
+re-checked against kitty 0.51.0, whose only OSC 22 change, #10838, fixes
+animated pointers restarting and kitty's own pointer refresh on a screen switch;
+freminal has no animated pointers and publishes a new snapshot, with a repaint,
+on every switch, so neither applies). freminal conforms to it
 (Task 139, v0.13.0). Where the spec is silent, freminal follows kitty's reference
 implementation; where freminal deliberately differs from kitty, the difference is
 listed under "Documented differences from kitty (OSC 22)" below.
@@ -915,9 +916,12 @@ does, not copied. These are the places freminal deliberately differs:
    `default`: freminal shows the default arrow over terminal content when no shape
    is set, and it does not change the pointer while mouse reporting is on. kitty
    answers its own configured shapes.
+4. **`col-resize` and `row-resize` are accepted.** They are CSS cursor names
+   outside the spec table, kept from freminal's earlier OSC 22 support as aliases
+   of `ew-resize` and `ns-resize`. A shape set through them is reported by its
+   canonical name, so `__current__` still answers a spec name. kitty does not
+   know them (it ignores a set and answers `0` to a query).
 
-freminal also accepts `col-resize` and `row-resize`, which are not in kitty's
-table (an extension, not a difference in behaviour for any name kitty accepts).
 A query for `none`, `context-menu` or `all-scroll` answers `0`, as in kitty:
 those CSS cursor names are outside the spec table and are not accepted.
 
@@ -949,9 +953,9 @@ those CSS cursor names are outside the spec table and are not accepted.
 - **Tests:** the unit tests next to each file above,
   `freminal-terminal-emulator/tests/osc22_pointer_shapes.rs` (end to end through
   `TerminalState` and `build_snapshot`: per-screen stacks for `?47`, `?1047` and
-  `?1049`, RIS and DECSTR, tmux passthrough, reply order and S8C1T framing),
-  `freminal-terminal-emulator/tests/reset_table.rs`, and two `terminal_state`
-  fuzz seeds (`fuzz/seeds/terminal_state/osc22_*`).
+  `?1049`, RIS and DECSTR, tmux passthrough, reply order, S8C1T framing, and the
+  16-entry and 64-name caps), `freminal-terminal-emulator/tests/reset_table.rs`,
+  and three `terminal_state` fuzz seeds (`fuzz/seeds/terminal_state/osc22_*`).
 
 ---
 

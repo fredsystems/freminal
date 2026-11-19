@@ -541,8 +541,9 @@ mod tests {
     /// Declares [`ALL_VARIANTS`] and [`variant_name`] from one list.
     ///
     /// `variant_name` is an exhaustive `match` with no wildcard, so a
-    /// [`PointerShape`] variant missing from this list fails to compile.  The
-    /// array is built from the same list, so it cannot omit a listed variant.
+    /// [`PointerShape`] variant missing from this list fails to compile.  A
+    /// variant listed twice is not a compile error, so the test below checks
+    /// for duplicates.
     macro_rules! declare_variants {
         ($($variant:ident),+ $(,)?) => {
             const ALL_VARIANTS: [PointerShape; [$(stringify!($variant)),+].len()] =
@@ -592,14 +593,10 @@ mod tests {
     #[test]
     fn all_variants_lists_every_variant_exactly_once() {
         for (index, variant) in ALL_VARIANTS.iter().enumerate() {
-            assert_eq!(
-                variant_name(*variant),
-                format!("{variant:?}"),
-                "variant {variant:?}"
-            );
             assert!(
                 !ALL_VARIANTS[..index].contains(variant),
-                "variant {variant:?} is listed twice"
+                "variant {} is listed twice",
+                variant_name(*variant)
             );
         }
     }
