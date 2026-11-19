@@ -10783,6 +10783,30 @@ markdownlint and `prettier --check` on the named files.
   from kitty. Orchestrator fix: COVERAGE said every dashed cell under 8 px may be solid; only
   6–7 px and sub-4 px cells are.
 
+### 140 Cleanup entries
+
+#### 140.C1 — The bundled terminfo entry is never used
+
+- **Surfaced:** maintainer question after 140.4 (2026-11-19). Predates Task 140.
+- **Impact:** `res/terminfo.tar` is embedded and extracted for every PTY, and children get
+  `TERMINFO_DIRS=<tempdir>:`, but they also get `TERM=xterm-256color`
+  (`freminal-terminal-emulator/src/io/pty.rs` ~600–633). The temp dir holds only `freminal` and
+  `xterm-freminal`, so no program ever reads the bundled entry; ncurses resolves
+  `xterm-256color` from the system database. The flake package does not install the entry
+  either (`postInstall` copies icons only). Capabilities beyond `xterm-256color` reach programs
+  only through XTGETTCAP, and only programs that query it.
+- **Options (maintainer decision pending):** (1) keep `xterm-256color` and delete or
+  document-as-reference the bundled entry and its extraction; (2) an opt-in `[shell] term`
+  option (default `xterm-256color`, or `xterm-freminal`) plus installing the entry to
+  `$out/share/terminfo`; (3) default `TERM=xterm-freminal` as kitty and Ghostty do, which breaks
+  ssh to hosts without the entry until SSH integration (Task 86) and reverses the recorded TERM
+  decision (Task 92 was dropped for this reason).
+- **Verification, whichever option:** an integration test that spawns a real PTY child with the
+  production environment (the same code path as `run_terminal`) and runs `tput`/`infocmp -x`
+  inside it, asserting what the child actually resolves. Under today's code it would show the
+  entry is unreachable.
+- **Scheduling:** awaiting the maintainer's choice; not blocking the Task 140 PR.
+
 ---
 
 ## Shipped-protocol conformance stubs (v0.13.0 / v0.13.1)
