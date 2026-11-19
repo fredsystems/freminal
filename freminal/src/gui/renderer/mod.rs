@@ -24,6 +24,8 @@
 //!   (decoration, background, foreground, image).
 //! - [`vertex`] — CPU-side vertex/instance builders, `FgRenderOptions`, and helpers.
 //!   Contains the full test suite for vertex generation logic.
+//! - `decorations` — underline and strikethrough quad geometry, called from
+//!   [`vertex`]'s background builder.
 //! - [`toast_pass`] — [`ToastRenderer`], a self-contained SDF rounded-rect
 //!   pill pass for the toast-notification overlay (issue #433). Driven each
 //!   frame from the owned `ToastStack::show` `PaintCallback`; see
@@ -45,6 +47,7 @@
 //!   [`gpu::TerminalRenderer`]'s init/draw/destroy lifecycle; see that
 //!   module's docs for the exact upload/draw timestamp boundaries.
 
+mod decorations;
 pub mod errors;
 pub mod gl_facade;
 pub mod gl_init_state;

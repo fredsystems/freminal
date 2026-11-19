@@ -10865,6 +10865,12 @@ this section and the repo rules. No blocker. Every finding, nit and above, is fi
   two-column glyph, cells 2–4 px high for curly and double; the run-boundary test uses a stroke
   whose old dot pitch did not divide the cell, so it fails on the old code.
 - **R9:** remove the redundant early-out.
+- **Status: done.** The move left the count at 9727; `effective_fg` and `x_scale` became
+  `pub(super)` (inside `renderer`) for the new module. DECDHL uses a `RowLayout` that mirrors
+  the glyph path exactly (doubled box at the pair top, bottom half shifted up one cell) and
+  `clip_quads_to_rows`. Seven new tests (9734); breaking the doubled scale or the clip fails four
+  each. The `STROKE_3` run-boundary case fails on pre-140.3 code (old dot pitch 6 restarted at
+  each run: 8 quads whole, 9 split).
 
 #### 140.C4 — Docs and plan review fixes
 
