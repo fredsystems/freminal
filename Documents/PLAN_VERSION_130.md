@@ -7770,7 +7770,12 @@ Stale stub text was corrected at the same time:
 
 ### 147 Status notes
 
-(none yet)
+- **147.1 (done).** `Mode::UnknownQuery { namespace, params }` reuses `ModeNamespace`; the
+  reply comes from `Mode::report`, so `CSI 2 $ p` gets `CSI 2 ; 0 $ y` and `CSI ? 9999 $ p`
+  keeps the `?` form, in both 7-bit and S8C1T framing. Five new tests (four fail on the old
+  `?{digits}` format).
+- **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
+  `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
 ---
 

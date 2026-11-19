@@ -343,7 +343,7 @@ impl TerminalState {
             | Mode::Declrmm(_)
             | Mode::AllowColumnModeSwitch(_)
             | Mode::AllowAltScreen(_)
-            | Mode::UnknownQuery(_)
+            | Mode::UnknownQuery { .. }
             | Mode::ApplicationEscapeKey(_)
             | Mode::InBandResizeMode(_)
             | Mode::GraphemeClustering(_)

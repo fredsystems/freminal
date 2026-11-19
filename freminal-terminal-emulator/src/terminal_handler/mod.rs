@@ -1864,11 +1864,11 @@ impl TerminalHandler {
                     };
                     self.write_csi_response(&XtCBlink::Blinking.report(Some(mode)));
                 }
-                Mode::UnknownQuery(params) => {
-                    // Unknown mode — respond with Ps=0 (not recognized)
-                    let digits: String = params.iter().map(|&x| x as char).collect();
-                    tracing::warn!("DECRQM: unknown mode ?{digits}, responding not recognized");
-                    self.write_csi_response(&format!("?{digits};0$y"));
+                Mode::UnknownQuery { .. } => {
+                    // Unknown mode — respond with Ps=0 (not recognized), in
+                    // the namespace the query arrived in.
+                    tracing::warn!("DECRQM: {mode}, responding not recognized");
+                    self.write_csi_response(&mode.report(None));
                 }
                 Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(Decawm::AutoWrap),
                 Mode::Decawm(Decawm::NoAutoWrap) => self.handle_set_wrap(Decawm::NoAutoWrap),
@@ -3818,10 +3818,13 @@ mod tests {
 
     #[test]
     fn mode_unknown_query_responds_not_recognized() {
+        use freminal_common::buffer_states::modes::unknown::ModeNamespace;
+
         let (mut handler, rx) = handler_with_pty();
-        handler.process_outputs(&[TerminalOutput::Mode(Mode::UnknownQuery(vec![
-            b'9', b'9', b'9',
-        ]))]);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: vec![b'9', b'9', b'9'],
+        })]);
         let resp = recv_pty_string(&rx);
         assert!(
             resp.contains("999") && resp.contains(";0$y"),

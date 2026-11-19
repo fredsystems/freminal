@@ -482,10 +482,14 @@ fn decquery_q2027_returns_grapheme_clustering_query() {
 
 #[test]
 fn unknown_q999_with_decquery_returns_unknown_query_stripped() {
-    // Params starting with '?' have the prefix stripped; DecQuery → UnknownQuery.
+    // Params starting with '?' have the prefix stripped; DecQuery → UnknownQuery
+    // in the DEC namespace.
     assert_eq!(
         dispatch(b"?999", SetMode::DecQuery),
-        Mode::UnknownQuery(vec![b'9', b'9', b'9'])
+        Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: vec![b'9', b'9', b'9'],
+        }
     );
 }
 
@@ -517,10 +521,14 @@ fn unknown_42_no_prefix_with_decset_returns_unknown_full_bytes() {
 
 #[test]
 fn unknown_42_no_prefix_with_decquery_returns_unknown_query_full_bytes() {
-    // Params without '?' are kept as-is; DecQuery → UnknownQuery.
+    // Params without '?' are kept as-is; DecQuery → UnknownQuery in the ANSI
+    // namespace.
     assert_eq!(
         dispatch(b"42", SetMode::DecQuery),
-        Mode::UnknownQuery(vec![b'4', b'2'])
+        Mode::UnknownQuery {
+            namespace: ModeNamespace::Ansi,
+            params: vec![b'4', b'2'],
+        }
     );
 }
 

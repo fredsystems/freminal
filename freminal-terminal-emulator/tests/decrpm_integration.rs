@@ -506,6 +506,31 @@ fn decrpm_unknown_mode_in_7bit_mode_is_unchanged() {
 }
 
 #[test]
+fn decrpm_unknown_ansi_mode_in_7bit_mode_has_no_question_mark() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[2$p");
+    assert_eq!(resp, b"\x1b[2;0$y");
+}
+
+#[test]
+fn decrpm_unknown_ansi_mode_in_8bit_mode_has_no_question_mark() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[2$p");
+    assert_eq!(resp, b"\x9b2;0$y");
+    assert!(!contains_7bit_csi(&resp));
+}
+
+#[test]
+fn decrpm_unknown_ansi_and_dec_modes_with_same_number_are_distinct() {
+    let (mut state, rx) = make_state();
+    let ansi = feed_and_collect_bytes(&mut state, &rx, b"\x1b[9999$p");
+    let dec = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?9999$p");
+    assert_eq!(ansi, b"\x1b[9999;0$y");
+    assert_eq!(dec, b"\x1b[?9999;0$y");
+}
+
+#[test]
 fn kitty_keyboard_query_in_8bit_mode_is_0x9b_question_flags_u() {
     let (mut state, rx) = make_state();
     state.handle_incoming_data(b"\x1b G"); // S8C1T

@@ -4088,17 +4088,38 @@ fn decrpm_xtcblink_after_enable_blink() {
 
 #[test]
 fn decrpm_unknown_mode_returns_not_recognized() {
-    use freminal_common::buffer_states::mode::Mode;
+    use freminal_common::buffer_states::{mode::Mode, modes::unknown::ModeNamespace};
 
     let mut handler = TerminalHandler::new(80, 24);
     let resp = query_handler_mode(
         &mut handler,
-        TerminalOutput::Mode(Mode::UnknownQuery(b"9999".to_vec())),
+        TerminalOutput::Mode(Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: b"9999".to_vec(),
+        }),
     );
     // Unknown mode → Ps=0 (not recognized)
     assert_eq!(
         resp, "\x1b[?9999;0$y",
         "Unknown mode query must return Ps=0"
+    );
+}
+
+#[test]
+fn decrpm_unknown_ansi_mode_reply_has_no_question_mark() {
+    use freminal_common::buffer_states::{mode::Mode, modes::unknown::ModeNamespace};
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::UnknownQuery {
+            namespace: ModeNamespace::Ansi,
+            params: b"2".to_vec(),
+        }),
+    );
+    assert_eq!(
+        resp, "\x1b[2;0$y",
+        "ANSI unknown query must keep its namespace"
     );
 }
 

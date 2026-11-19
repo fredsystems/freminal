@@ -142,7 +142,12 @@ pub enum Mode {
     ApplicationEscapeKey(ApplicationEscapeKey),
     InBandResizeMode(InBandResizeMode),
     PrivateColorRegisters(PrivateColorRegisters),
-    UnknownQuery(Vec<u8>),
+    /// DECRQM for a mode with no handler. `namespace` records whether the
+    /// query carried the `?` prefix so the reply can keep the same form.
+    UnknownQuery {
+        namespace: ModeNamespace,
+        params: Vec<u8>,
+    },
     Unknown(UnknownMode),
 }
 
@@ -223,14 +228,18 @@ impl Mode {
                     .copied()
                     .collect::<Vec<u8>>();
 
-                if mode == SetMode::DecQuery {
-                    Self::UnknownQuery(output_params)
+                let namespace = if is_dec {
+                    ModeNamespace::Dec
                 } else {
-                    let namespace = if is_dec {
-                        ModeNamespace::Dec
-                    } else {
-                        ModeNamespace::Ansi
-                    };
+                    ModeNamespace::Ansi
+                };
+
+                if mode == SetMode::DecQuery {
+                    Self::UnknownQuery {
+                        namespace,
+                        params: output_params,
+                    }
+                } else {
                     Self::Unknown(UnknownMode::new(&output_params, mode, namespace))
                 }
             }
@@ -285,10 +294,12 @@ impl ReportMode for Mode {
             Self::InBandResizeMode(mok) => mok.report(override_mode),
             Self::PrivateColorRegisters(pcr) => pcr.report(override_mode),
             Self::Unknown(mode) => mode.report(override_mode),
-            Self::UnknownQuery(v) => {
-                // convert each digit to a char
-                let digits = v.iter().map(|&x| x as char).collect::<String>();
-                format!("?{digits};0$y")
+            Self::UnknownQuery { namespace, params } => {
+                let digits = params.iter().map(|&x| x as char).collect::<String>();
+                match namespace {
+                    ModeNamespace::Dec => format!("?{digits};0$y"),
+                    ModeNamespace::Ansi => format!("{digits};0$y"),
+                }
             }
         }
     }
@@ -339,7 +350,9 @@ impl fmt::Display for Mode {
             Self::InBandResizeMode(mok) => write!(f, "{mok}"),
             Self::PrivateColorRegisters(pcr) => write!(f, "{pcr}"),
             Self::Unknown(params) => write!(f, "{params}"),
-            Self::UnknownQuery(v) => write!(f, "Unknown Query({v:?})"),
+            Self::UnknownQuery { namespace, params } => {
+                write!(f, "{namespace} Unknown Query({params:?})")
+            }
         }
     }
 }
@@ -543,14 +556,29 @@ mod tests {
     // ── Mode::UnknownQuery ──────────────────────────────────────────
 
     #[test]
-    fn report_unknown_query_decrpm_format() {
-        let mode = Mode::UnknownQuery(vec![b'4', b'7']);
+    fn report_unknown_query_dec_decrpm_format() {
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: vec![b'4', b'7'],
+        };
         assert_eq!(mode.report(None), "?47;0$y");
     }
 
     #[test]
+    fn report_unknown_query_ansi_decrpm_format_has_no_question_mark() {
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Ansi,
+            params: vec![b'4', b'7'],
+        };
+        assert_eq!(mode.report(None), "47;0$y");
+    }
+
+    #[test]
     fn display_unknown_query() {
-        let mode = Mode::UnknownQuery(vec![b'4', b'7']);
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: vec![b'4', b'7'],
+        };
         let s = format!("{mode}");
         assert!(s.contains("Unknown Query"), "got: {s}");
     }
