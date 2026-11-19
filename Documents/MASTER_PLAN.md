@@ -251,7 +251,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 148 | Security & Fuzz Findings Remediation        | `PLAN_VERSION_130.md` (Task 148)              | Complete      | None                          |
 | 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | Complete      | Task 138                      |
 | 150 | Desktop Notification Backend Extraction     | `PLAN_VERSION_130.md` (Task 150)              | Complete      | Task 149                      |
-| 151 | Own TERM & Terminfo Distribution            | `PLAN_VERSION_130.md` (Task 151)              | In progress   | Task 140                      |
+| 151 | Own TERM & Terminfo Distribution            | `PLAN_VERSION_130.md` (Task 151)              | Pending merge | Task 140                      |
 
 ---
 
@@ -853,7 +853,7 @@ Update this section as tasks complete:
 | 150  | 2026-10-22 | 2026-10-22 | 150.1-150.10, C1-C26, two review passes; merged via PR #576 (`c359cf3d`)           |
 | 139  | 2026-11-19 | 2026-11-19 | 139.1-139.5, C1-C3, two review passes; merged via PR #586 (`9fb9d63a`)             |
 | 140  | 2026-11-19 | 2026-11-19 | 140.1-140.5, C1-C6, two review passes; merged via PR #587 (`13f73832`)             |
-| 151  | 2026-11-19 |            | Branch `task-151/own-term` (worktree `../freminal-151`)                            |
+| 151  | 2026-11-19 |            | 151.1-151.12, C1-C4, two review passes; PR pending                                 |
 
 ---
 
