@@ -35,6 +35,14 @@ enum AlternateContents {
     Clear,
 }
 
+/// The left/right margin state both screens share (DECLRMM and DECSLRM).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LeftRightMargins {
+    declrmm: Declrmm,
+    left: usize,
+    right: usize,
+}
+
 impl Buffer {
     /// Resize the terminal buffer and return the adjusted `scroll_offset`.
     ///
@@ -56,6 +64,10 @@ impl Buffer {
         // up with `self.width` / `self.height` yet.
         let parked_primary = self.parked_primary.take();
         let parked_alternate = self.parked_alternate.take();
+        // The left/right margins are shared by both screens and are
+        // revalidated below; the parked screens are resized under the same
+        // pre-resize margins so their saved cursors settle on the same edge.
+        let margins = self.shared_left_right_margins();
 
         // The saved cursor (DECSC) is kept in screen coordinates, which this
         // resize invalidates. Pin its cell now, carry it through the reflow,
@@ -210,6 +222,7 @@ impl Buffer {
                 (old_width, old_height),
                 (new_width, new_height),
                 self.scrollback_limit,
+                margins,
             );
             // The primary marks held in `self` belong to the store that was
             // just reflowed / trimmed; translate them with it (primary marks
@@ -229,6 +242,7 @@ impl Buffer {
                 (old_width, old_height),
                 (new_width, new_height),
                 self.scrollback_limit,
+                margins,
             ));
         }
 
@@ -295,6 +309,7 @@ impl Buffer {
         old_size: (usize, usize),
         new_size: (usize, usize),
         scrollback_limit: usize,
+        margins: LeftRightMargins,
     ) -> (ParkedScreen, Option<ReflowRemap>) {
         Self::resize_parked_screen(
             parked,
@@ -302,6 +317,7 @@ impl Buffer {
             old_size,
             new_size,
             scrollback_limit,
+            margins,
         )
     }
 
@@ -316,6 +332,7 @@ impl Buffer {
         old_size: (usize, usize),
         new_size: (usize, usize),
         scrollback_limit: usize,
+        margins: LeftRightMargins,
     ) -> ParkedScreen {
         Self::resize_parked_screen(
             parked,
@@ -323,6 +340,7 @@ impl Buffer {
             old_size,
             new_size,
             scrollback_limit,
+            margins,
         )
         .0
     }
@@ -332,14 +350,17 @@ impl Buffer {
     /// `Buffer` of the given `kind` that holds the parked screen's state.
     ///
     /// The temporary buffer's cursor is the screen's `reflow_anchor`, which is
-    /// what a reflow or height shrink anchors on; the margins are full-screen
-    /// and are discarded (margins are shared and live on the real buffer).
+    /// what a reflow or height shrink anchors on. The left/right margins are
+    /// the real buffer's pre-resize ones (`margins`), so the saved cursor
+    /// settles against the same wrap edge; the temporary buffer's margins are
+    /// discarded afterwards (they are shared and live on the real buffer).
     fn resize_parked_screen(
         parked: ParkedScreen,
         kind: BufferType,
         (old_width, old_height): (usize, usize),
         (new_width, new_height): (usize, usize),
         scrollback_limit: usize,
+        margins: LeftRightMargins,
     ) -> (ParkedScreen, Option<ReflowRemap>) {
         let mut tmp = Self {
             rows: parked.rows,
@@ -375,9 +396,9 @@ impl Buffer {
             preserve_scrollback_anchor: false,
             scroll_region_top: 0,
             scroll_region_bottom: old_height.saturating_sub(1),
-            scroll_region_left: 0,
-            scroll_region_right: old_width.saturating_sub(1),
-            declrmm_enabled: Declrmm::Disabled,
+            scroll_region_left: margins.left,
+            scroll_region_right: margins.right,
+            declrmm_enabled: margins.declrmm,
             tab_stops: Self::default_tab_stops(old_width),
             decom_enabled: Decom::NormalCursor,
             image_store: parked.image_store,
@@ -1119,6 +1140,15 @@ impl Buffer {
     /// `resetMargins`, and `set_lr_margins` (charproc.c) clamps both margins
     /// to `max_col`; this keeps freminal's existing preserve-a-valid-partial-
     /// region behaviour for the cases where the result is still in range.
+    /// The shared left/right margin state, for resizing a parked screen.
+    const fn shared_left_right_margins(&self) -> LeftRightMargins {
+        LeftRightMargins {
+            declrmm: self.declrmm_enabled,
+            left: self.scroll_region_left,
+            right: self.scroll_region_right,
+        }
+    }
+
     const fn revalidate_left_right_margins(&mut self, old_width: usize) {
         let was_full_width =
             self.scroll_region_left == 0 && self.scroll_region_right == old_width.saturating_sub(1);

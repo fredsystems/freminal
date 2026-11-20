@@ -13,7 +13,7 @@
 
 use freminal_common::buffer_states::{modes::declrmm::Declrmm, tchar::TChar};
 
-use crate::{buffer::Buffer, cell::Cell};
+use crate::{buffer::Buffer, cell::Cell, row::LineWidth};
 
 fn text(s: &str) -> Vec<TChar> {
     s.chars().map(|c| TChar::Ascii(c as u8)).collect()
@@ -354,4 +354,69 @@ fn declrmm_cursor_right_of_the_margin_is_not_saved_as_pending_wrap() {
     buf.restore_cursor();
 
     assert_eq!(buf.cursor().pos.x, 15, "an ordinary column, restored as is");
+}
+
+#[test]
+fn pending_wrap_on_a_double_width_row_survives_a_narrowing_resize() {
+    // A double-width row wraps at half its span: 10 of 20 columns. The save
+    // must see that edge (PR #589 review R24).
+    let mut buf = Buffer::new(20, 5);
+    buf.set_cursor_line_width(LineWidth::DoubleWidth);
+    buf.insert_text(&text("abcdefghij"));
+    assert_eq!(buf.cursor().pos.x, 10, "setup: pending wrap at half width");
+    buf.save_cursor();
+    buf.set_cursor_pos(Some(0), Some(3));
+
+    let _ = buf.set_size(5, 5, 0);
+    buf.restore_cursor();
+    buf.insert_text(&text("K"));
+
+    let y = buf.cursor().pos.y;
+    assert_eq!(row_text(&buf, y), "K", "the character wraps");
+    assert!(
+        row_text(&buf, y - 1).ends_with('j'),
+        "'j' is not overwritten"
+    );
+}
+
+#[test]
+fn a_pending_cell_that_reflows_right_of_the_margin_becomes_the_next_column() {
+    // Row 1 continues row 0; the save is pending at the 1-10 margin on 'j'.
+    // Widening joins the rows, so 'j' lands at column 29, right of the
+    // margin edge: the slot becomes column 30, not a pending wrap that a later
+    // DECRC would put back on 'j' (PR #589 review R25).
+    let mut buf = Buffer::new(20, 5);
+    buf.insert_text(&text("ABCDEFGHIJKLMNOPQRSTabcdefghij"));
+    buf.set_declrmm(Declrmm::Enabled);
+    buf.set_left_right_margins(1, 10);
+    buf.set_cursor_pos(Some(10), Some(1));
+    buf.save_cursor();
+    buf.set_cursor_pos(Some(0), Some(3));
+
+    let _ = buf.set_size(40, 5, 0);
+    buf.set_declrmm(Declrmm::Disabled);
+    buf.restore_cursor();
+    buf.insert_text(&text("K"));
+
+    assert_eq!(row_text(&buf, 0), "ABCDEFGHIJKLMNOPQRSTabcdefghijK");
+}
+
+#[test]
+fn a_parked_save_settles_against_the_shared_margins() {
+    // The primary screen is parked while the alternate screen is resized; its
+    // saved cursor must settle against the shared 1-10 margins, as the live
+    // screen's does (PR #589 review R34).
+    let mut buf = pending_wrap_at_the_right_margin();
+    buf.save_cursor();
+    buf.set_cursor_pos(Some(0), Some(3));
+    buf.switch_to_alternate();
+    let _ = buf.set_size(30, 5, 0);
+    buf.switch_to_primary();
+    let _ = buf.set_size(5, 5, 0);
+    buf.restore_cursor();
+    buf.insert_text(&text("K"));
+
+    let y = buf.cursor().pos.y;
+    assert_eq!(row_text(&buf, y), "K", "the character wraps");
+    assert_eq!(row_text(&buf, y - 1), "fghij", "'j' is not overwritten");
 }
