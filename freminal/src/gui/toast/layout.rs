@@ -762,15 +762,24 @@ pub(super) fn layout_toasts(
         .collect()
 }
 
+/// Whether the window currently rendering a toast is the toast's origin
+/// window (see [`Toast::origin`](super::Toast::origin)). See [`resolve_anchor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToastOriginWindow {
+    /// The toast's origin window is the window currently rendering.
+    This,
+    /// The toast originated in another window, or has no origin at all.
+    Other,
+}
+
 /// Resolve the position + geometry a toast should actually be laid out at
 /// in the window currently rendering it.
 ///
 /// `toast_position`/`origin_pane` describe the toast's own declared anchor
 /// and (for [`ToastPosition::PaneCentered`]) its origin pane;
-/// `is_origin_window` is `true` iff the toast's origin window (see
-/// [`Toast::origin`](super::Toast::origin)) is the window currently rendering. Comparing
-/// `WindowId`s themselves is left to the caller
-/// ([`ToastStack::layout_positioned`], which is tested with two
+/// `origin_window` says whether the toast's origin window is the window
+/// currently rendering. Comparing `WindowId`s themselves is left to the
+/// caller ([`ToastStack::layout_positioned`], which is tested with two
 /// `WindowId::for_test` windows): this function takes only the comparison's
 /// result, so the anchor rules stay a pure function of plain values.
 ///
@@ -778,14 +787,14 @@ pub(super) fn layout_toasts(
 ///   always resolve against `content_rect` (this window's content area);
 ///   `resolve_pane_rect` is not consulted.
 /// - [`ToastPosition::PaneCentered`] resolves the origin pane's rect via
-///   `resolve_pane_rect` only when `is_origin_window` is `true` and
-///   `origin_pane` is `Some`; if `resolve_pane_rect` returns `None` (the
-///   pane is not in this window, e.g. it has since closed) it falls back to
-///   [`ToastPosition::WindowCentered`], same as a foreign window or a
-///   missing origin.
+///   `resolve_pane_rect` only when `origin_window` is
+///   [`ToastOriginWindow::This`] and `origin_pane` is `Some`; if
+///   `resolve_pane_rect` returns `None` (the pane is not in this window, e.g.
+///   it has since closed) it falls back to [`ToastPosition::WindowCentered`],
+///   same as a foreign window or a missing origin.
 fn resolve_anchor(
     toast_position: ToastPosition,
-    is_origin_window: bool,
+    origin_window: ToastOriginWindow,
     origin_pane: Option<PaneId>,
     content_rect: egui::Rect,
     resolve_pane_rect: &impl Fn(PaneId) -> Option<egui::Rect>,
@@ -798,7 +807,7 @@ fn resolve_anchor(
         ToastPosition::TopRightStack => (ToastPosition::TopRightStack, window_geom),
         ToastPosition::WindowCentered => (ToastPosition::WindowCentered, window_geom),
         ToastPosition::PaneCentered => {
-            if is_origin_window
+            if origin_window == ToastOriginWindow::This
                 && let Some(pane) = origin_pane
                 && let Some(pane_rect) = resolve_pane_rect(pane)
             {
@@ -967,13 +976,16 @@ impl ToastStack {
             .entries
             .iter()
             .map(|toast| {
-                let (is_origin_window, origin_pane) = match toast.origin() {
-                    Some((window, pane)) => (window == this_window_id, Some(pane)),
-                    None => (false, None),
+                let (origin_window, origin_pane) = match toast.origin() {
+                    Some((window, pane)) if window == this_window_id => {
+                        (ToastOriginWindow::This, Some(pane))
+                    }
+                    Some((_, pane)) => (ToastOriginWindow::Other, Some(pane)),
+                    None => (ToastOriginWindow::Other, None),
                 };
                 resolve_anchor(
                     toast.position(),
-                    is_origin_window,
+                    origin_window,
                     origin_pane,
                     content_rect,
                     resolve_pane_rect,
@@ -1739,7 +1751,7 @@ mod tests {
     // -----------------------------------------------------------------
     //
     // `resolve_anchor` takes the origin-window comparison as a pre-computed
-    // `bool` (`is_origin_window`) rather than a `WindowId` pair, so the anchor
+    // `ToastOriginWindow` rather than a `WindowId` pair, so the anchor
     // rules stay a pure function of plain values. The `WindowId` comparison
     // itself is in `ToastStack::layout_positioned`, tested further down with
     // two `WindowId::for_test` windows.
@@ -1754,7 +1766,7 @@ mod tests {
         };
         let (position, geom) = resolve_anchor(
             ToastPosition::TopRightStack,
-            true,
+            ToastOriginWindow::This,
             Some(PaneId::first()),
             content_rect,
             &never_called,
@@ -1772,7 +1784,7 @@ mod tests {
         };
         let (position, geom) = resolve_anchor(
             ToastPosition::WindowCentered,
-            true,
+            ToastOriginWindow::This,
             Some(PaneId::first()),
             content_rect,
             &never_called,
@@ -1791,7 +1803,7 @@ mod tests {
 
         let (position, geom) = resolve_anchor(
             ToastPosition::PaneCentered,
-            true, // is_origin_window
+            ToastOriginWindow::This,
             Some(pane),
             content_rect,
             &resolver,
@@ -1810,7 +1822,7 @@ mod tests {
 
         let (position, geom) = resolve_anchor(
             ToastPosition::PaneCentered,
-            false, // NOT the origin window
+            ToastOriginWindow::Other,
             Some(pane),
             content_rect,
             &resolver,
@@ -1828,7 +1840,7 @@ mod tests {
 
         let (position, geom) = resolve_anchor(
             ToastPosition::PaneCentered,
-            true,
+            ToastOriginWindow::This,
             None, // no origin pane at all
             content_rect,
             &never_called,
@@ -1848,7 +1860,7 @@ mod tests {
 
         let (position, geom) = resolve_anchor(
             ToastPosition::PaneCentered,
-            true,
+            ToastOriginWindow::This,
             Some(pane),
             content_rect,
             &always_none,

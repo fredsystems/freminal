@@ -8043,6 +8043,9 @@ Stale stub text was corrected at the same time:
   `:4759-4770` `ESC l`/`ESC m` set margins). The three handler arms log at `debug!` as ignored
   HP sequences; tests check the cursor and scroll region are unchanged. VT52 `ESC F` is a
   separate parser path, covered by `vt52_special_graphics_charset`.
+- **147.29 (done).** `resolve_anchor` takes `ToastOriginWindow { This, Other }`;
+  `layout_positioned` maps a matching window to `This`, a foreign or missing origin to
+  `Other`. The six `resolve_anchor_*` tests are ported unchanged in behaviour.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
