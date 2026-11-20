@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use conv2::ConvUtil as _;
 use freminal_common::pty_write::FreminalTerminalSize;
 use freminal_common::send_or_log;
+use freminal_common::term_name::{TermName, TermPlatform};
 use freminal_common::terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::{RepaintProxy, WindowId};
@@ -82,9 +83,11 @@ impl FreminalGui {
                 cwd: cwd_path,
                 shell_override: None,
                 extra_env: None,
+                term: TermName::resolve(&self.config.shell, TermPlatform::current(), None),
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
-                set_term_program: self.config.shell_integration.set_term_program,
+                term_program: pty::term_program_from_config(&self.config.shell_integration),
+                sudo_terminfo: pty::sudo_terminfo_from_config(&self.config.shell_integration),
             },
         ) {
             Ok(channels) => {
@@ -217,9 +220,11 @@ impl FreminalGui {
                 cwd: cwd_path,
                 shell_override: None,
                 extra_env: None,
+                term: TermName::resolve(&self.config.shell, TermPlatform::current(), None),
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: new_pane_id.raw().try_into().unwrap_or(u32::MAX),
-                set_term_program: self.config.shell_integration.set_term_program,
+                term_program: pty::term_program_from_config(&self.config.shell_integration),
+                sudo_terminfo: pty::sudo_terminfo_from_config(&self.config.shell_integration),
             },
         ) {
             Ok(ch) => ch,
@@ -378,9 +383,11 @@ impl FreminalGui {
                 cwd,
                 shell_override,
                 extra_env,
+                term: TermName::resolve(&self.config.shell, TermPlatform::current(), extra_env),
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
-                set_term_program: self.config.shell_integration.set_term_program,
+                term_program: pty::term_program_from_config(&self.config.shell_integration),
+                sudo_terminfo: pty::sudo_terminfo_from_config(&self.config.shell_integration),
             },
         ) {
             Ok(ch) => ch,

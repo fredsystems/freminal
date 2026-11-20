@@ -80,6 +80,116 @@ if __freminal_should_init
         printf '\033]7;file://%s%s\007' $__freminal_hostname $PWD
     end
 
+    # ── sudo keeps TERMINFO (Task 151.12; freminal's own wrapper, Task 151.C5) ─
+    # sudo's environment reset drops TERMINFO, so programs run under sudo lose
+    # freminal's terminfo entry.  When $FREMINAL_SHELL_FEATURES (a comma-separated
+    # list) names the item `sudo`, TERMINFO is set and no `sudo` function or
+    # alias exists yet, `sudo` becomes a function that runs the real sudo with
+    # `--preserve-env=TERMINFO` first.  An edit invocation (`-e`, `--edit`,
+    # including grouped or after other options) is passed through unchanged,
+    # because sudo refuses `--preserve-env` with an edit.  This is freminal's
+    # own implementation, written from sudo(8)'s option syntax.
+    if contains -- sudo (string split -- , "$FREMINAL_SHELL_FEATURES"); and test -n "$TERMINFO"; and not functions -q sudo
+        # Prints the full name of a long sudo option (given without the leading
+        # dashes) the way sudo resolves it: an exact name wins, otherwise a prefix
+        # of exactly one name.  Prints nothing for an unknown or ambiguous one.
+        function __freminal_sudo_long_name
+            test -n "$argv[1]"; or return 0
+            set -l length (string length -- "$argv[1]")
+            set -l matches
+            for candidate in askpass auth-type background bell chdir chroot close-from command-timeout edit group help host list login login-class no-update non-interactive other-user preserve-env preserve-groups prompt remove-timestamp reset-timestamp role set-home shell stdin type user validate version
+                if test "$candidate" = "$argv[1]"
+                    echo $candidate
+                    return 0
+                end
+                set -l head (string sub --length $length -- $candidate)
+                if test "$head" = "$argv[1]"
+                    set -a matches $candidate
+                end
+            end
+            if test (count $matches) -eq 1
+                echo $matches[1]
+            end
+        end
+
+        # Succeeds when the sudo arguments request an edit before the command word.
+        function __freminal_sudo_is_edit
+            set -l takes_value no
+            for word in $argv
+                if test $takes_value = yes
+                    set takes_value no
+                    continue
+                end
+                if test $takes_value = host
+                    # After a standalone `-h`: the next word is the host unless it is an
+                    # option or a NAME=value assignment (a path-like word is a host).
+                    set takes_value no
+                    switch "$word"
+                        case '-*'
+                        case '/*' '=*'
+                            continue
+                        case '*=*'
+                        case '*'
+                            continue
+                    end
+                end
+                switch "$word"
+                    case --
+                        return 1
+                    case '--*'
+                        set -l name (string replace -r -- '^--([^=]*).*' '$1' "$word")
+                        set -l long (__freminal_sudo_long_name "$name")
+                        switch "$long"
+                            case edit
+                                return 0
+                            case auth-type chdir chroot close-from command-timeout group host login-class other-user prompt role type user
+                                # Takes its value from the next word unless given as --name=value.
+                                if not string match -q -- '*=*' "$word"
+                                    set takes_value yes
+                                end
+                        end
+                    case -
+                        return 1
+                    case '-*'
+                        set -l rest (string sub --start 2 -- "$word")
+                        while test -n "$rest"
+                            set -l letter (string sub --length 1 -- "$rest")
+                            set rest (string sub --start 2 -- "$rest")
+                            switch $letter
+                                case e
+                                    return 0
+                                case a C c D g p R r T t U u
+                                    # The value is the rest of the word, or the next word.
+                                    if test -z "$rest"
+                                        set takes_value yes
+                                    end
+                                    break
+                                case h
+                                    # An optional value: the rest of this word; a standalone `-h`
+                                    # also takes the next word as the host (see above).
+                                    if test "$word" = -h
+                                        set takes_value host
+                                    end
+                                    break
+                            end
+                        end
+                    case '*=*'
+                    case '*'
+                        return 1
+                end
+            end
+            return 1
+        end
+
+        function sudo -d "Wrap sudo to preserve terminfo"
+            if __freminal_sudo_is_edit $argv
+                command sudo $argv
+            else
+                command sudo --preserve-env=TERMINFO $argv
+            end
+        end
+    end
+
     # ── OSC 1338 HISTFILE report (Task 72.15) ────────────────────────────────
     # Report fish's history file path on the FIRST prompt cycle so freminal
     # can seed the Quick Command History Palette with the file fish actually

@@ -44,6 +44,11 @@
       ##########################################################################
       homeManagerModules.default = import ./nix/home-manager-module.nix { freminal-flake = self; };
 
+      ##########################################################################
+      ## NIXOS MODULE — `programs.freminal.terminfo` option set
+      ##########################################################################
+      nixosModules.default = import ./nix/nixos-module.nix { freminal-flake = self; };
+
       packages = lib.genAttrs systems (
         system:
         let
@@ -108,6 +113,30 @@
             };
           };
 
+          # Only the compiled `xterm-freminal` / `freminal` entries, both
+          # directory layouts, copied from the committed tree.  The source is
+          # filtered to res/terminfo so unrelated changes never rebuild this,
+          # and nothing here depends on the GUI toolchain.  A NixOS host that
+          # only needs the entry (for sudo, detached tmux servers, ssh targets)
+          # installs this instead of the whole terminal.
+          terminfo =
+            pkgs.runCommand "freminal-terminfo"
+              {
+                meta = {
+                  description = "Freminal terminfo entries";
+                  license = lib.licenses.mit;
+                };
+              }
+              ''
+                mkdir -p $out/share
+                cp -r --no-preserve=mode ${
+                  lib.fileset.toSource {
+                    root = ./res/terminfo;
+                    fileset = ./res/terminfo;
+                  }
+                } $out/share/terminfo
+              '';
+
           version = "0.13.0-beta.3";
 
           # The build sandbox strips `.git`, so the crate's build.rs `git
@@ -119,6 +148,8 @@
           gitDescribe = "v${version}-${self.shortRev or self.dirtyShortRev or "nix"}";
         in
         {
+          inherit terminfo;
+
           freminal = rustPlatform.buildRustPackage {
             pname = "freminal";
             inherit version;
@@ -149,7 +180,13 @@
               "--skip=io::pty::echo_off_event_driven_tests::resize_then_write_still_reaches_child_after_rearchitecture"
             ];
 
-            postInstall =
+            postInstall = ''
+              # System-wide terminfo, so a profile or system closure that
+              # contains freminal also resolves TERM=xterm-freminal.
+              mkdir -p $out/share
+              cp -r --no-preserve=mode ${terminfo}/share/terminfo $out/share/terminfo
+            ''
+            + (
               if pkgs.stdenv.hostPlatform.isDarwin then
                 ''
                   # Create a macOS .app bundle so Freminal appears in
@@ -197,6 +234,11 @@
 
                   # Icon — use pre-generated .icns (multi-resolution, Retina-ready).
                   cp assets/macos/freminal.icns "$OUT_APP/Resources/freminal.icns"
+
+                  # Terminfo for the bundled `xterm-freminal` entry, found by
+                  # freminal itself relative to its executable (letter and
+                  # hex directory layouts).
+                  cp -R res/terminfo "$OUT_APP/Resources/terminfo"
                 ''
               else
                 ''
@@ -214,7 +256,8 @@
                   mkdir -p $out/share/icons/hicolor
                   cp -r assets/icons/hicolor/. \
                     $out/share/icons/hicolor/
-                '';
+                ''
+            );
           };
         }
       );

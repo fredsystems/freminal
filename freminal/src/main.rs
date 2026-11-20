@@ -71,7 +71,7 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
-            term: "xterm-256color".to_string(),
+            term: gui::recording::recording_term(&cfg.shell).to_string(),
             initial_topology: TopologySnapshot { windows: vec![] },
             scrollback_limit: cfg.scrollback.limit.try_into().unwrap_or(u32::MAX),
         };

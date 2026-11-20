@@ -14,6 +14,7 @@ use freminal_common::config::{
     TabTitlePolicy, ThemeMode, UnfocusedCursorStyle,
 };
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
+use freminal_common::term_name::{TermPlatform, validate_term_name};
 use freminal_common::themes;
 use std::path::PathBuf;
 
@@ -1163,6 +1164,31 @@ impl SettingsModal {
         }
         ui.label("Leave empty to use the system default shell.");
         ui.add_space(8.0);
+
+        ui.label("TERM:");
+        let mut term_text = self.draft.shell.term.clone().unwrap_or_default();
+        let response = ui.text_edit_singleline(&mut term_text);
+        if response.changed() {
+            self.draft.shell.term = if term_text.is_empty() {
+                None
+            } else {
+                Some(term_text)
+            };
+        }
+        let platform_default = TermPlatform::current().default_term();
+        ui.label(format!(
+            "Leave empty to use the default ({platform_default}). Applies to new panes only; \
+             a layout or pane `env` TERM overrides it."
+        ));
+        if let Some(term) = self.draft.shell.term.as_deref()
+            && let Err(err) = validate_term_name(term)
+        {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Invalid TERM ({err}); the default will be used."),
+            );
+        }
+        ui.add_space(8.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
             "Changes take effect on next session.",
@@ -1727,6 +1753,33 @@ impl SettingsModal {
              so shell scripts can detect Freminal.  Also enables spawn-time \
              auto-loading of the bundled shell-integration scripts for bash, \
              zsh, and fish — no manual sourcing required.",
+        );
+        ui.add_space(8.0);
+
+        // The sudo wrapper ships with the injected shell-integration scripts, which
+        // only load when the TERM_PROGRAM option above is on.
+        let integration_on = self.draft.shell_integration.set_term_program;
+        ui.add_enabled(
+            integration_on,
+            egui::Checkbox::new(
+                &mut self.draft.shell_integration.sudo_preserve_terminfo,
+                "Keep TERMINFO under sudo",
+            ),
+        )
+        .on_disabled_hover_text(
+            "Needs \"Set TERM_PROGRAM=freminal\": the sudo wrapper is part of the \
+             shell-integration scripts, which only load when that option is on.",
+        )
+        .clickable_when(integration_on);
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "Wraps sudo in the bundled bash, zsh, and fish integrations as \
+             `sudo --preserve-env=TERMINFO`, so programs run under sudo still \
+             find Freminal's terminfo entry (sudo -e is unchanged).  On by \
+             default.  If a sudoers policy forbids preserving the environment, \
+             sudo refuses the command: turn this off.  Applies to newly opened \
+             panes.",
         );
 
         ui.add_space(16.0);

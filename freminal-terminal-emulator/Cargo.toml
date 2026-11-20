@@ -51,7 +51,6 @@ test-log.workspace = true
 # predicates.workspace = true
 
 [build-dependencies]
-tar.workspace = true
 vergen.workspace = true
 
 [features]

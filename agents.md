@@ -179,7 +179,7 @@ The full architecture invariants and what-not-to-leak rules live in the
   update callbacks.
 - **`xtask`** -- build/CI orchestration. Subcommands: `ci`, `build`,
   `check`, `check-windows`, `lint`, `test`, `coverage`, `deny`, `machete`,
-  `fuzz`, `fuzz-smoke`, `fuzz-replay`, `fuzz-cmin`, `fuzz-list`.
+  `terminfo`, `fuzz`, `fuzz-smoke`, `fuzz-replay`, `fuzz-cmin`, `fuzz-list`.
 
 ### Terminal mode representation
 
@@ -229,6 +229,7 @@ Hardcoded shortcuts outside `BindingMap` are forbidden.
 | `cargo xtask coverage`                                         | Generate coverage report (lcov)                               |
 | `cargo fmt --all -- --check`                                   | Check formatting                                              |
 | `cargo xtask check-windows`                                    | Clippy for windows-gnu (Windows cross-check; `default` shell) |
+| `cargo xtask terminfo`                                         | Regenerate `res/terminfo/` + `.tar` from `res/freminal.ti`    |
 | `cargo deny check`                                             | Advisories, licences, bans, sources (also a required CI job)  |
 | `nix develop .#fuzz --command cargo xtask fuzz-replay`         | Replay fuzz seeds + regressions (required CI gate)            |
 | `nix develop .#fuzz --command cargo xtask fuzz <t> --time 300` | Fuzz one target for 5 minutes (see `fuzz-list`)               |

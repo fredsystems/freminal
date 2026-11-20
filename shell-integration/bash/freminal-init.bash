@@ -89,6 +89,124 @@ if [ -n "${HISTFILE:-}" ]; then
 	printf '\033]1338;HISTFILE=%s\007' "${HISTFILE}"
 fi
 
+# ── sudo keeps TERMINFO (Task 151.12; freminal's own wrapper, Task 151.C5) ───
+# sudo's environment reset drops TERMINFO, so programs run under sudo lose
+# freminal's terminfo entry.  When $FREMINAL_SHELL_FEATURES (a comma-separated
+# list) names the item `sudo` and TERMINFO is set, `sudo` becomes a function
+# that runs the real sudo with `--preserve-env=TERMINFO` first.  An edit
+# invocation (`-e`, `--edit`, including grouped or after other options) is
+# passed through unchanged, because sudo refuses `--preserve-env` with an edit.
+# This is freminal's own implementation, written from sudo(8)'s option syntax.
+if [[ ",${FREMINAL_SHELL_FEATURES:-}," == *",sudo,"* && -n "${TERMINFO:-}" ]]; then
+	# Resolves a long-option name (without the leading dashes) the way sudo
+	# does: an exact name wins, otherwise a prefix of exactly one name.  The
+	# full name, or nothing for an unknown or ambiguous one, is left in
+	# __freminal_sudo_long.
+	__freminal_sudo_long_name() {
+		local candidate found=""
+		local matches=0
+		__freminal_sudo_long=""
+		for candidate in askpass auth-type background bell chdir chroot close-from command-timeout edit group help host list login login-class no-update non-interactive other-user preserve-env preserve-groups prompt remove-timestamp reset-timestamp role set-home shell stdin type user validate version; do
+			if [[ "$candidate" == "$1" ]]; then
+				__freminal_sudo_long="$candidate"
+				return 0
+			fi
+			if [[ "$candidate" == "$1"* ]]; then
+				matches=$((matches + 1))
+				found="$candidate"
+			fi
+		done
+		if [[ "$matches" -eq 1 ]]; then
+			__freminal_sudo_long="$found"
+		fi
+	}
+
+	# Succeeds when the sudo arguments request an edit before the command word.
+	__freminal_sudo_is_edit() {
+		local word rest letter name
+		local takes_value="no"
+		for word in "$@"; do
+			if [[ "$takes_value" == "yes" ]]; then
+				takes_value="no"
+				continue
+			fi
+			if [[ "$takes_value" == "host" ]]; then
+				# After a standalone `-h`: the next word is the host unless it is an
+				# option or a NAME=value assignment (a path-like word is a host).
+				# `[=]*` rather than `=*`, which zsh would try to expand as `=command`.
+				takes_value="no"
+				case "$word" in
+				-*) ;;
+				/* | [=]*) continue ;;
+				*=*) ;;
+				*) continue ;;
+				esac
+			fi
+			case "$word" in
+			--)
+				return 1
+				;;
+			--*)
+				name="${word#--}"
+				name="${name%%=*}"
+				__freminal_sudo_long_name "$name"
+				case "$__freminal_sudo_long" in
+				edit)
+					return 0
+					;;
+				auth-type | chdir | chroot | close-from | command-timeout | group | host | login-class | other-user | prompt | role | type | user)
+					# Takes its value from the next word unless given as --name=value.
+					if [[ "$word" != *=* ]]; then
+						takes_value="yes"
+					fi
+					;;
+				esac
+				;;
+			-?*)
+				rest="${word#-}"
+				while [[ -n "$rest" ]]; do
+					letter="${rest:0:1}"
+					rest="${rest:1}"
+					case "$letter" in
+					e)
+						return 0
+						;;
+					[aCcDgpRrTtUu])
+						# The value is the rest of the word, or the next word.
+						if [[ -z "$rest" ]]; then
+							takes_value="yes"
+						fi
+						break
+						;;
+					h)
+						# An optional value: the rest of this word; a standalone `-h`
+						# also takes the next word as the host (see above).
+						if [[ "$word" == "-h" ]]; then
+							takes_value="host"
+						fi
+						break
+						;;
+					esac
+				done
+				;;
+			*=*) ;;
+			*)
+				return 1
+				;;
+			esac
+		done
+		return 1
+	}
+
+	function sudo {
+		if __freminal_sudo_is_edit "$@"; then
+			command sudo "$@"
+		else
+			command sudo --preserve-env=TERMINFO "$@"
+		fi
+	}
+fi
+
 # Per-command counter used to give each command lifecycle a unique `fid`
 # (A→B→C→D all share one fid; the next command gets a fresh one).
 #

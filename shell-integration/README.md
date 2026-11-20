@@ -57,6 +57,51 @@ same feature surface.
 
 ---
 
+## The `sudo` Wrapper (Terminfo)
+
+`sudo` resets its environment, so a program run under `sudo` normally loses
+`TERMINFO`, the variable that points at Freminal's own `xterm-freminal`
+terminfo entry. The bash, zsh and fish integrations therefore define a `sudo`
+wrapper that calls `sudo --preserve-env=TERMINFO ...`. The wrapper is
+Freminal's own implementation, and Freminal turns it on by default.
+
+- **Setting:** `[shell_integration] sudo_preserve_terminfo` in `config.toml`
+  (default `true`; also in the Settings modal's Shell Integration tab). It
+  applies to new panes and only does anything under `set_term_program = true`
+  (the default), because that same flag controls whether the integration is
+  injected at all.
+- **Signal to the scripts:** Freminal sets `FREMINAL_SHELL_FEATURES=sudo` (a
+  comma-separated list) when the toggle is on and the integration is injected,
+  and removes the variable otherwise, so a value inherited from a parent
+  Freminal pane cannot switch the wrapper on. The wrapper is only defined when
+  the list contains the whole item `sudo` (`nosudo` does not match) and
+  `TERMINFO` is set. In fish it is also left undefined when a `sudo` function or
+  alias already exists.
+- **Edits:** an edit (`sudo -e` / `sudo --edit`) is passed through unchanged,
+  with no `--preserve-env`, because sudo rejects that option combination.
+- **Argument scan:** the wrapper reads the arguments left to right, following
+  sudo(8)'s option syntax, until the command word. `--` ends the options;
+  options that take a value (`-u root`, `--user root`, `--chdir dir`, and the
+  value letter of a grouped word such as `-ku root`) skip that value, while
+  `--user=root` and `-uroot` carry it in the same word; `NAME=value` words are
+  skipped. Long options may be abbreviated to a unique prefix, as sudo allows
+  (`--ed` is `--edit`, `--us root` is `--user root`). `-h` takes a value
+  attached to its own word, and a standalone `-h` also takes the next word as
+  the host unless that word starts with `-` or is a `NAME=value` assignment
+  (so `sudo -h localhost -e file` is an edit). If `-e` or `--edit` turns up before the command,
+  the call is an edit.
+  So `sudo -u root -e file` and `sudo -ke file` are edits, while
+  `sudo -ue root file` (a user named `e`) and `sudo cmd -e` are not.
+- **Sudoers caveat:** a sudoers policy that forbids preserving the environment
+  makes `sudo --preserve-env=TERMINFO` refuse the command. If yours does, set
+  `sudo_preserve_terminfo = false`.
+- **Installing the entry system-wide:** because the wrapper keeps `TERMINFO`,
+  `tic` run under it would write into the pane's directory. Use
+  `sudo env -u TERMINFO tic -x -` for a system-wide install (see the README's
+  Terminfo section).
+
+---
+
 ## User-Edit Warning
 
 These files are **overwritten on every freminal launch** — Freminal compares

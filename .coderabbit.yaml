@@ -49,9 +49,10 @@ reviews:
     # Recordings (FREC) and raw binary captures.
     - "!**/*.frec"
     - "!**/*.bin"
-    # Fonts, terminfo tarball, and reference PDFs: binary, not reviewable.
+    # Fonts, terminfo tarball and compiled tree, and reference PDFs: binary, not reviewable.
     - "!res/**/*.ttf"
     - "!res/terminfo.tar"
+    - "!res/terminfo/**"
     - "!Documents/reference/*.pdf"
     # Icons and logos (binary PNG/ICNS, machine-exported SVG).
     - "!assets/**/*.png"

@@ -3,16 +3,20 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{collections::HashMap, io::Write, path::Path, path::PathBuf};
 
+use super::shell_features::{SudoTerminfo, apply_shell_features_env};
+use super::term_program_env::TermProgramEnv;
 use super::{PtyRead, PtyWrite};
 use arc_swap::ArcSwapOption;
 use conv2::ValueFrom;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use freminal_common::{
     pty_write::FreminalTerminalSize,
+    term_name::{TermName, TermPlatform},
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
     terminfo::TERMINFO,
 };
@@ -124,6 +128,170 @@ fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {
         .map_err(ExtractTerminfoError::Extraction)?;
 
     Ok(temp_dir)
+}
+
+/// The platforms that differ in where a child finds the `xterm-freminal` entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminfoPlatform {
+    /// Looks for a terminfo tree inside a `.app` bundle.
+    MacOs,
+    /// Has no terminfo database, so nothing is made available.
+    Windows,
+    /// Extracts the embedded entry per pane.
+    Other,
+}
+
+impl TerminfoPlatform {
+    const fn current() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// Where the child's terminfo directory comes from.
+#[derive(Debug, PartialEq, Eq)]
+enum TerminfoSource {
+    /// No terminfo directory is set up.
+    Unused,
+    /// The terminfo tree shipped inside the `.app` bundle; nothing is extracted.
+    Bundle(PathBuf),
+    /// The embedded tarball is extracted into a per-pane temporary directory.
+    PerPaneExtraction,
+}
+
+/// The terminfo tree of the `.app` bundle containing `exe`, if `exe` has the shape
+/// `<dir>/<Name>.app/Contents/MacOS/<exe>`.
+///
+/// Pure: it only inspects the path, so whether the directory exists is checked
+/// separately and the shape can be tested on every platform.
+fn bundle_terminfo_dir(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    let contents_dir = macos_dir.parent()?;
+    let app_dir = contents_dir.parent()?;
+    if macos_dir.file_name()? != "MacOS" || contents_dir.file_name()? != "Contents" {
+        return None;
+    }
+    // `extension` is `None` for a bare `.app` (no stem), which is not a bundle name.
+    if app_dir.extension()? != "app" {
+        return None;
+    }
+    Some(contents_dir.join("Resources").join("terminfo"))
+}
+
+/// The existing terminfo directory of the bundle the running executable lives in.
+///
+/// The executable path is canonicalised first: the Nix Darwin package makes
+/// `$out/bin/freminal` a symlink into `Freminal.app/Contents/MacOS/freminal`.
+///
+/// A `.app` built locally with `cargo bundle` has no such directory (the release
+/// workflows copy the tree in after bundling), so this returns `None` there and
+/// the entry is extracted per pane instead.
+fn running_bundle_terminfo_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    bundle_terminfo_dir(&exe).filter(|dir| dir.is_dir())
+}
+
+/// Decide where the child's terminfo directory comes from.
+///
+/// `bundle_dir` is an existing bundle terminfo directory, if there is one; it is
+/// only consulted on macOS. When it is used, per-pane extraction is skipped.
+fn terminfo_source(platform: TerminfoPlatform, bundle_dir: Option<PathBuf>) -> TerminfoSource {
+    match (platform, bundle_dir) {
+        (TerminfoPlatform::Windows, _) => TerminfoSource::Unused,
+        (TerminfoPlatform::MacOs, Some(dir)) => TerminfoSource::Bundle(dir),
+        (TerminfoPlatform::MacOs | TerminfoPlatform::Other, _) => TerminfoSource::PerPaneExtraction,
+    }
+}
+
+/// Names the pane's own terminfo directory in the child's environment.
+///
+/// Internal: freminal sets it next to `TERMINFO`, so a freminal started inside a
+/// pane can tell the `TERMINFO` it inherits (the parent pane's directory) from one
+/// the user exported.  It is not a setting and nothing reads it but freminal.
+const FREMINAL_TERMINFO_ENV: &str = "FREMINAL_TERMINFO";
+
+/// The terminfo variables the child is given: `TERMINFO` and `FREMINAL_TERMINFO`
+/// always, `TERMINFO_DIRS` only when a user-supplied `TERMINFO` has to stay
+/// reachable.
+#[derive(Debug, PartialEq, Eq)]
+struct TerminfoEnv {
+    /// Both `TERMINFO` and `FREMINAL_TERMINFO` are set to this.
+    terminfo: PathBuf,
+    /// `None` leaves the inherited `TERMINFO_DIRS` (set or not) untouched.
+    terminfo_dirs: Option<OsString>,
+}
+
+/// Decide the child's terminfo variables from the pane's directory and the
+/// variables the parent process has.
+///
+/// `TERMINFO` is always the pane's directory `dir` (the bundle directory when
+/// there is one, otherwise the per-pane temporary directory), whatever `TERM` is.
+/// It is the first place ncurses looks and is not exclusive: the first directory
+/// in its search order that holds the requested entry wins, and a lookup that
+/// misses falls through to the rest (ncurses `db_iterator.c`: `$TERMINFO`, then
+/// `$HOME/.terminfo`, then `$TERMINFO_DIRS`, then the compiled-in default).  So a
+/// stale per-user `~/.terminfo` copy cannot shadow the pane's entry, and
+/// `TERM=xterm-256color` still resolves from the system database.  This is what
+/// kitty and Ghostty do with their bundled directories.
+///
+/// Setting `TERMINFO` would hide a `TERMINFO` the user exported (a private
+/// database for a custom `TERM`).  So when the parent has a non-empty `TERMINFO`
+/// it is moved to the front of the child's `TERMINFO_DIRS`, followed by the
+/// parent's `TERMINFO_DIRS`; when that is unset (or empty) the value ends with an
+/// empty element, which ncurses reads as the compiled-in default, so the system
+/// database stays reachable.  Without an inherited `TERMINFO` the inherited
+/// `TERMINFO_DIRS` is left alone.  Because the moved directory is searched after
+/// `~/.terminfo`, a same-named entry there shadows the user's `TERMINFO`.
+///
+/// An inherited `TERMINFO` that freminal itself set is not the user's and is not
+/// moved, or nested panes would chain every ancestor's temporary directory into
+/// `TERMINFO_DIRS`.  It is freminal's when it equals `dir`, or when it equals the
+/// inherited `FREMINAL_TERMINFO` (the directory a parent freminal pane named).  A
+/// `TERMINFO` the user exported inside a pane differs from `FREMINAL_TERMINFO` and
+/// is kept.  Paths are compared as `OsStr`, byte for byte.
+fn terminfo_env(
+    dir: &Path,
+    inherited_terminfo: Option<&OsStr>,
+    inherited_freminal_terminfo: Option<&OsStr>,
+    inherited_terminfo_dirs: Option<&OsStr>,
+) -> TerminfoEnv {
+    let terminfo_dirs = inherited_terminfo
+        .filter(|inherited| !inherited.is_empty())
+        .filter(|inherited| *inherited != dir.as_os_str())
+        .filter(|inherited| inherited_freminal_terminfo != Some(*inherited))
+        .map(|inherited| {
+            let mut dirs = inherited.to_os_string();
+            dirs.push(":");
+            if let Some(rest) = inherited_terminfo_dirs {
+                dirs.push(rest);
+            }
+            dirs
+        });
+    TerminfoEnv {
+        terminfo: dir.to_path_buf(),
+        terminfo_dirs,
+    }
+}
+
+/// Apply [`terminfo_env`] to `cmd`, reading the inherited values from the
+/// builder's environment (which starts as the parent's).
+fn apply_terminfo_env(cmd: &mut CommandBuilder, dir: &Path) {
+    let env = terminfo_env(
+        dir,
+        cmd.get_env("TERMINFO"),
+        cmd.get_env(FREMINAL_TERMINFO_ENV),
+        cmd.get_env("TERMINFO_DIRS"),
+    );
+    cmd.env("TERMINFO", &env.terminfo);
+    cmd.env(FREMINAL_TERMINFO_ENV, &env.terminfo);
+    if let Some(dirs) = env.terminfo_dirs {
+        cmd.env("TERMINFO_DIRS", dirs);
+    }
 }
 
 #[derive(Error, Debug)]
@@ -407,10 +575,21 @@ pub struct PtySpawnConfig<'a> {
     pub cwd: Option<&'a Path>,
     /// Extra environment variables to set on the child process.
     pub extra_env: Option<&'a HashMap<String, String>>,
-    /// When `true`, set `TERM_PROGRAM=freminal` and `TERM_PROGRAM_VERSION`
-    /// on the child process before applying `extra_env`.  Driven by
+    /// Whether to set `TERM_PROGRAM=freminal` and `TERM_PROGRAM_VERSION` on the
+    /// child process before applying `extra_env`, and to inject the
+    /// shell-integration scripts.  Driven by
     /// `config.shell_integration.set_term_program` (Task 72.6).
-    pub set_term_program: bool,
+    pub term_program: TermProgramEnv,
+    /// Whether the shell-integration `sudo` wrapper that preserves `TERMINFO`
+    /// is on.  Driven by `config.shell_integration.sudo_preserve_terminfo`
+    /// (Task 151.12, on by default); only takes effect when shell integration
+    /// is injected.
+    pub sudo_terminfo: SudoTerminfo,
+    /// The `TERM` set on the child: the single per-pane value, already
+    /// resolved with `[shell] term` and the pane's `extra_env` `TERM`
+    /// (see [`TermName::resolve`]).  XTGETTCAP `TN` and the FREC `term`
+    /// metadata use the same value.
+    pub term: &'a TermName,
 }
 
 /// Build the `(key, value)` pairs Freminal sets on every PTY child to
@@ -434,6 +613,27 @@ pub fn term_program_env_pairs() -> [(&'static str, String); 2] {
         ("TERM_PROGRAM", String::from("freminal")),
         ("TERM_PROGRAM_VERSION", version),
     ]
+}
+
+/// Set `TERM` on the child to the pane's resolved [`TermName`].
+fn apply_term_env(cmd: &mut CommandBuilder, term: &TermName) {
+    cmd.env("TERM", term.as_str());
+}
+
+/// Apply the per-pane `env` map to the child.
+///
+/// `TERM` is skipped: it was folded into the pane's [`TermName`] and already set by
+/// [`apply_term_env`], so setting it again could only introduce a value that
+/// disagrees with what XTGETTCAP `TN` and the FREC metadata report.  Every key
+/// [`TermName::is_env_key`] matches is skipped (on Windows that includes other
+/// letter cases), so an empty `TERM` in the map cannot blank the child's `TERM`.
+fn apply_extra_env(cmd: &mut CommandBuilder, env: &HashMap<String, String>) {
+    let platform = TermPlatform::current();
+    for (key, value) in env {
+        if !TermName::is_env_key(platform, key) {
+            cmd.env(key, value);
+        }
+    }
 }
 
 /// Shell flavour recognised by Freminal's spawn-time shell-integration
@@ -467,7 +667,7 @@ fn detect_shell(program: &str) -> Option<Shell> {
 /// Apply shell-integration env injection to `cmd` for `shell`, using
 /// `resources` as the shell-integration resources directory.  Called
 /// from [`run_terminal`] when (a) no explicit positional command was
-/// passed, (b) `set_term_program` is enabled, and (c) the program path
+/// passed, (b) `term_program` is `Advertise`, and (c) the program path
 /// matches a recognised shell.
 ///
 /// `shell_program` is the resolved shell executable path (from `--shell`,
@@ -537,6 +737,22 @@ fn inject_shell_integration_env(
     }
 }
 
+/// Set or clear [`SHELL_FEATURES_ENV`](super::shell_features::SHELL_FEATURES_ENV) for a spawn.
+///
+/// `injected` is the shell whose integration scripts this spawn injected, or
+/// `None` when none were (`term_program` is `Omit`, unknown shell, positional
+/// command).  Only an injected spawn can turn a feature on, because only the
+/// injected scripts read the variable; every other spawn gets `Unchanged`, which
+/// removes an inherited value.
+fn apply_spawn_shell_features(
+    cmd: &mut CommandBuilder,
+    injected: Option<Shell>,
+    requested: SudoTerminfo,
+) {
+    let sudo = injected.map_or(SudoTerminfo::Unchanged, |_| requested);
+    apply_shell_features_env(cmd, sudo);
+}
+
 /// Spawn the child process on a new PTY and run the PTY thread event loop.
 ///
 /// Integrates the PTY reader, GUI input channel, and window-command dispatch
@@ -566,7 +782,9 @@ pub fn run_terminal(
         shell,
         cwd,
         extra_env,
-        set_term_program,
+        term_program,
+        sudo_terminfo,
+        term,
     } = spawn_cfg;
     let pty_system = NativePtySystem::default();
 
@@ -605,38 +823,34 @@ pub fn run_terminal(
         shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new)
     };
 
-    // Use TERMINFO_DIRS (colon-separated search path) instead of TERMINFO
-    // (single exclusive directory).  TERMINFO is exclusive: if set, ncurses
-    // ONLY looks there — and our tarball only contains `freminal` /
-    // `xterm-freminal`, not `xterm-256color`.  With TERMINFO_DIRS, ncurses
-    // checks our directory first but falls back to the system terminfo so
-    // readline and other programs can find xterm-256color capabilities.
+    // TERMINFO is searched before `~/.terminfo` and is not exclusive: ncurses
+    // falls through to the remaining locations when the entry is not in it (see
+    // `apply_terminfo_env`), so our tarball holding only `freminal` /
+    // `xterm-freminal` does not hide a configured `TERM` such as `xterm-256color`.
     if let Some(termcaps) = termcaps {
-        let termcaps_str = termcaps.display();
-        cmd.env("TERMINFO_DIRS", format!("{termcaps_str}:"));
-        cmd.env_remove("TERMINFO");
+        apply_terminfo_env(&mut cmd, termcaps);
     }
-    // TERM Strategy: We set TERM=xterm-256color rather than a custom value like
-    // "xterm-freminal" for maximum compatibility. Programs like neovim, tmux, and
-    // many TUI apps have hardcoded behavior based on TERM — setting it to an
-    // unrecognized value causes them to fall back to minimal capabilities. This is
-    // the same approach used by WezTerm, Alacritty, and most modern terminals.
+    // TERM Strategy: children get `TERM=xterm-freminal` by default (Task 151).  The
+    // entry is accurate (it is checked against XTGETTCAP and the parser/handler
+    // by tests) and the `xterm-` prefix keeps programs that match `xterm*`
+    // working, as `xterm-kitty` and `xterm-ghostty` do.  The bundled entry is
+    // extracted per PTY and named by `TERMINFO` above, so it resolves even where
+    // nothing is installed.  The value is configurable with `[shell] term`, and a
+    // `TERM` in the pane's `env` wins over it.  On Windows the default stays
+    // `xterm-256color`: there is no terminfo distribution path and MSYS2/Cygwin
+    // programs read their own databases.  Inside a macOS `.app` the entry ships
+    // in `Contents/Resources/terminfo` and is used instead of the per-pane copy.
     //
-    // For capabilities beyond what xterm-256color declares (e.g., true color, styled
-    // underlines, clipboard via OSC 52), we rely on XTGETTCAP (DCS +q) responses.
-    // Modern programs query these at startup to discover extra features. See
-    // `TerminalHandler::lookup_termcap` in freminal-buffer for the full list.
-    //
-    // The custom freminal.ti entry in res/ exists as a reference but is not used by
-    // child processes. The TERMINFO_DIRS env var includes the extracted tarball so
-    // that programs that check for a valid TERMINFO directory find one.
-    cmd.env("TERM", "xterm-256color");
+    // `term` is the already-resolved single value (`TermName::resolve`); it is also
+    // what XTGETTCAP `TN` and the FREC metadata report.  The per-pane `extra_env`
+    // loop below skips `TERM` so it cannot override this value with a different one.
+    apply_term_env(&mut cmd, term);
     cmd.env("COLORTERM", "truecolor");
 
     // Shell integration: announce ourselves to scripts via TERM_PROGRAM.
     // Applied BEFORE `extra_env` so layout/user env wins on conflict.
     // Gated on `[shell_integration] set_term_program` (Task 72.6).
-    if set_term_program {
+    if term_program == TermProgramEnv::Advertise {
         for (key, value) in term_program_env_pairs() {
             cmd.env(key, value);
         }
@@ -644,7 +858,7 @@ pub fn run_terminal(
     // Spawn-time shell-integration env injection (Task 72.8b).
     //
     // When we're spawning a bare interactive shell (no positional command)
-    // and `set_term_program` is enabled, detect the shell flavour and inject
+    // and `term_program` is `Advertise`, detect the shell flavour and inject
     // the env that makes our shipped integration scripts auto-load.  The
     // scripts emit OSC 133 markers tagged `freminal=1; fid=<id>` so the
     // command-block tracker can recognise them.
@@ -657,8 +871,8 @@ pub fn run_terminal(
     // than appending `--posix` as a bare arg (which would make
     // `portable_pty` spawn a program literally named `--posix`; see the
     // function's docs).
-    if spawning_shell
-        && set_term_program
+    let injected_shell = if spawning_shell
+        && term_program == TermProgramEnv::Advertise
         && let (Some(prog), Some(resources)) = (
             shell_program.as_deref(),
             freminal_common::config::shell_integration_dir(),
@@ -666,7 +880,14 @@ pub fn run_terminal(
         && let Some(shell) = detect_shell(prog)
     {
         inject_shell_integration_env(&mut cmd, shell, resources.path(), prog);
-    }
+        Some(shell)
+    } else {
+        None
+    };
+    // Tell the injected scripts which optional features are on (Task 151.12).
+    // Runs on every spawn so an inherited list is always dropped unless this
+    // spawn turns the feature on.
+    apply_spawn_shell_features(&mut cmd, injected_shell, sudo_terminfo);
     cmd.env("__CFBundleIdentifier", "io.github.fredclausen.freminal");
 
     // NOTE: Some programs (e.g. ohmyposh, zsh) require LANG to be set.  On
@@ -724,9 +945,7 @@ pub fn run_terminal(
     // Apply per-pane extra environment variables from the layout.
     // These are applied last so they can override any default env vars set above.
     if let Some(env) = extra_env {
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
+        apply_extra_env(&mut cmd, env);
     }
 
     let mut child = pair
@@ -930,15 +1149,28 @@ impl FreminalPtyInputOutput {
         initial_size: &FreminalTerminalSize,
         pane_id: u32,
     ) -> Result<Self, PtyInitError> {
-        // don't use it.  Skip extraction entirely on Windows to avoid issues
-        // with symlinks in the tarball requiring elevated privileges.
-        let termcaps = if cfg!(target_os = "windows") {
-            None
+        // Skip extraction entirely on Windows: there is no terminfo database there,
+        // so nothing would read the extracted tree.  Inside a macOS `.app` the
+        // bundled tree is used and nothing is extracted.
+        let platform = TerminfoPlatform::current();
+        let bundle_dir = if platform == TerminfoPlatform::MacOs {
+            running_bundle_terminfo_dir()
         } else {
+            None
+        };
+        let source = terminfo_source(platform, bundle_dir);
+        let termcaps = if source == TerminfoSource::PerPaneExtraction {
             Some(extract_terminfo().map_err(|e| {
                 error!("Failed to extract terminfo: {e}");
                 PtyInitError::ExtractTerminfo(e.to_string())
             })?)
+        } else {
+            None
+        };
+        let terminfo_dir = match &source {
+            TerminfoSource::Unused => None,
+            TerminfoSource::Bundle(dir) => Some(dir.as_path()),
+            TerminfoSource::PerPaneExtraction => termcaps.as_ref().map(TempDir::path),
         };
 
         let result = run_terminal(
@@ -946,7 +1178,7 @@ impl FreminalPtyInputOutput {
             replies,
             send_tx,
             spawn_cfg,
-            termcaps.as_ref().map(TempDir::path),
+            terminfo_dir,
             initial_size,
             pane_id,
         )?;
@@ -1009,6 +1241,329 @@ fn normalize_locale(raw: &str) -> String {
             || format!("{normalised}.UTF-8"),
             |m| format!("{normalised}.UTF-8@{m}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod bundle_terminfo_tests {
+    use super::*;
+
+    #[test]
+    fn exe_inside_an_app_bundle_resolves_to_its_resources_terminfo() {
+        let exe = Path::new("/Applications/Freminal.app/Contents/MacOS/freminal");
+        assert_eq!(
+            bundle_terminfo_dir(exe),
+            Some(PathBuf::from(
+                "/Applications/Freminal.app/Contents/Resources/terminfo"
+            ))
+        );
+    }
+
+    #[test]
+    fn app_bundle_name_may_contain_spaces_and_dots() {
+        let exe = Path::new("/Users/me/My Apps/Freminal 1.2.app/Contents/MacOS/freminal");
+        assert_eq!(
+            bundle_terminfo_dir(exe),
+            Some(PathBuf::from(
+                "/Users/me/My Apps/Freminal 1.2.app/Contents/Resources/terminfo"
+            ))
+        );
+    }
+
+    #[test]
+    fn raw_binary_is_not_a_bundle() {
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/usr/local/bin/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/home/me/target/release/freminal")),
+            None
+        );
+        assert_eq!(bundle_terminfo_dir(Path::new("freminal")), None);
+        assert_eq!(bundle_terminfo_dir(Path::new("/")), None);
+    }
+
+    #[test]
+    fn contents_macos_outside_an_app_directory_is_not_a_bundle() {
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/freminal/Contents/MacOS/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/Freminal.apps/Contents/MacOS/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/.app/Contents/MacOS/freminal")),
+            None
+        );
+    }
+
+    #[test]
+    fn app_directory_without_the_contents_macos_layout_is_not_a_bundle() {
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/Freminal.app/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/Freminal.app/Contents/bin/freminal")),
+            None
+        );
+        assert_eq!(
+            bundle_terminfo_dir(Path::new("/opt/Freminal.app/Other/MacOS/freminal")),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_bin_entry_resolves_through_the_canonical_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let root_path = root.path().canonicalize().expect("canonical root");
+        let macos_dir = root_path.join("Applications/Freminal.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos_dir).expect("create MacOS dir");
+        let real_exe = macos_dir.join("freminal");
+        std::fs::write(&real_exe, b"").expect("write exe");
+        let bin_dir = root_path.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let link = bin_dir.join("freminal");
+        std::os::unix::fs::symlink(&real_exe, &link).expect("symlink");
+
+        // The symlink path itself has no bundle shape ...
+        assert_eq!(bundle_terminfo_dir(&link), None);
+        // ... but its canonical path does.
+        let canonical = link.canonicalize().expect("canonicalize link");
+        assert_eq!(
+            bundle_terminfo_dir(&canonical),
+            Some(root_path.join("Applications/Freminal.app/Contents/Resources/terminfo"))
+        );
+    }
+
+    #[test]
+    fn macos_with_a_bundle_dir_uses_it_and_skips_extraction() {
+        let dir = PathBuf::from("/Applications/Freminal.app/Contents/Resources/terminfo");
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::MacOs, Some(dir.clone())),
+            TerminfoSource::Bundle(dir)
+        );
+    }
+
+    #[test]
+    fn macos_without_a_bundle_dir_extracts_per_pane() {
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::MacOs, None),
+            TerminfoSource::PerPaneExtraction
+        );
+    }
+
+    #[test]
+    fn other_platforms_ignore_a_bundle_dir_and_extract_per_pane() {
+        let dir = PathBuf::from("/Applications/Freminal.app/Contents/Resources/terminfo");
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::Other, Some(dir)),
+            TerminfoSource::PerPaneExtraction
+        );
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::Other, None),
+            TerminfoSource::PerPaneExtraction
+        );
+    }
+
+    #[test]
+    fn windows_sets_up_no_terminfo() {
+        let dir = PathBuf::from("C:/Freminal.app/Contents/Resources/terminfo");
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::Windows, Some(dir)),
+            TerminfoSource::Unused
+        );
+        assert_eq!(
+            terminfo_source(TerminfoPlatform::Windows, None),
+            TerminfoSource::Unused
+        );
+    }
+
+    const SENTINEL_DIRS: &str = "/sentinel/one:/sentinel/two";
+
+    /// A builder whose inherited terminfo variables are exactly the given ones,
+    /// independent of the process environment.
+    fn cmd_inheriting(terminfo: Option<&str>, dirs: Option<&str>) -> CommandBuilder {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env_remove("TERMINFO");
+        cmd.env_remove("TERMINFO_DIRS");
+        cmd.env_remove(FREMINAL_TERMINFO_ENV);
+        if let Some(terminfo) = terminfo {
+            cmd.env("TERMINFO", terminfo);
+        }
+        if let Some(dirs) = dirs {
+            cmd.env("TERMINFO_DIRS", dirs);
+        }
+        cmd
+    }
+
+    #[test]
+    fn terminfo_env_sets_terminfo_to_the_bundle_or_pane_dir() {
+        let bundle = Path::new("/Applications/Freminal.app/Contents/Resources/terminfo");
+        let mut cmd = cmd_inheriting(None, None);
+        apply_terminfo_env(&mut cmd, bundle);
+        assert_eq!(cmd.get_env("TERMINFO"), Some(bundle.as_os_str()));
+
+        let pane = Path::new("/run/user/1000/.tmpAbC123");
+        let mut cmd = cmd_inheriting(None, None);
+        apply_terminfo_env(&mut cmd, pane);
+        assert_eq!(cmd.get_env("TERMINFO"), Some(pane.as_os_str()));
+        assert_eq!(cmd.get_env(FREMINAL_TERMINFO_ENV), Some(pane.as_os_str()));
+    }
+
+    #[test]
+    fn pure_terminfo_env_covers_every_inherited_combination() {
+        let dir = Path::new("/pane");
+        let user = OsStr::new("/home/u/my-terminfo");
+        let dirs = OsStr::new("/opt/a:/opt/b");
+        let case = |terminfo: Option<&OsStr>, dirs: Option<&OsStr>| {
+            terminfo_env(dir, terminfo, None, dirs)
+        };
+        let expect = |terminfo_dirs: Option<&str>| TerminfoEnv {
+            terminfo: PathBuf::from("/pane"),
+            terminfo_dirs: terminfo_dirs.map(OsString::from),
+        };
+
+        // Neither inherited: TERMINFO_DIRS untouched.
+        assert_eq!(case(None, None), expect(None));
+        // Only TERMINFO_DIRS inherited: untouched.
+        assert_eq!(case(None, Some(dirs)), expect(None));
+        // Only TERMINFO: kept first, then the empty "system default" element.
+        assert_eq!(case(Some(user), None), expect(Some("/home/u/my-terminfo:")));
+        // Both: TERMINFO first, then the inherited list.
+        assert_eq!(
+            case(Some(user), Some(dirs)),
+            expect(Some("/home/u/my-terminfo:/opt/a:/opt/b"))
+        );
+        // An empty TERMINFO has nothing to keep.
+        assert_eq!(case(Some(OsStr::new("")), None), expect(None));
+        assert_eq!(case(Some(OsStr::new("")), Some(dirs)), expect(None));
+        // An empty inherited TERMINFO_DIRS reads the same as an unset one.
+        assert_eq!(
+            case(Some(user), Some(OsStr::new(""))),
+            expect(Some("/home/u/my-terminfo:"))
+        );
+    }
+
+    #[test]
+    fn pure_terminfo_env_does_not_chain_a_freminal_set_terminfo() {
+        let dir = Path::new("/pane");
+        let parent_dir = OsStr::new("/parent-pane");
+        let user = OsStr::new("/home/u/my-terminfo");
+        let dirs = OsStr::new("/opt/a:/opt/b");
+        let expect = |terminfo_dirs: Option<&str>| TerminfoEnv {
+            terminfo: PathBuf::from("/pane"),
+            terminfo_dirs: terminfo_dirs.map(OsString::from),
+        };
+
+        // Bundle (or reused) directory: the inherited TERMINFO is already this pane's.
+        assert_eq!(
+            terminfo_env(dir, Some(dir.as_os_str()), None, Some(dirs)),
+            expect(None)
+        );
+        assert_eq!(
+            terminfo_env(dir, Some(dir.as_os_str()), Some(dir.as_os_str()), None),
+            expect(None)
+        );
+        // Nested freminal: TERMINFO is the parent pane's directory, named by
+        // FREMINAL_TERMINFO, so it is not carried over.
+        assert_eq!(
+            terminfo_env(dir, Some(parent_dir), Some(parent_dir), None),
+            expect(None)
+        );
+        assert_eq!(
+            terminfo_env(dir, Some(parent_dir), Some(parent_dir), Some(dirs)),
+            expect(None)
+        );
+        // A user's TERMINFO with no FREMINAL_TERMINFO is kept.
+        assert_eq!(
+            terminfo_env(dir, Some(user), None, Some(dirs)),
+            expect(Some("/home/u/my-terminfo:/opt/a:/opt/b"))
+        );
+        // Freminal in freminal, the user exported their own TERMINFO in the parent
+        // pane: it differs from the parent's FREMINAL_TERMINFO, so it is kept.
+        assert_eq!(
+            terminfo_env(dir, Some(user), Some(parent_dir), None),
+            expect(Some("/home/u/my-terminfo:"))
+        );
+        // An empty FREMINAL_TERMINFO never matches a non-empty TERMINFO.
+        assert_eq!(
+            terminfo_env(dir, Some(user), Some(OsStr::new("")), None),
+            expect(Some("/home/u/my-terminfo:"))
+        );
+    }
+
+    #[test]
+    fn terminfo_env_names_the_pane_dir_in_freminal_terminfo() {
+        let mut cmd = cmd_inheriting(Some("/parent-pane"), None);
+        cmd.env(FREMINAL_TERMINFO_ENV, "/parent-pane");
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(cmd.get_env("TERMINFO"), Some(OsStr::new("/tmp/x")));
+        assert_eq!(
+            cmd.get_env(FREMINAL_TERMINFO_ENV),
+            Some(OsStr::new("/tmp/x"))
+        );
+        assert_eq!(cmd.get_env("TERMINFO_DIRS"), None);
+
+        let mut cmd = cmd_inheriting(Some("/home/u/my-terminfo"), None);
+        cmd.env(FREMINAL_TERMINFO_ENV, "/parent-pane");
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(
+            cmd.get_env("TERMINFO_DIRS"),
+            Some(OsStr::new("/home/u/my-terminfo:"))
+        );
+    }
+
+    #[test]
+    fn terminfo_env_leaves_an_inherited_terminfo_dirs_alone_without_a_user_terminfo() {
+        let mut cmd = cmd_inheriting(None, Some(SENTINEL_DIRS));
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(
+            cmd.get_env("TERMINFO_DIRS"),
+            Some(OsStr::new(SENTINEL_DIRS))
+        );
+
+        let mut cmd = cmd_inheriting(None, None);
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(cmd.get_env("TERMINFO_DIRS"), None);
+    }
+
+    #[test]
+    fn terminfo_env_keeps_a_user_terminfo_reachable_through_terminfo_dirs() {
+        let mut cmd = cmd_inheriting(Some("/home/u/my-terminfo"), Some(SENTINEL_DIRS));
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(cmd.get_env("TERMINFO"), Some(OsStr::new("/tmp/x")));
+        assert_eq!(
+            cmd.get_env("TERMINFO_DIRS"),
+            Some(OsStr::new(
+                "/home/u/my-terminfo:/sentinel/one:/sentinel/two"
+            ))
+        );
+
+        let mut cmd = cmd_inheriting(Some("/home/u/my-terminfo"), None);
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(cmd.get_env("TERMINFO"), Some(OsStr::new("/tmp/x")));
+        assert_eq!(
+            cmd.get_env("TERMINFO_DIRS"),
+            Some(OsStr::new("/home/u/my-terminfo:"))
+        );
+    }
+
+    #[test]
+    fn bundle_source_sets_terminfo_to_the_bundle_dir() {
+        let dir = PathBuf::from("/Applications/Freminal.app/Contents/Resources/terminfo");
+        let TerminfoSource::Bundle(chosen) =
+            terminfo_source(TerminfoPlatform::MacOs, Some(dir.clone()))
+        else {
+            panic!("expected the bundle source");
+        };
+        let mut cmd = cmd_inheriting(None, None);
+        apply_terminfo_env(&mut cmd, &chosen);
+        assert_eq!(cmd.get_env("TERMINFO"), Some(dir.as_os_str()));
     }
 }
 
@@ -1141,10 +1696,232 @@ mod reader_send_failure_tests {
 }
 
 #[cfg(test)]
-mod shell_integration_injection_tests {
-    use super::{Shell, detect_shell, inject_shell_integration_env};
+mod term_env_tests {
+    use super::{TermName, apply_extra_env, apply_term_env};
+    use freminal_common::{config::ShellConfig, term_name::TermPlatform};
     use portable_pty::CommandBuilder;
+    use std::collections::HashMap;
+    use std::ffi::OsStr;
+
+    fn child_term(shell: &ShellConfig, pane_env: Option<&HashMap<String, String>>) -> String {
+        let term = TermName::resolve(shell, TermPlatform::Other, pane_env);
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_term_env(&mut cmd, &term);
+        if let Some(env) = pane_env {
+            apply_extra_env(&mut cmd, env);
+        }
+        let Some(value) = cmd.get_env("TERM") else {
+            panic!("TERM was not set");
+        };
+        assert_eq!(value, OsStr::new(term.as_str()), "child TERM != effective");
+        term.as_str().to_owned()
+    }
+
+    #[test]
+    fn config_default_sets_xterm_freminal() {
+        assert_eq!(child_term(&ShellConfig::default(), None), "xterm-freminal");
+    }
+
+    #[test]
+    fn config_override_sets_the_configured_term() {
+        let shell = ShellConfig {
+            term: Some("xterm-256color".to_owned()),
+            ..ShellConfig::default()
+        };
+        assert_eq!(child_term(&shell, None), "xterm-256color");
+    }
+
+    #[test]
+    fn pane_env_term_wins_and_is_not_set_twice() {
+        let shell = ShellConfig {
+            term: Some("xterm-256color".to_owned()),
+            ..ShellConfig::default()
+        };
+        let env = HashMap::from([
+            ("TERM".to_owned(), "screen-256color".to_owned()),
+            ("OTHER".to_owned(), "kept".to_owned()),
+        ]);
+        assert_eq!(child_term(&shell, Some(&env)), "screen-256color");
+
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_extra_env(&mut cmd, &env);
+        assert_eq!(cmd.get_env("OTHER"), Some(OsStr::new("kept")));
+        // `get_env` falls back to the parent's environment, so look at the
+        // explicit overrides only.
+        assert!(
+            cmd.iter_extra_env_as_str().all(|(key, _)| key != "TERM"),
+            "the env loop must leave TERM to the resolved value"
+        );
+    }
+
+    #[test]
+    fn extra_env_cannot_override_a_different_resolved_term() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_term_env(&mut cmd, &TermName::platform_default(TermPlatform::Other));
+        let env = HashMap::from([("TERM".to_owned(), "dumb".to_owned())]);
+        apply_extra_env(&mut cmd, &env);
+        assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-freminal")));
+    }
+}
+
+/// A real child must see exactly the resolved `TERM`.
+#[cfg(all(test, unix))]
+mod child_term_real_pty_tests {
+    use super::{PtySpawnConfig, ReplyQueue, run_terminal};
+    use crate::io::{PtyRead, PtyWrite, SudoTerminfo, TermProgramEnv};
+    use freminal_common::{
+        config::ShellConfig,
+        pty_write::FreminalTerminalSize,
+        term_name::{TermName, TermPlatform},
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
+
+    fn term_seen_by_child(
+        shell: &ShellConfig,
+        pane_env: Option<&HashMap<String, String>>,
+    ) -> String {
+        let term = TermName::resolve(shell, TermPlatform::Other, pane_env);
+        // An explicit working directory: with none, portable-pty starts the child in
+        // `$HOME`, which does not exist in a build sandbox (Nix's `/homeless-shelter`).
+        let Ok(workdir) = tempfile::tempdir() else {
+            panic!("tempdir");
+        };
+        let (_write_tx, write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let (_reply_tx, reply_rx) = crossbeam_channel::bounded::<PtyWrite>(1);
+        let (send_tx, send_rx) = crossbeam_channel::unbounded::<PtyRead>();
+        let spawn_cfg = PtySpawnConfig {
+            command: Some((
+                String::from("/bin/sh"),
+                vec![
+                    String::from("-c"),
+                    String::from("printf 'TERM=<%s>' \"$TERM\""),
+                ],
+            )),
+            shell: None,
+            cwd: Some(workdir.path()),
+            extra_env: pane_env,
+            term: &term,
+            term_program: TermProgramEnv::Omit,
+            sudo_terminfo: SudoTerminfo::Unchanged,
+        };
+        let _result = match run_terminal(
+            write_rx,
+            ReplyQueue {
+                rx: reply_rx,
+                queued_bytes: Arc::new(AtomicUsize::new(0)),
+                pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
+            },
+            send_tx,
+            spawn_cfg,
+            None,
+            &FreminalTerminalSize {
+                width: 80,
+                height: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            0,
+        ) {
+            Ok(result) => result,
+            Err(e) => panic!("run_terminal failed: {e}"),
+        };
+
+        // The child prints and exits by itself, so nothing outlives the test.  Read
+        // until the marker shows up or the reader hangs up (child gone, output
+        // drained), with a generous overall deadline.
+        let mut collected = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let text = String::from_utf8_lossy(&collected).into_owned();
+            if let Some(start) = text.find("TERM=<")
+                && let Some(len) = text[start..].find('>')
+            {
+                return text[start + "TERM=<".len()..start + len].to_owned();
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match send_rx.recv_timeout(remaining) {
+                Ok(read) => collected.extend_from_slice(&read.buf),
+                Err(_) => break,
+            }
+        }
+        panic!(
+            "child never reported TERM; got {:?}",
+            String::from_utf8_lossy(&collected)
+        );
+    }
+
+    #[test]
+    fn child_sees_the_default_the_override_and_the_pane_env_term() {
+        assert_eq!(
+            term_seen_by_child(&ShellConfig::default(), None),
+            "xterm-freminal"
+        );
+
+        let shell = ShellConfig {
+            term: Some("xterm-256color".to_owned()),
+            ..ShellConfig::default()
+        };
+        assert_eq!(term_seen_by_child(&shell, None), "xterm-256color");
+
+        let env = HashMap::from([("TERM".to_owned(), "screen-256color".to_owned())]);
+        assert_eq!(term_seen_by_child(&shell, Some(&env)), "screen-256color");
+    }
+}
+
+#[cfg(test)]
+mod shell_integration_injection_tests {
+    use super::{
+        Shell, SudoTerminfo, apply_spawn_shell_features, detect_shell, inject_shell_integration_env,
+    };
+    use crate::io::shell_features::SHELL_FEATURES_ENV;
+    use portable_pty::CommandBuilder;
+    use std::ffi::OsStr;
     use std::path::Path;
+
+    fn features_after(
+        inherited: Option<&str>,
+        injected: Option<Shell>,
+        requested: SudoTerminfo,
+    ) -> Option<String> {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env_remove(SHELL_FEATURES_ENV);
+        if let Some(value) = inherited {
+            cmd.env(SHELL_FEATURES_ENV, value);
+        }
+        apply_spawn_shell_features(&mut cmd, injected, requested);
+        cmd.get_env(SHELL_FEATURES_ENV)
+            .map(OsStr::to_string_lossy)
+            .map(std::borrow::Cow::into_owned)
+    }
+
+    #[test]
+    fn an_injected_spawn_turns_the_feature_on_only_when_requested() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            for inherited in [None, Some("sudo")] {
+                assert_eq!(
+                    features_after(inherited, Some(shell), SudoTerminfo::Preserve).as_deref(),
+                    Some("sudo")
+                );
+                assert_eq!(
+                    features_after(inherited, Some(shell), SudoTerminfo::Unchanged),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_spawn_without_injection_drops_an_inherited_feature_list() {
+        // term_program Omit, an unknown shell and a positional command all
+        // reach here as `injected == None`, whatever the toggle says.
+        for requested in [SudoTerminfo::Preserve, SudoTerminfo::Unchanged] {
+            assert_eq!(features_after(Some("sudo"), None, requested), None);
+            assert_eq!(features_after(None, None, requested), None);
+        }
+    }
 
     #[test]
     fn detect_shell_matches_basename() {
@@ -1248,8 +2025,8 @@ mod shell_integration_injection_tests {
 #[cfg(all(test, unix))]
 mod echo_off_event_driven_tests {
     use super::{PtySpawnConfig, PtyWrite, ReplyQueue, run_terminal};
-    use crate::io::PtyRead;
-    use freminal_common::pty_write::FreminalTerminalSize;
+    use crate::io::{PtyRead, SudoTerminfo, TermProgramEnv};
+    use freminal_common::{pty_write::FreminalTerminalSize, term_name::TermName};
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -1309,7 +2086,9 @@ mod echo_off_event_driven_tests {
             shell: None,
             cwd: None,
             extra_env: None,
-            set_term_program: false,
+            term: &TermName::default(),
+            term_program: TermProgramEnv::Omit,
+            sudo_terminfo: SudoTerminfo::Unchanged,
         };
 
         let result = run_terminal(
@@ -1355,7 +2134,9 @@ mod echo_off_event_driven_tests {
             shell: None,
             cwd: None,
             extra_env: None,
-            set_term_program: false,
+            term: &TermName::default(),
+            term_program: TermProgramEnv::Omit,
+            sudo_terminfo: SudoTerminfo::Unchanged,
         };
 
         let result = run_terminal(
@@ -1402,7 +2183,9 @@ mod echo_off_event_driven_tests {
             shell: None,
             cwd: None,
             extra_env: None,
-            set_term_program: false,
+            term: &TermName::default(),
+            term_program: TermProgramEnv::Omit,
+            sudo_terminfo: SudoTerminfo::Unchanged,
         };
 
         // Keep the result bound (`_result`) so its channels/handles live for

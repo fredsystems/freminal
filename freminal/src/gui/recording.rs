@@ -27,10 +27,23 @@
 
 use std::sync::Arc;
 
+use freminal_common::config::ShellConfig;
+use freminal_common::term_name::{TermName, TermPlatform};
+
 use freminal_terminal_emulator::recording::{
     PaneNodeSnapshot, RecordingMetadata, TabSnapshot, TopologySnapshot, WindowSnapshot,
     start_recording,
 };
+
+/// The `term` a recording's header records: the `TERM` panes get from `[shell] term`.
+///
+/// A recording has one header for every pane, so a `TERM` set in an individual
+/// pane's (or layout's) `env` map cannot be represented here; such a pane still gets
+/// that value for its child and for XTGETTCAP `TN`.
+#[must_use]
+pub fn recording_term(shell: &ShellConfig) -> TermName {
+    TermName::resolve(shell, TermPlatform::current(), None)
+}
 
 impl super::FreminalGui {
     /// Build a full [`TopologySnapshot`] describing every open window,
@@ -174,7 +187,7 @@ impl super::FreminalGui {
         let metadata = RecordingMetadata {
             freminal_version: env!("CARGO_PKG_VERSION").to_string(),
             created_at: now,
-            term: "xterm-256color".to_string(),
+            term: recording_term(&self.config.shell).to_string(),
             initial_topology: self.build_topology_snapshot(),
             scrollback_limit: self.config.scrollback.limit.try_into().unwrap_or(u32::MAX),
         };
@@ -236,5 +249,48 @@ impl super::FreminalGui {
                 crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recording_term;
+    use freminal_common::config::ShellConfig;
+    use freminal_common::term_name::TermPlatform;
+    use freminal_terminal_emulator::recording::{
+        RecordingMetadata, TopologySnapshot, parse_recording, start_recording,
+    };
+
+    fn recorded_term(shell: &ShellConfig) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("term.frec");
+        let metadata = RecordingMetadata {
+            freminal_version: "test".to_string(),
+            created_at: 0,
+            term: recording_term(shell).to_string(),
+            initial_topology: TopologySnapshot { windows: vec![] },
+            scrollback_limit: 10_000,
+        };
+        let (handle, mut join) = start_recording(&path, metadata, 64).unwrap();
+        drop(handle);
+        join.join();
+        parse_recording(&path).unwrap().metadata.term
+    }
+
+    #[test]
+    fn header_records_the_default_term() {
+        assert_eq!(
+            recorded_term(&ShellConfig::default()),
+            TermPlatform::current().default_term()
+        );
+    }
+
+    #[test]
+    fn header_records_the_configured_term() {
+        let shell = ShellConfig {
+            term: Some("xterm-256color".to_owned()),
+            ..ShellConfig::default()
+        };
+        assert_eq!(recorded_term(&shell), "xterm-256color");
     }
 }

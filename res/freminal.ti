@@ -1,4 +1,36 @@
-#       Reconstructed via infocmp from file: /Applications/Freminal.app/Contents/Resources/terminfo/78/freminal
+#       Source of truth for freminal's terminfo entry.  `cargo xtask terminfo`
+#       compiles this file with `tic -x` into res/terminfo/ (letter and hex
+#       layouts) and packs that tree into res/terminfo.tar.  Run it after every
+#       edit to this file; building does not regenerate them.  Capabilities are
+#       declared only where freminal implements them, with two standard key
+#       capabilities as the exception: `kcbt` and `kent` are declared but not
+#       sent by the input encoder (see DECLARED_NOT_SENT in
+#       terminal_handler/dcs/terminfo_truth_tests.rs, which records why).  Every
+#       value that the XTGETTCAP handler (`lookup_termcap` in
+#       terminal_handler/dcs.rs) also answers must be identical to the one below;
+#       a test enforces it.
+#
+#       This path is public.  The README links the file's raw URL on `main`,
+#       https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti,
+#       for `curl ... | tic -x -`, so it must not move or be renamed.  The file is
+#       also attached to every release and nightly as `freminal.ti`.
+#
+#       Deliberately absent because freminal does not implement them: `invis` and
+#       the SGR 8 part of `sgr` (conceal is parsed but ignored, see
+#       ESCAPE_SEQUENCE_GAPS.md) and `km` (Alt sends no 8th bit and there is no
+#       ?1034).  `acsc` is the xterm-256color value (freminal prints `+ , - . 0 h`
+#       as ASCII or U+2424, not as board glyphs).  Deliberately not declared
+#       because their values are unverified: `RGB`, `xm`, `RV`, `is2`/`rs2` and
+#       `smglp`/`smglr`/`smgrp`.
+#
+#       Extended (user-defined) capabilities are read from the xterm-256color,
+#       xterm-kitty and foot entries, after checking the behaviour in freminal:
+#       Tc/setrgbf/setrgbb (SGR 38/48;2), Ss/Se (DECSCUSR, 0 restores the
+#       configured style), Ms (OSC 52), Cs/Cr (OSC 12/112), BD/BE/PS/PE (?2004),
+#       fd/fe/kxIN/kxOUT/XF (?1004, CSI I / CSI O), E3 (CSI 3 J), XR (CSI > 0 q),
+#       XM (?1000/?1006), Sync (?2026), smxx/rmxx (SGR 9/29), AX (SGR 39/49).
+#       The modified-key families match the encoder in input.rs
+#       (1 + shift + 2*alt + 4*ctrl, so 3..7 are Alt .. Ctrl+Alt).
 #
 #       Notification support (Task 76): Freminal handles OSC 9 (iTerm2/WezTerm)
 #       and OSC 777 (urxvt "notify;TITLE;BODY") desktop notifications.  These
@@ -6,10 +38,10 @@
 #       handshake, and terminfo defines no capability code for them, so there
 #       is nothing to advertise here.  Programs detect Freminal at runtime via
 #       TERM_PROGRAM=freminal (set in the PTY environment) rather than terminfo.
-xterm-freminal|freminal|Freminal,
-        am, bce, ccc, hs, km, mc5i, mir, msgr, npc, xenl,
+xterm-freminal|freminal|Freminal terminal emulator,
+        am, bce, ccc, hs, mc5i, mir, msgr, npc, xenl, AX, Su, Tc, XF,
         colors#256, cols#80, it#8, lines#24, pairs#32767,
-        acsc=++\,\,--..00``aaffgghhiijjkkllmmnnooppqqrrssttuuvvwwxxyyzz{{||}}~~,
+        acsc=``aaffggiijjkkllmmnnooppqqrrssttuuvvwwxxyyzz{{||}}~~,
         bel=^G, blink=\E[5m, bold=\E[1m, cbt=\E[Z, civis=\E[?25l,
         clear=\E[H\E[2J, cnorm=\E[?12l\E[?25h, cr=^M,
         csr=\E[%i%p1%d;%p2%dr, cub=\E[%p1%dD, cub1=^H,
@@ -19,12 +51,12 @@ xterm-freminal|freminal|Freminal,
         dl=\E[%p1%dM, dl1=\E[M, dsl=\E]2;\007, ech=\E[%p1%dX,
         ed=\E[J, el=\E[K, el1=\E[1K, flash=\E[?5h$<100/>\E[?5l,
         fsl=^G, home=\E[H, hpa=\E[%i%p1%dG, ht=^I, hts=\EH,
-        ich=\E[%p1%d@, ich1=\E[@, il=\E[%p1%dL, il1=\E[L, ind=^J,
+        ich=\E[%p1%d@, il=\E[%p1%dL, il1=\E[L, ind=^J,
         indn=\E[%p1%dS,
         initc=\E]4;%p1%d;rgb\:%p2%{255}%*%{1000}%/%2.2X/%p3%{255}%*%{1000}%/%2.2X/%p4%{255}%*%{1000}%/%2.2X\E\\,
-        invis=\E[8m, kDC=\E[3;2~, kEND=\E[1;2F, kHOM=\E[1;2H,
+        kDC=\E[3;2~, kDN=\E[1;2B, kEND=\E[1;2F, kHOM=\E[1;2H,
         kIC=\E[2;2~, kLFT=\E[1;2D, kNXT=\E[6;2~, kPRV=\E[5;2~,
-        kRIT=\E[1;2C, kbs=\177, kcbt=\E[Z, kcub1=\EOD, kcud1=\EOB,
+        kRIT=\E[1;2C, kUP=\E[1;2A, kbs=\177, kcbt=\E[Z, kcub1=\EOD, kcud1=\EOB,
         kcuf1=\EOC, kcuu1=\EOA, kdch1=\E[3~, kend=\EOF, kent=\EOM,
         kf1=\EOP, kf10=\E[21~, kf11=\E[23~, kf12=\E[24~,
         kf13=\E[1;2P, kf14=\E[1;2Q, kf15=\E[1;2R, kf16=\E[1;2S,
@@ -45,16 +77,33 @@ xterm-freminal|freminal|Freminal,
         kf61=\E[1;4P, kf62=\E[1;4Q, kf63=\E[1;4R, kf7=\E[18~,
         kf8=\E[19~, kf9=\E[20~, khome=\EOH, kich1=\E[2~,
         kind=\E[1;2B, kmous=\E[<, knp=\E[6~, kpp=\E[5~,
-        kri=\E[1;2A, oc=\E]104\007, op=\E[39;49m, rc=\E8,
+        kri=\E[1;2A, nel=\EE, oc=\E]104\007, op=\E[39;49m, rc=\E8,
         rep=%p1%c\E[%p2%{1}%-%db, rev=\E[7m, ri=\EM,
         rin=\E[%p1%dT, ritm=\E[23m, rmacs=\E(B, rmam=\E[?7l,
         rmcup=\E[?1049l\E[23;0;0t, rmir=\E[4l, rmkx=\E[?1l\E>, rmso=\E[27m,
         rmul=\E[24m, rs1=\Ec\E]104\007, sc=\E7,
         setab=\E[%?%p1%{8}%<%t4%p1%d%e%p1%{16}%<%t10%p1%{8}%-%d%e48;5;%p1%d%;m,
         setaf=\E[%?%p1%{8}%<%t3%p1%d%e%p1%{16}%<%t9%p1%{8}%-%d%e38;5;%p1%d%;m,
-        sgr=%?%p9%t\E(0%e\E(B%;\E[0%?%p6%t;1%;%?%p5%t;2%;%?%p2%t;4%;%?%p1%p3%|%t;7%;%?%p4%t;5%;%?%p7%t;8%;m,
+        sgr=%?%p9%t\E(0%e\E(B%;\E[0%?%p6%t;1%;%?%p5%t;2%;%?%p2%t;4%;%?%p1%p3%|%t;7%;%?%p4%t;5%;m,
         sgr0=\E(B\E[m, sitm=\E[3m, smacs=\E(0, smam=\E[?7h,
         smcup=\E[?1049h\E[22;0;0t, smir=\E[4h, smkx=\E[?1h\E=, smso=\E[7m,
         smul=\E[4m, tbc=\E[3g, tsl=\E]2;, u6=\E[%i%d;%dR, u7=\E[6n,
         u8=\E[?%[;0123456789]c, u9=\E[c, vpa=\E[%i%p1%dd,
-        Su, Smulx=\E[4\:%p1%dm, Setulc=\E[58\:2\:\:%p1%{65536}%/%d\:%p1%{256}%/%{255}%&%d\:%p1%{255}%&%d%;m,
+        BD=\E[?2004l, BE=\E[?2004h, Cr=\E]112\007, Cs=\E]12;%p1%s\007,
+        E3=\E[3J, Ms=\E]52;%p1%s;%p2%s\E\\, PE=\E[201~, PS=\E[200~,
+        Se=\E[0 q, Ss=\E[%p1%d q,
+        Smulx=\E[4\:%p1%dm, Setulc=\E[58\:2\:\:%p1%{65536}%/%d\:%p1%{256}%/%{255}%&%d\:%p1%{255}%&%d%;m,
+        Sync=\E[?2026%?%p1%{1}%-%tl%eh%;, XM=\E[?1006;1000%?%p1%{1}%=%th%el%;,
+        XR=\E[>0q, fd=\E[?1004l, fe=\E[?1004h, kxIN=\E[I, kxOUT=\E[O,
+        rmxx=\E[29m, setrgbb=\E[48;2;%p1%d;%p2%d;%p3%dm,
+        setrgbf=\E[38;2;%p1%d;%p2%d;%p3%dm, smxx=\E[9m,
+        kDC3=\E[3;3~, kDC4=\E[3;4~, kDC5=\E[3;5~, kDC6=\E[3;6~, kDC7=\E[3;7~,
+        kDN3=\E[1;3B, kDN4=\E[1;4B, kDN5=\E[1;5B, kDN6=\E[1;6B, kDN7=\E[1;7B,
+        kEND3=\E[1;3F, kEND4=\E[1;4F, kEND5=\E[1;5F, kEND6=\E[1;6F, kEND7=\E[1;7F,
+        kHOM3=\E[1;3H, kHOM4=\E[1;4H, kHOM5=\E[1;5H, kHOM6=\E[1;6H, kHOM7=\E[1;7H,
+        kIC3=\E[2;3~, kIC4=\E[2;4~, kIC5=\E[2;5~, kIC6=\E[2;6~, kIC7=\E[2;7~,
+        kLFT3=\E[1;3D, kLFT4=\E[1;4D, kLFT5=\E[1;5D, kLFT6=\E[1;6D, kLFT7=\E[1;7D,
+        kNXT3=\E[6;3~, kNXT4=\E[6;4~, kNXT5=\E[6;5~, kNXT6=\E[6;6~, kNXT7=\E[6;7~,
+        kPRV3=\E[5;3~, kPRV4=\E[5;4~, kPRV5=\E[5;5~, kPRV6=\E[5;6~, kPRV7=\E[5;7~,
+        kRIT3=\E[1;3C, kRIT4=\E[1;4C, kRIT5=\E[1;5C, kRIT6=\E[1;6C, kRIT7=\E[1;7C,
+        kUP3=\E[1;3A, kUP4=\E[1;4A, kUP5=\E[1;5A, kUP6=\E[1;6A, kUP7=\E[1;7A,

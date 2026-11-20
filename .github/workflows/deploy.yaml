@@ -191,11 +191,17 @@ jobs:
     # Only create a release when triggered by a version tag
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - name: Download all build artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Attach the terminfo source
+        run: cp res/freminal.ti artifacts/freminal.ti
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
@@ -233,6 +239,11 @@ jobs:
       - name: Stage .app for signing
         run: |
           cp -R target/release/bundle/osx/Freminal.app ./Freminal.app
+          # cargo-bundle cannot place a resource directory at an arbitrary
+          # path, so the committed terminfo tree is copied in here, before
+          # signing, so that `codesign --deep` seals it.
+          mkdir -p Freminal.app/Contents/Resources
+          cp -R res/terminfo Freminal.app/Contents/Resources/terminfo
           echo "::group::Staged .app structure"
           find Freminal.app -type f | head -50
           echo "::endgroup::"

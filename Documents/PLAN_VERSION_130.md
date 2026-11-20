@@ -54,12 +54,12 @@ enriched stubs again and get re-decomposed at activation.
 | 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
 | 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
 | 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Complete      | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Pending merge | None                               |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Complete      | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
 | 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
 | 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete      | 149                                |
-| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | Planned       | 140                                |
+| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | Pending merge | 140                                |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
@@ -7457,7 +7457,7 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
     report.
 - **Depends on:** 147.1 (the ANSI DECRQM form; same file).
 
-#### 147.22 — XTGETTCAP answers `indn`, `rin` and `query-os-name` <!-- codespell:ignore rin -->
+#### 147.22 — XTGETTCAP answers `indn`, `rin` and `query-os-name` (moved to Task 151 as 151.2) <!-- codespell:ignore rin -->
 
 - **Source:** GAPS "XTGETTCAP capability expansion" (pre-v0.13.0; added to 147 by maintainer
   decision 2026-10-11). The GAPS row calls `indn` "indent N"; it is "scroll forward N lines".
@@ -11177,7 +11177,8 @@ combination, in legacy mode as well.
   Super on text keys, Alt+Backspace (B3) and the kitty-protocol encoding remain here.
 - **B2 (high), modified Enter is dropped entirely** (`gui/terminal/input.rs:1894-1899`).
 - **B3 (high), Enter/Tab/Backspace/Escape carry no modifiers.** Shift+Tab sends HT instead of
-  `CSI Z`.
+  `CSI Z`. The terminfo entry declares `kcbt=\E[Z` (Task 151), so fixing B3 makes it
+  true; the Task 151 table-of-truth test then moves `kcbt` out of `DECLARED_NOT_SENT`.
 - **B4 (high), key identity comes from typed text.**
   - Non-ASCII text is emitted as one `CSI u` per UTF-8 byte.
   - Shifted symbols lose Shift and use the wrong code.
@@ -11246,7 +11247,7 @@ under "Task 140 — Underline & SGR Parity" above.
 
 ---
 
-### Task 151 — Own TERM & Terminfo Distribution (stub, v0.13.0)
+### Task 151 — Own TERM & Terminfo Distribution (activated, v0.13.0)
 
 **Goal.** Programs running in freminal know they are in freminal, and get freminal's real
 capabilities from terminfo, not only from XTGETTCAP. Children get `TERM=xterm-freminal` by
@@ -11334,6 +11335,683 @@ was dropped under.
 - Windows (ConPTY): whether `TERM` is set at all today, and whether anything changes.
 - What freminal does if `[shell] term` names an entry it does not ship (pass through, with a
   warning).
+
+  All three are resolved below (151 decisions and 151.9).
+
+#### 151 Activation (2026-11-19)
+
+Activated and decomposed on 2026-11-19 on branch `task-151/own-term`, from `main` at
+`13f73832` (after PR #587), in the worktree `../freminal-151`. It runs alongside Task 147
+(`task-147/correctness-cleanup`) and has its own PR.
+
+**Packaging recon (2026-11-19).**
+
+- The entry is compiled by `freminal-terminal-emulator/build.rs` (`tic -x`) into
+  `res/terminfo.tar`. The tar holds two legacy-format (magic 0432) files in Linux letter
+  directories, `x/xterm-freminal` and `f/freminal`, with no hex (`78/`, `66/`) copies. The tar
+  is embedded in the binary (`freminal-common/src/terminfo.rs`).
+- Each PTY extracts it into a temp dir held by the PTY I/O object (deleted when the pane
+  closes). Children get `TERMINFO_DIRS=<tempdir>:` and `TERMINFO` is removed. On Windows
+  nothing is extracted, but `TERM` is still set. The Windows comment about symlinks in the
+  tar is stale.
+- No package installs the entry: not the cargo-bundle `.app`, `.deb` or AppImage
+  (`[package.metadata.bundle]` has no `resources`), not the rpm (`generate-rpm` `assets`),
+  and not the flake (`postInstall`). The flake has no NixOS module.
+- freminal has no notion of its own resource directory beyond `shell_integration_dir()`
+  (`FREMINAL_RESOURCES_DIR`, `XDG_DATA_DIRS`, per-user dir). `current_exe()` and `APPDIR`
+  are not used anywhere.
+- Release packaging is in `.github/workflows/deploy.yaml` and `nightly.yml`. The deb and
+  AppImage are repacked after `cargo bundle` by `assets/ci/fix-linux-icon-metadata.sh`.
+
+**Decisions (maintainer, 2026-11-19).**
+
+1. **147.22 moves to Task 151** (as 151.2), so Task 151 owns `lookup_termcap` and
+   `res/freminal.ti` outright and the table-of-truth check covers `indn` and `rin`. <!-- codespell:ignore rin -->
+2. **macOS `.app`: bundle copy plus fallback** (the kitty and Ghostty model). The entry ships
+   in `Contents/Resources/terminfo/` in both letter and hex layouts, signed with the app.
+   freminal finds it from `current_exe()` and puts it first on `TERMINFO_DIRS` (superseded by
+   151.C1: it is named by `TERMINFO`). The raw
+   binary (no bundle) keeps the per-pane extraction. `sudo` (drops `TERMINFO_DIRS`) is a
+   known limit, as in kitty and Ghostty.
+3. **AppImage: per-pane extraction only.** Nothing extra ships in the AppImage. Users who
+   want the entry system-wide (sudo, detached tmux servers) install the deb, the rpm, the
+   flake `terminfo` package or the NixOS module option. The detached-process limit is
+   documented.
+4. **A fallback that always works (2026-11-19, added after activation).** In addition to the
+   planned distribution, the README documents installing the entry on any host, with or
+   without freminal present, as Ghostty's terminfo help page does:
+   - from inside a freminal pane (every build, the AppImage included, because each pane has
+     the entry on `TERMINFO_DIRS`): `infocmp -x xterm-freminal | ssh HOST -- tic -x -`;
+   - from anywhere, without freminal: the source file on GitHub,
+     `curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -`
+     (or piped through `ssh HOST -- tic -x -`). `res/freminal.ti` therefore becomes a public
+     URL and must not be moved or renamed;
+   - a version-pinned copy: every release and nightly carries `freminal.ti` as an asset.
+     `releases/latest/download/…` is not used, because every release today is a prerelease
+     and GitHub's `latest` skips prereleases.
+   - `tic -x` run without root installs to `~/.terminfo`, which needs no privileges.
+5. **`sudo` keeps `TERMINFO` through the shell integration (2026-11-19, added after
+   activation), exactly as Ghostty does.** `sudo`'s default `env_reset` drops `TERMINFO`, so
+   programs run under `sudo` lose the pane's entry. freminal's bash, zsh and fish integrations
+   wrap `sudo` to pass `--preserve-env=TERMINFO`, except for `sudo -e` / `--edit`
+   (sudoedit), which is called unchanged. It is **on by default** whenever the shell
+   integration is active, with a config toggle to opt out (maintainer decision; unlike
+   Ghostty, whose `sudo` feature defaults off). A sudoers policy that forbids preserving the
+   environment makes `sudo` refuse the command; those users turn the toggle off.
+
+**Decisions (orchestrator, recorded so they are not re-litigated).**
+
+- **Both directory layouts everywhere.** The embedded tar and the bundle copy carry letter
+  (`x/`, `f/`) and hex (`78/`, `66/`) directories. Apple's ncurses uses hex directories; the
+  extra copies cost about 5 KB and remove the need to know which one a given ncurses reads.
+- **The compiled tree is committed.** `build.rs` keeps a committed `res/terminfo/` tree (both
+  layouts, deterministic) in step with `res/freminal.ti`, as it already does for the tar, and
+  the tar is packed from that tree. cargo-bundle's `resources` and the rpm `assets` point at
+  the committed files, so packaging needs no `tic` at bundle time.
+- **`TERMINFO_DIRS` order** (superseded by 151.C1, which names the pane's directory with
+  `TERMINFO` and leaves `TERMINFO_DIRS` alone) is: the `.app` bundle directory (macOS, when it exists), then the
+  per-pane temp dir (only when there is no bundle directory), then the system default (the
+  trailing empty entry). An installed system copy is found through the default.
+- **Windows keeps `xterm-256color` as its default.** There is no terminfo distribution path on
+  Windows, and MSYS2/Cygwin programs run under ConPTY read their own terminfo databases, which
+  do not have `xterm-freminal`. The `[shell] term` option is honoured on every platform.
+- **The configured `TERM` is passed through unchecked**, apart from validation that it is a
+  non-empty name with no control characters, `/` or whitespace. An invalid value falls back
+  to the platform default with a config warning. freminal does not check that the named entry
+  exists (it cannot see the remote side of an ssh session anyway).
+- **Precedence.** A layout or pane `env` `TERM` wins over `[shell] term`. The effective value
+  is computed once at spawn and is the single value used for the child's environment,
+  XTGETTCAP `TN` and the FREC `term` metadata.
+- **No new install command.** Task 92 stays dropped; remote copying stays with Task 86.
+
+#### 151 Audit (151.1, 2026-11-19)
+
+A read-only audit compared every capability in `res/freminal.ti` with the parser, handler and
+input encoder, and every `lookup_termcap` name with the entry (system ncurses 6.6 `infocmp -x`
+for `xterm-256color`, `xterm-kitty`, `xterm-ghostty`, `foot`, `wezterm`; `tic -x -c -v2`).
+The entry is standalone (no `use=`); `tic` accepts it with four warnings. Every capability not
+listed below is implemented and value-correct.
+
+| Item                                     | Finding                                                                                                                                                                   | Decision (151.3)                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `invis`, `sgr` p7                        | SGR 8 parses to `Conceal`, which `apply_sgr` ignores                                                                                                                      | Remove both; record SGR 8 as a GAPS row                             |
+| `km`                                     | Alt sends no 8th bit and there is no `smm`/`rmm` (`?1034` not implemented)                                                                                                | Remove (foot omits it)                                              |
+| `acsc` `hh`, `++,,--..00`                | `h` maps to U+2424, not a board glyph; `+ , - . 0` print as ASCII                                                                                                         | Remove; match `xterm-256color`                                      |
+| `ich1`                                   | Works, but no reference entry has it and `tic` warns                                                                                                                      | Remove                                                              |
+| `kcbt`, `kent`                           | Standard values, never sent (Shift+Tab sends HT; keypad Enter sends CR)                                                                                                   | Keep (as `xterm-256color`); the encoder is Task 137 B3/B11          |
+| `kHOM` `kEND` `kNXT` `kPRV` `kind` `kri` | Correct, but default keybindings consume the keys first                                                                                                                   | Keep; documented                                                    |
+| Header                                   | Description is one word; line 1 cites a stale macOS path                                                                                                                  | Fix                                                                 |
+| XTGETTCAP `Se`                           | `\E[2 q` (steady block); freminal's DECSCUSR 0 restores the configured style                                                                                              | `\E[0 q` (kitty, Ghostty, Alacritty)                                |
+| XTGETTCAP `TN`                           | `xterm-256color`                                                                                                                                                          | The effective `TERM` (151.6)                                        |
+| Undeclared, implemented                  | `Tc` `setrgbf` `setrgbb` `Ss` `Se` `Ms` `Cs` `Cr` `BD` `BE` `PS` `PE` `fd` `fe` `kxIN` `kxOUT` `E3` `XR` `XM` `Sync` `smxx` `rmxx` `AX` `XF` `nel`, modified-key families | Add, each value checked against freminal and cited from a reference |
+| Undeclared, not added                    | `RGB` (string form unverified), `xm`, `RV`, `is2`/`rs2`, `smglp`/`smglr`/`smgrp` (DECSLRM argument handling unverified)                                                   | Not added; listed in the table-of-truth test with the reason        |
+
+Where both sides answer a capability, the entry and `lookup_termcap` use identical strings
+(OSC 52 `Ms` keeps ST, as kitty and foot do; `setrgbf`/`setrgbb` keep the semicolon form
+freminal already answers). `Sync` is the `?2026` form, not kitty's DCS form.
+
+#### 151 Subtasks
+
+Every subtask leaves `cargo xtask test` and
+`cargo clippy --all-targets --all-features -- -D warnings` green, and runs
+`cargo xtask check-windows` where it touches platform code. Standing prohibitions: no files
+outside scope, no commits, no plan-document edits, no next subtask; no `unwrap`/`expect`
+outside tests, no raw numeric `as` casts, no new `bool` fields or parameters, no
+`#[allow(dead_code)]`; no deleted or weakened assertion unless the subtask names the
+behaviour change. A `flake.nix` change that alters a dev shell stops for `nix develop`
+(`flake-dev-shell-discipline`).
+
+##### 151.1 — Terminfo entry audit (READ-ONLY) (done; see "151 Audit")
+
+Every capability in `res/freminal.ti` is checked against what the parser and handler actually
+do (with the code location that implements it, or "missing"), and every name
+`lookup_termcap` answers is checked for presence and an identical value in the entry. The
+`xterm-256color` capabilities freminal does not implement, and the ones freminal implements
+that neither entry declares, are listed. Deliverable: the table, folded into this section as
+"151 Audit". No edits.
+
+##### 151.2 — XTGETTCAP answers `indn`, `rin` and `query-os-name` (moved from 147.22) <!-- codespell:ignore rin -->
+
+The 147.22 text applies unchanged (scope `terminal_handler/dcs.rs` `lookup_termcap` and its
+tests), plus: `indn` and `rin` are added to `res/freminal.ti` with the same strings, so the <!-- codespell:ignore rin -->
+two cannot disagree. `query-os-name` is XTGETTCAP-only (it is not a terminfo capability).
+
+##### 151.3 — Entry corrections and one table of truth
+
+Scope: `res/freminal.ti`, `lookup_termcap`, their tests, and the SGR 8 row in
+`ESCAPE_SEQUENCE_GAPS.md`. Apply every decision in "151 Audit" (each change cites its row). Replace the three-capability
+test from 140.4 with one that parses `res/freminal.ti` (`include_str!`) and checks, for every
+name `lookup_termcap` answers that is a terminfo capability, that the entry has the same
+value, and the reverse for every string capability in the entry that XTGETTCAP should answer.
+Names deliberately answered by only one side are listed in the test with a reason.
+
+##### 151.4 — Both layouts, and a committed compiled tree
+
+Scope: `freminal-terminal-emulator/build.rs`, `res/terminfo/` (new, generated),
+`res/terminfo.tar`, `freminal-common/src/terminfo.rs` (docs), the stale Windows comment in
+`io/pty.rs`, `.coderabbit.yaml` (exclude the new binary tree). `build.rs` writes the compiled
+entries into `res/terminfo/{x,f,78,66}/` deterministically (only when the bytes change) and
+packs the tar from that tree. A test checks that the tar holds all four paths with identical
+bytes, and that the tar's members equal the committed tree.
+
+##### 151.5 — `[shell] term`
+
+The full `freminal-config-options` checklist: `ShellConfig::term`, `ConfigPartial` /
+`apply_partial`, validation (as decided), the Settings modal, `config_example.toml`, the
+home-manager module. The default is resolved per platform (`xterm-freminal`; Windows
+`xterm-256color`). Tests: round trip, partial apply, defaults per platform (pure function
+over a platform enum), invalid values.
+
+##### 151.6 — The effective `TERM` reaches the child, XTGETTCAP and FREC
+
+Scope: `freminal-terminal-emulator/src/io/pty.rs` (`run_terminal`, the TERM comment),
+`interface.rs` and the handler (a typed effective-`TERM` value given at construction),
+`terminal_handler/dcs.rs` (`TN` reports it; the Task 76.6 regression test now checks that `TN`
+equals the child's `TERM`), `freminal/src/gui/pty.rs`, `tab_spawning.rs` and `layout_ops.rs`
+(computing the effective value with layout/pane `env` precedence), `freminal/src/main.rs`,
+`freminal/src/gui/recording.rs` and `freminal-terminal-emulator/src/recording.rs` (FREC
+`term`). Tests: config default, config override, pane `env` override, `TN` and FREC agree with
+the child's value in each case.
+
+##### 151.7 — macOS bundle terminfo
+
+Scope (amended at execution, see the 151.7 status note): the release workflows' macOS
+staging step instead of cargo-bundle `resources`, `io/pty.rs` (a pure function from the
+executable path to an optional bundle terminfo directory, and the `TERMINFO_DIRS` order as
+decided), `flake.nix` (the Darwin `postInstall` copies the tree into
+`Freminal.app/Contents/Resources/terminfo`). Tests: the pure resolver on every platform
+(inside a `.app`, a raw binary, a symlinked `$out/bin/freminal`); the `TERMINFO_DIRS` builder
+for each case. The release workflow is checked by reading only; the macOS CI job compiles it.
+
+##### 151.8 — Linux and Nix packaging
+
+Scope: `freminal/Cargo.toml` (rpm `assets`: `/usr/share/terminfo/{x,f}/…`),
+`assets/ci/fix-linux-icon-metadata.sh` (add `usr/share/terminfo` to the repacked `.deb` only;
+the AppImage is unchanged, per decision 3), `flake.nix` (`packages.<system>.terminfo`, only
+`$out/share/terminfo`, no GUI dependencies; the main package installs the tree too;
+`nixosModules.default`), a new `nix/nixos-module.nix` (`programs.freminal.terminfo.enable`
+adds the terminfo package to `environment.systemPackages`). Verification adds `nixfmt`,
+`statix`, `deadnix`, `nix flake check` and `nix build .#terminfo`.
+
+##### 151.11 — `freminal.ti` as a release asset and a stable URL
+
+Scope: `.github/workflows/deploy.yaml` and `nightly.yml` (attach `res/freminal.ti` to the
+release, named `freminal.ti`, through the existing release-upload step), the `res/freminal.ti`
+header comment (the file is linked from the README by its raw `main` URL, so its path is
+public), and a test that the path exists and compiles from stdin (`tic -x -o <tmp> -` with the
+file on stdin, skipped with a visible message when `tic` is absent). Runs after 151.8, before
+151.9. The README text is 151.10.
+
+##### 151.12 — `sudo` preserves `TERMINFO` (on by default; Ghostty's wrapper logic)
+
+Scope: `freminal-common/src/config.rs` (`ShellIntegrationConfig`: a new TOML toggle, default
+on, full `freminal-config-options` checklist including Settings, `config_example.toml` and
+the home-manager module), the spawn-time shell-integration environment in
+`freminal-terminal-emulator/src/io/pty.rs` (tell the scripts the feature is on, as Ghostty
+does with `GHOSTTY_SHELL_FEATURES`), the bundled bash, zsh and fish integration scripts, and
+their tests. The wrapper follows Ghostty's `ghostty.bash`, `ghostty-integration` (zsh) and
+`ghostty-shell-integration.fish` logic exactly (read their source; cite it): it is defined
+only when the feature is on and `TERMINFO` is set, scans the arguments for `-e` / `--edit`
+before the first non-option argument and then calls `sudo` unchanged, and otherwise calls
+`command sudo --preserve-env=TERMINFO "$@"`. Docs: the README Terminfo section and the
+`DESIGN_DECISIONS.md` sudo limit. Runs after 151.C1 (same spawn code).
+
+##### 151.9 — A real child resolves the entry
+
+Scope: a new integration test in `freminal-terminal-emulator/tests/`. It spawns a real PTY
+child through the production spawn path, with the production environment, and runs
+`infocmp -x xterm-freminal` (and `tput Smulx 3`) in it, asserting that the entry resolves
+with the expected values. It runs on the Linux and macOS CI jobs, which settles the macOS
+open question; it is skipped with a visible message only when `infocmp` is not installed.
+Not on Windows.
+
+##### 151.10 — Documentation
+
+Scope: a new "TERM strategy" section in `DESIGN_DECISIONS.md` (the reversed decision and its
+reasons, the `TERMINFO_DIRS` order, the sudo and detached-process limits, and how to fix ssh:
+install the terminfo package, `infocmp -x xterm-freminal | ssh host tic -x -`, or set
+`[shell] term`), a README "Terminfo" section with decision 4's three commands (in-pane
+`infocmp`, the raw GitHub URL, the release asset), the `~/.terminfo` note and the
+`[shell] term = "xterm-256color"` escape hatch, every sentence in the list above, COVERAGE/GAPS (XTGETTCAP rows from 151.2,
+`TN`), README, `FREC_FORMAT.md`.
+
+#### 151 Execution model
+
+Serial inside the worktree: 151.1, 151.2, 151.3, 151.4, 151.5, 151.6, 151.7, 151.8, 151.11,
+151.9, 151.10, 151.C1, 151.12. Each subtask is implemented by a sub-agent and reviewed in full by the orchestrator
+(whole diff, every new file read, compared with this section) before the orchestrator commits
+it. Then an adversarial review of `main...HEAD`; every finding, nit and above, becomes a
+`151.Cn` entry and is fixed before the PR, followed by a confirmation review. Files shared
+with Task 147 (`config.rs`, `settings.rs`, `config_example.toml`, the home-manager module,
+COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
+
+#### 151 Cleanup entries
+
+##### 151.C1 — A stale `~/.terminfo` entry overrides the pane's own
+
+- **Surfaced:** 151.9 (2026-11-19). On the development machine the child resolved
+  `~/.terminfo/x/xterm-freminal` rather than the per-pane copy.
+- **Impact:** ncurses searches `~/.terminfo` before `TERMINFO_DIRS`, so any per-user copy wins
+  over the bundle or per-pane copy, which always matches the running freminal. Decision 4's
+  fallback (`curl … | tic -x -` without root) installs exactly such a per-user copy, so a
+  user who installed it once keeps that version after upgrading freminal.
+- **Scope of fix:** `freminal-terminal-emulator/src/io/pty.rs` (`run_terminal`, the
+  `TERMINFO`/`TERMINFO_DIRS` comment and setup), its tests, `tests/terminfo_child.rs`.
+- **Suggested approach:** first establish, from the ncurses source (`read_entry.c`,
+  `db_iterator.c`) and Apple's ncurses, the real search order and whether `TERMINFO` is
+  exclusive (the existing code comment says it is; kitty and Ghostty set `TERMINFO` to their
+  bundled directory and other `TERM` values keep working). Do not infer it. If `TERMINFO` is
+  searched first and not exclusively, set `TERMINFO` to the pane's directory (bundle or
+  per-pane) as kitty and Ghostty do, keep `TERMINFO_DIRS` for the rest, and test that
+  `xterm-freminal` resolves from the pane's directory with a stale `~/.terminfo` copy present
+  and that `TERM=xterm-256color` still resolves from the system database.
+- **Verification:** `terminfo_child.rs` without the empty-`HOME` workaround, plus a stale
+  `~/.terminfo` copy in a temp `HOME`.
+- **Scheduling:** within Task 151, after 151.10 and before the adversarial review.
+- **Status: Resolved (2026-11-19).** Research (ncurses 6.6 `include/term_entry.h:94-109`,
+  `tinfo/db_iterator.c:312-365`, `read_entry.c:902-910`; Apple's `ncurses-79` and ncurses 5.7
+  identical; experiments): the order is `$TERMINFO`, `$HOME/.terminfo`, `$TERMINFO_DIRS`, the
+  compiled-in default, and `TERMINFO` is not exclusive (the first directory with the entry
+  wins; misses fall through). kitty (`child.py`) and Ghostty (`Exec.zig`) set `TERMINFO` and
+  leave `TERMINFO_DIRS` alone. `run_terminal` now does the same (`apply_terminfo_env`), and
+  the old comment calling `TERMINFO` exclusive is corrected. `terminfo_child.rs` plants a
+  stale `colors#8` copy in the child's `~/.terminfo` and checks the pane's entry wins (and
+  that the stale one would win without `TERMINFO`), and that `TERM=xterm-256color` still
+  resolves from the system database. README and `DESIGN_DECISIONS.md` updated. Surfaced
+  decision 5 (151.12).
+- **151.12 (done).** `[shell_integration] sudo_preserve_terminfo` (TOML toggle, default
+  `true`, under the `set_term_program` master switch; full config checklist). The GUI
+  converts it to `SudoTerminfo { Preserve, Unchanged }` (`io/shell_features.rs`, no `Default`),
+  carried by `PtyTabConfig`, `TerminalEmulator::new` (now ten parameters, under its existing
+  `too_many_arguments` allow) and `PtySpawnConfig`; the spawn sets
+  `FREMINAL_SHELL_FEATURES=sudo` only when the integration is injected and the toggle is on,
+  and removes an inherited value otherwise. The bash, zsh and fish wrappers reproduce Ghostty
+  at `d69f9ed8` (`ghostty.bash` L89-115, `ghostty-integration` L305-327,
+  `ghostty-shell-integration.fish` L97-120), cited in each script; bash and zsh read the
+  variables as `${VAR:-}` (safe under `set -u`). As in Ghostty, the scan stops at the first
+  argument that is neither an option nor an assignment, so `sudo -u root -e file` is wrapped
+  and `sudo -e -u root file` is not (pinned by a test, noted in `DESIGN_DECISIONS.md`). Script
+  tests run all three shells against a fake `sudo`.
+
+#### 151 Adversarial review (2026-11-19)
+
+One CODE-REVIEW pass over `main...HEAD` against this section and the repo rules. No blocker.
+`cargo xtask test`, clippy, `check-windows`, `machete`, markdownlint and the Nix lints were
+clean; the committed entry is byte-identical to a fresh `tic -x` (ncurses 6.6); the sudo
+wrappers match Ghostty at `d69f9ed8` line for line.
+
+| ID  | Sev   | Finding (short)                                                              | Disposition |
+| --- | ----- | ---------------------------------------------------------------------------- | ----------- |
+| R1  | major | `tic -x` inside a pane writes into the pane's `$TERMINFO` (temp/bundle dir)  | 151.C3      |
+| R2  | minor | a user's own `TERMINFO` is overwritten; decision not recorded                | 151.C2      |
+| R3  | minor | `FREMINAL_SHELL_FEATURES` is removed only on an injected spawn               | 151.C2      |
+| R4  | minor | "every `k*` value is compared" overstated; `kf*`/unmodified keys untested    | 151.C2      |
+| R5  | minor | `TerminalEmulator::new` grew to ten parameters under an existing allow       | 151.C2      |
+| R6  | minor | "single value … FREC" decision text not amended; stale doc example           | 151.C3      |
+| R7  | minor | 147.22 still reads as an open Task 147 subtask in this branch                | 151.C3      |
+| R8  | minor | decision 2 / `TERMINFO_DIRS` bullet / 151.7 note predate 151.C1              | 151.C3      |
+| R9  | minor | `shell-integration/README.md` does not mention the sudo wrapper              | 151.C3      |
+| R10 | minor | `sudo -u other`, `su`, `doas`, containers cannot read the 0700 pane dir      | 151.C3      |
+| R11 | minor | committed tree bytes are per `tic` version; not stated                       | 151.C3      |
+| R12 | nit   | stale test name; `TERMINFO_DIRS` test vacuous when the variable is unset     | 151.C2      |
+| R13 | nit   | table-of-truth scan of `dcs.rs` misses multi-line arms; parser in DCS tests  | 151.C2      |
+| R14 | nit   | pane `env` `TERM` key case-sensitive on Windows; empty value accepted        | 151.C2      |
+| R15 | nit   | sudo checkbox enabled while `set_term_program` is off                        | 151.C2      |
+| R16 | nit   | `query-os-name` maps DragonFly to `Unknown`                                  | 151.C2      |
+| R17 | nit   | `gui::recording` made `pub` instead of `pub(crate)`                          | 151.C2      |
+| R18 | nit   | `.ti` header "every capability implemented" (kcbt/kent); md5sums comment     | 151.C3      |
+| R19 | nit   | real-PTY tests leave `sleep 30` children                                     | 151.C2      |
+| R20 | nit   | `packages.terminfo` has no `meta.license`                                    | 151.C2      |
+| R21 | nit   | tool-missing skips pass vacuously on CI                                      | 151.C2      |
+| R22 | n/a   | `nix build .#freminal` (full check phase) not run                            | before PR   |
+
+Orchestrator decisions on the open points:
+
+- **R1:** the documented local installs name their target: `tic -x -o ~/.terminfo -` (per
+  user) and `sudo env -u TERMINFO tic -x -` (system-wide; the sudo wrapper keeps `TERMINFO`,
+  so it must be unset). The `ssh HOST -- tic -x -` forms are unaffected: ssh does not forward
+  `TERMINFO`.
+- **R2:** an inherited `TERMINFO` is kept reachable by putting it at the front of the child's
+  `TERMINFO_DIRS` (followed by the inherited `TERMINFO_DIRS`, or the system default when that
+  is unset); freminal's directory stays in `TERMINFO`. `TERMINFO` is set whatever `TERM` is:
+  it is not exclusive (151.C1), so a non-bundled `TERM` still resolves.
+- **R4:** the keypad `\x1b[OM` encoding no longer exists once Task 147 merges (147.5 deleted
+  `TerminalInput::KeyPad` and sends `SS3 M`); `kent` and `kcbt` go in an explicit "declared,
+  not sent" list with the reason.
+- **R5:** the per-pane spawn-environment values move into one struct passed to
+  `TerminalEmulator::new` (`freminal-extend-or-extract`). The `reset()` `#[expect]` stays: the
+  exhaustive destructuring is the reset table's compile-time check.
+- **R14:** on Windows the `TERM` key is matched case-insensitively; an empty pane-`env` `TERM`
+  is treated as absent.
+- **R21:** when the `CI` variable is set, a missing `tic` or `infocmp` fails the terminfo tests
+  instead of skipping (every Unix CI runner has them); missing `zsh`/`fish` still skip.
+
+#### 151 Cleanup entries (review)
+
+##### 151.C2 — Review fixes: code and tests
+
+R2, R3, R4, R5, R12, R13, R14, R15, R16, R17, R19, R20, R21, as decided above. Scope: the files
+each finding names, plus the `TerminalEmulator::new` call sites for R5.
+
+- **Status: done (2026-11-19).** R2: pure `terminfo_env` (an inherited non-empty `TERMINFO`
+  heads the child's `TERMINFO_DIRS`, then the inherited list or the system default), tested
+  over every combination. R3: `apply_spawn_shell_features` runs on every spawn path. R4: every
+  `k*` capability is compared with `to_payload` output, except `kent`, `kcbt` and `kmous` in
+  `DECLARED_NOT_SENT` with reasons. R5: `PaneSpawnEnv` (`io/pane_spawn_env.rs`) cuts
+  `TerminalEmulator::new` to five parameters and removes its `too_many_arguments` allow; the
+  orchestrator also had the TOML bool carried as `TermProgramEnv { Advertise, Omit }`
+  (`io/term_program_env.rs`, in `PaneSpawnEnv` and `PtySpawnConfig`). R12: renamed and made
+  non-vacuous. R13: the parser and table-of-truth tests are
+  `terminal_handler/dcs/terminfo_truth_tests.rs`, and the arm scan panics on any line it does
+  not understand (a mutation test confirmed). R14: `TermName::is_env_key(platform, key)`
+  (case-insensitive on Windows), empty pane-`env` `TERM` ignored. R15, R16, R19, R20, R21 as
+  decided. **R17 not done, correctly:** `freminal/src/main.rs` is a separate crate root (the
+  binary) that reaches `freminal::gui::recording`, so the module stays `pub`.
+
+##### 151.C3 — Review fixes: docs and plan
+
+R1, R6, R7, R8, R9, R10, R11, R18. Scope: `README.md`, `Documents/DESIGN_DECISIONS.md`,
+`shell-integration/README.md`, `res/freminal.ti` (header), `assets/ci/fix-linux-icon-metadata.sh`
+(comment), `freminal-terminal-emulator/build.rs` (comment), `freminal-terminal-emulator/src/recording.rs`
+(doc example), `Documents/FREC_FORMAT.md`; the plan items are the orchestrator's.
+
+- **Status: done (2026-11-19).** R1: the README and `DESIGN_DECISIONS.md` local installs name
+  their target (`tic -x -o ~/.terminfo -`; `sudo env -u TERMINFO tic -x -`, because the sudo
+  wrapper keeps `TERMINFO`); the `ssh … tic -x -` forms are unchanged. R6, R9 (new
+  "The `sudo` Wrapper (Terminfo)" section in `shell-integration/README.md`), R10, R11, R18 as
+  decided, plus the R2 and R14 behaviour in the README and `DESIGN_DECISIONS.md`.
+  `FREC_FORMAT.md` already agreed. R7 and R8 were done by the orchestrator in 151.C2's
+  commit.
+
+#### 151 Confirmation review (2026-11-19)
+
+A second CODE-REVIEW pass over `7dee17d0..HEAD`: R1–R16, R18 and R20 FIXED; R17
+ACCEPTED-AS-DOCUMENTED; R19 FIXED for Task 151's tests (the `sleep 30` echo-off tests predate
+the branch and need the PTY held open); R21 PARTIAL (N1, N4). New findings:
+
+| ID  | Sev   | Finding (short)                                                                 | Disposition |
+| --- | ----- | ------------------------------------------------------------------------------- | ----------- |
+| N1  | major | CI-strict skip fails the stdin-compile test on `windows-latest` (no `tic`)      | 151.C4      |
+| N2  | minor | nested freminal panes carry the parent pane's `TERMINFO` into `TERMINFO_DIRS`   | 151.C4      |
+| N3  | nit   | a user `TERMINFO` now ranks after `~/.terminfo`; not documented                 | 151.C4      |
+| N4  | nit   | missing `xterm-256color` still skips silently on CI                             | 151.C4      |
+| N5  | nit   | CI-skip helpers duplicated in two test files                                    | 151.C4      |
+| N6  | nit   | `kcbt` declared, never sent; `kent` exemption is conditional on Task 147        | routed      |
+| N7  | nit   | README "On a remote host:" heading over a command run locally                   | 151.C4      |
+| N8  | nit   | `TermProgramEnv` doc overstates what `Omit` leaves alone                        | 151.C4      |
+| N9  | nit   | `DESIGN_DECISIONS.md` says a forgotten version bump fails CI; it does not       | 151.C4      |
+
+- **N6 routing:** sending `CSI Z` for Shift+Tab is Task 137 B3 (modifiers on Tab), so `kcbt`
+  stays declared (it is the standard value) and Task 137's stub gains the note. `kent`:
+  147.5 makes keypad Enter in application mode send `SS3 M`, which is `kent`'s value, so
+  whichever of the Task 147 and Task 151 PRs merges second moves `kent` from
+  `DECLARED_NOT_SENT` to the encoder-checked set (a merge-time reconciliation, recorded in
+  both tasks' notes).
+- **N2 decision:** an inherited `TERMINFO` equal to the pane's own directory is dropped; a
+  pane marks its directory with a `FREMINAL_TERMINFO` variable naming it, and an inherited
+  `TERMINFO` equal to the inherited `FREMINAL_TERMINFO` (a parent freminal pane's directory)
+  is not carried into `TERMINFO_DIRS`.
+
+##### 151.C4 — Confirmation-review fixes
+
+N1 (gate the `tic` tests to Unix, or exempt Windows from the CI-strict rule), N2 (as decided),
+N3, N4, N5 (a shared `tests/common` helper), N7, N8, N9.
+
+- **Status: done (2026-11-19).** N1: the stdin-compile test and its source constant are
+  `#[cfg(unix)]`. N2: the child also gets `FREMINAL_TERMINFO=<pane dir>`; `terminfo_env`
+  drops an inherited `TERMINFO` equal to the pane's directory or to the inherited
+  `FREMINAL_TERMINFO`, tested for nested panes, the bundle duplicate and a user value under a
+  nested pane. N3–N5, N7–N9 as recorded (`tests/common/mod.rs` holds the CI-strict helper).
+  `terminfo_child` passed 10 of 10, and with `CI=1`.
+- **R22 (`nix build .#freminal`, 2026-11-19).** The package's check phase failed seven
+  `sudo_wrapper_tests`: their generated fake `sudo` used `#!/usr/bin/env sh`, and the Nix
+  build sandbox has no `/usr/bin/env`. Fixed by the orchestrator: the generated fixture names
+  the `sh` found on `PATH` absolutely (it is a test fixture, not a shipped script, so
+  `shebang-env-discipline` does not apply).
+  The second build then failed `child_term_real_pty_tests`: with no working directory,
+  portable-pty starts the child in `$HOME`, which does not exist in the sandbox
+  (`/homeless-shelter`; the flake already skips three echo-off PTY tests for this). The new
+  real-child tests now pass an explicit working directory instead of joining the skip list.
+
+#### 151 PR review (PR #588, 2026-11-20)
+
+CI failed `Test macos-latest`, and Copilot and CodeRabbit left five comments. Dispositions:
+
+| ID  | Source          | Finding (short)                                                                 | Disposition |
+| --- | --------------- | ------------------------------------------------------------------------------- | ----------- |
+| P1  | Copilot         | the bash and zsh wrappers copy GPLv3 code into MIT freminal                     | 151.C5      |
+| P2  | CodeRabbit      | `sudo -u root -e file` is wrapped, and sudo rejects `--preserve-env` with `-e`  | 151.C5      |
+| P3  | Copilot, CR     | `build.rs` rewrites `res/` during a build; the embed can lag the tree           | 151.C6      |
+| P4  | Copilot, CR, CI | macOS `tic` writes `78/xterm-freminal`; the stale-entry setup accepts `x/` only | 151.C6      |
+| P5  | CodeRabbit      | the in-pane `infocmp` install command does not apply on Windows                 | 151.C6      |
+
+- **P1 (confirmed):** Ghostty's `ghostty.bash` and `ghostty-integration` (zsh) state that they
+  derive from kitty's integration and are distributed under GPLv3; its fish file has no such
+  notice (Ghostty is MIT). 151.12 asked for Ghostty's wrapper "exactly", which copied GPLv3
+  code. That was an orchestrator error and contradicts this plan's own rule (kitty is read for
+  behaviour only). **Decision:** all three wrappers are rewritten clean-room from a behaviour
+  specification written by the orchestrator, by an implementer that does not read Ghostty's or
+  kitty's shell scripts; the "reproduced from Ghostty" citations go. Decision 5's behaviour
+  (on by default, separate toggle, sudoedit unchanged) stands; "exactly as Ghostty" is
+  withdrawn.
+- **P2 (accepted):** the clean-room scan follows sudo's own option syntax, so option operands
+  (`-u root`, `--user=root`, `--user root`, grouped `-ku root`) are skipped and `-e` after them
+  is still recognised. This deliberately differs from Ghostty.
+- **P3 decision:** regenerating the compiled tree and tar becomes an explicit
+  `cargo xtask terminfo` step; `build.rs` no longer writes into `res/` (Cargo's rule that build
+  scripts write only to `OUT_DIR`). The committed tree and tar are the single generation
+  everything embeds and packages; the existing stdin-compile test fails when `res/freminal.ti`
+  changes without a regeneration, and says to run the xtask.
+
+##### 151.C5 — Clean-room `sudo` wrapper (P1, P2)
+
+Scope: the three shell-integration scripts' `sudo` blocks, `freminal/src/shell_integration/sudo_wrapper_tests.rs`,
+`shell-integration/README.md` and `DESIGN_DECISIONS.md` (the wrapper description).
+Behaviour specification (the implementer works only from this):
+
+- The wrapper is defined only when `FREMINAL_SHELL_FEATURES` contains the item `sudo` (a
+  comma-separated list; match whole items, not substrings) and `TERMINFO` is non-empty. In
+  fish it is not defined if a `sudo` function or alias already exists; bash and zsh define it
+  regardless (it replaces nothing a later alias cannot override).
+- It calls the real `sudo` (bypassing itself: `command sudo` in bash, zsh and fish) with
+  `--preserve-env=TERMINFO` inserted first, unless the invocation is an edit, in which case it
+  passes the arguments through unchanged.
+- An invocation is an edit when, scanning the arguments from the left, `-e` or `--edit`
+  appears before the first command word. The scan, following sudo(8):
+  - `--` ends the options (no edit found by then: not an edit);
+  - a long option with `=` (`--user=root`) is one word; a long option that takes a value
+    (`--chdir`, `--chroot`, `--close-from`, `--group`, `--host`, `--prompt`, `--role`,
+    `--type`, `--command-timeout`, `--other-user`, `--user`) given without `=` consumes the
+    next word too;
+  - a short-option word `-abc` is read letter by letter: `e` means edit; a letter that takes
+    a value (`C D g h p R r T t U u`) consumes the rest of the word, or the next word if it is
+    the last letter; other letters take none;
+  - a word of the form `NAME=value` (before the command) is skipped;
+  - any other word is the command: stop (not an edit).
+- Tests (all three shells, fake `sudo`): `sudo ls`, `sudo -u root ls`, `sudo VAR=1 cmd` and
+  `sudo -- ls` get the flag; `sudo -e f`, `sudo --edit f`, `sudo -u root -e f`,
+  `sudo --user=root -e f`, `sudo --user root -e f`, `sudo -ke f` and `sudo -n -e f` do not;
+  `sudo -ue root f` gets the flag (`e` is `u`'s value, a user named "e", and `root` is the
+  command: not an edit); feature off, `TERMINFO` empty, and a feature list such as `nosudo`
+  (no whole-item match) leave `sudo` alone; fish leaves an existing `sudo` function alone.
+- **Status: done (2026-11-20).** The implementer attested to the clean-room rule (old blocks
+  deleted by line range unread; no Ghostty or kitty source, git history or recall used). Each
+  script has its own `__freminal_sudo_is_edit` scan and a `sudo` function; bash and zsh match
+  the feature item as `,…,` containing `,sudo,`. `shipped_scripts_cite_ghostty` is replaced by
+  `sudo_blocks_name_no_third_party_source`; 14 flag cases, 12 edit cases, the whole-item
+  matching and the fish non-clobber case run in bash, zsh and fish. Found while testing: `?`
+  is not a wildcard in fish `case`. A pre-existing "Ghostty-derived" `.zshenv` `ZDOTDIR` step
+  (not part of this task) is routed to 147.C4 for the same licence check.
+
+##### 151.C6 — Build generation, macOS layout, Windows README (P3, P4, P5)
+
+Scope: `freminal-terminal-emulator/build.rs` (remove the terminfo generation and its
+`rerun-if-changed` lines), `xtask/` (a new `terminfo` subcommand that runs `tic -x` and writes
+the committed tree and tar exactly as `build.rs` did), `freminal-terminal-emulator/tests/terminfo_tree.rs`
+(the stdin-compile test's failure message names `cargo xtask terminfo`),
+`freminal-terminal-emulator/tests/terminfo_child.rs` (accept `x/` or `78/` wherever the setup
+or the child probe looks for a compiled entry), `README.md` (the in-pane command applies where
+freminal bundles the entry, not on Windows; Windows users use the source-file command),
+`DESIGN_DECISIONS.md` and `agents.md`'s xtask list (the new subcommand), and the `res/freminal.ti`
+header (how to regenerate).
+
+- **Status: done (2026-11-20).** `build.rs` keeps only the version logic and writes nothing
+  outside `OUT_DIR`; `cargo xtask terminfo` (alias `ti`, `xtask/src/terminfo.rs`) holds the
+  unchanged generation and fails clearly without `tic`. The stdin-compile test names the
+  xtask on failure. `terminfo_child.rs` accepts `x/` or `78/` in the setup and the child
+  probe. The README limits the in-pane command to Linux, macOS and BSD. Two stale "`build.rs`
+  passes `-x`" mentions (COVERAGE, kitty reference) were updated. A clean build and a
+  `cargo xtask terminfo` run both leave `res/` unchanged.
+
+##### 151.C7 — PR #588 second review round (P6-P9)
+
+CodeRabbit's second pass on PR #588 (2026-11-20) left four comments; all are accepted. While
+checking P7 against sudo's own option table (`src/parse_args.c`, `sudo_short_opts` and
+`sudo_long_opts`, ISC-licensed, read for its option list only) the orchestrator found that
+151.C5's specification was itself incomplete, so the scan rules below supersede 151.C5's.
+
+| ID  | Finding (short)                                                                       |
+| --- | ------------------------------------------------------------------------------------- |
+| P6  | `DESIGN_DECISIONS.md` says root programs ignore `TERMINFO`; default ncurses allows it |
+| P7  | sudo accepts unique long-option prefixes (`--ed`), which the scan does not            |
+| P8  | zsh `KSH_ARRAYS` breaks the scan's string subscripts                                  |
+| P9  | the stdin-compile test compares raw `tic` bytes across ncurses builds                 |
+
+- **P6:** ncurses ignores `TERMINFO`/`TERMINFO_DIRS` in setuid/setgid programs; programs run
+  as root read them unless ncurses was configured with `--disable-root-environ`. Reword the
+  "Known limits" paragraph accordingly.
+- **P7 (scan rules, superseding 151.C5):**
+  - Short letters that require a value (consume the rest of the word, or the next word when
+    last): `a C c D g p R r T t U u`. `h` takes an optional value: it consumes the rest of
+    its word if any, and never the next word. `e` is edit. Other letters take none.
+  - Long options (sudo's full list): `askpass auth-type background bell chdir chroot
+    close-from command-timeout edit group help host list login login-class no-update
+    non-interactive other-user preserve-env preserve-groups prompt remove-timestamp
+    reset-timestamp role set-home shell stdin type user validate version`. Value-required:
+    `auth-type chdir chroot close-from command-timeout group host login-class other-user
+    prompt role type user` (without `=` they consume the next word). `preserve-env` takes a
+    value only with `=`.
+  - A long option word (the part before any `=`) matches an exact name first; otherwise a
+    prefix of exactly one name (`--ed` is `--edit`, `--us` is `--user`). A prefix of more than
+    one name (`--re`) or of none is an unknown option taking no value (sudo itself rejects
+    it, so the result does not matter beyond not crashing).
+- **P8:** the zsh scan starts with `emulate -L zsh`.
+- **P9:** the test compares the decompiled capabilities instead of bytes: `infocmp -x` of the
+  stdin-compiled entry against `infocmp -x` of the committed tree (both read with the host's
+  `infocmp`, `TERMINFO` pointed at each tree; header lines naming the file are dropped).
+  Byte-equality of the committed tree with the archive stays.
+- **Status: done (2026-11-20).** Scan rewritten to the P7 rules in all three shells (a long-name
+  list and a `__freminal_sudo_long_name` prefix helper each), clean-room attested again. zsh
+  helpers start with `emulate -L zsh`; `zsh_scan_is_independent_of_ksh_arrays` was shown to
+  fail without it. Sixteen new cross-shell cases (`--ed`, `-h -e`, `-a`/`-c`, abbreviated
+  value options, `--login` exact, ambiguous `--re`). The stdin-compile test compares
+  `infocmp -x` output (comments dropped, `TERMINFO_DIRS` cleared, empty `HOME`); a `cols#81`
+  edit was shown to differ. The README's remaining Ghostty comparison sentence was removed.
+
+##### 151.C8 — Standalone `-h` takes a detached host (P10)
+
+CodeRabbit's third pass on PR #588 (2026-11-20): `sudo -h localhost -e f` is an edit, but the
+151.C7 scan treats `localhost` as the command. Confirmed in sudo's `src/parse_args.c`
+(`case 'h'`, `got_host_flag`, `is_envar`): when the previous word is exactly `-h` (a standalone
+word, not grouped such as `-kh` and not attached such as `-hfoo`), sudo takes the next word as
+the remote host if it does not start with `-` and is not an environment assignment (contains
+`=` and starts with neither `/` nor `=`). This refines the 151.C7 `h` rule; everything else in
+151.C7 stands. Tests (all three shells): `-h localhost -e f` is an edit; `-h -e f` stays an
+edit; `-h VAR=1 ls` and `-h ls` get the flag (`ls` is the host there, so no command is found
+before the end: not an edit); `-kh host -e f` gets the flag (grouped: no lookahead, `host` is
+the command); `-hfoo -e f` stays an edit; `-h /a=b -e f` is an edit (`/a=b` is a host).
+
+- **Status: done (2026-11-20).** The scanners carry a one-word "host" state after an exact
+  `-h`; a following word that is neither an option nor an assignment is consumed. Found while
+  testing: zsh expands an unquoted `=*` `case` pattern as `=command`, so bash and zsh use
+  `[=]*`; fish's `switch` now quotes its word. Six new cross-shell cases plus two in the zsh
+  `KSH_ARRAYS` run. Clean-room attested.
+
+#### 151 Status notes
+
+- **151.1 (done).** See "151 Audit".
+- **151.2 (done).** `lookup_termcap` answers `indn`/`SF`, `rin`/`SR` (byte-identical to the <!-- codespell:ignore rin -->
+  entry, which already had both) and `query-os-name`/`query-os_name` through the pure
+  `os_name_for_target`. `kitty-query-os_name` is not answered. The `.ti`-vs-XTGETTCAP test
+  now also checks `indn` and `rin`. <!-- codespell:ignore rin -->
+- **151.3 (done).** Every "151 Audit" decision applied. `acsc` now equals `xterm-256color`'s;
+  `Se` is `\E[0 q` on both sides; the added capabilities were each checked against the
+  code. The test parses `res/freminal.ti` and reads `lookup_termcap`'s arms from `dcs.rs`, so
+  a new arm on either side fails it: every XTGETTCAP name must match the entry except four
+  listed XTGETTCAP-only names, every entry capability is either answered identically or in an
+  explicit `TERMINFO_ONLY` list, and every `k*` value equals the encoder's bytes. `tic -x -c`
+  leaves four warnings, all shared with `xterm-256color` or kitty (`kind`/`kDN` and
+  `kri`/`kUP` duplicates, `tsl` parameter count, `%;` in `Setulc`, undocumented extended
+  names). The SGR 8 GAPS row is new.
+- **151.4 (done).** `build.rs` writes `res/terminfo/{x,f,78,66}/…` (explicit paths, identical
+  bytes; `tic`'s alias is no longer counted twice) and packs the tar from that tree. Entry
+  contents are unchanged (the letter copy is byte-identical to the old tar). New
+  `tests/terminfo_tree.rs` pins the four members against the committed files. The
+  orchestrator also marked the tree and tar `binary` in `.gitattributes` and corrected the
+  `.ti` header.
+- **151.5 (done).** New `freminal-common/src/term_name.rs` (`TermPlatform`, the two defaults,
+  `validate_term_name` with a typed `TermNameError`); `ShellConfig::term: Option<String>` and
+  `ShellConfig::effective_term(platform)`, the single resolved value. An invalid value is
+  dropped at load with a warning on the existing load-warning channel (silently in
+  `from_toml_str`, which has none). `[shell]` was already a whole-section `ConfigPartial`
+  entry, so only the guard test changed. Settings Shell tab, `config_example.toml` and the
+  home-manager option are wired.
+- **151.6 (done).** `TermName` (`term_name.rs`) with `TermName::resolve(&ShellConfig,
+  TermPlatform, pane env)`: a pane `env` `TERM` (taken as given), then `[shell] term`, then
+  the platform default. Every spawn site (`tab_spawning.rs` new tab, split and layout leaf;
+  `app_impl.rs` initial and second spawn) resolves it once and passes it through
+  `PtyTabConfig` to `TerminalEmulator::new` (now nine parameters, under its existing
+  `too_many_arguments` allow) and `PtySpawnConfig`. `run_terminal` sets `TERM` once
+  (`apply_term_env`) and the extra-env loop skips `TERM`. XTGETTCAP `TN` reads the handler's
+  `term_name` (`lookup_termcap` now takes it); the Task 76.6 guard checks `TN` equals the
+  child's `TERM`. FREC `term` is per recording, so it records the `[shell] term` resolution
+  (`recording_term`); a pane-level `env` `TERM` is not visible in the header. `reset()` grew
+  one line past `too_many_lines` with the new reset-table row and carries an `#[expect]`
+  with the reason. A Unix test spawns a real `/bin/sh` and checks `$TERM` in each case.
+- **151.7 (done).** Plan correction: cargo-bundle's `resources` key cannot place files at
+  `Contents/Resources/terminfo/` (it keeps the source path, so `res/terminfo` would land at
+  `Contents/Resources/res/terminfo`), the key is global, and it would also add a copy to the
+  `.deb` and the AppImage (`usr/lib/freminal/…`, cargo-bundle `osx_bundle.rs`,
+  `deb_bundle.rs`, `appimage/app_dir.rs`), against decision 3. Orchestrator decision: no
+  `resources` key; the release workflows (`deploy.yaml`, `nightly.yml`) copy `res/terminfo`
+  into the staged `.app` before `codesign --deep`, and the flake's Darwin `postInstall` does
+  the same. A locally built `cargo bundle` `.app` has no tree and uses per-pane extraction.
+  `pty.rs` gains the pure `bundle_terminfo_dir` (exe path → `X.app/Contents/Resources/terminfo`),
+  `TerminfoPlatform`, `TerminfoSource { Unused, Bundle, PerPaneExtraction }` and
+  `terminfo_dirs_value` (replaced by `apply_terminfo_env` in 151.C1); on macOS a present
+  bundle directory replaces per-pane extraction.
+  Neither `cargo bundle` nor the macOS workflow was run locally.
+- **151.8 (done).** rpm `assets` and the repacked `.deb` (`fix-linux-icon-metadata.sh`
+  `patch_deb` only; the AppImage is untouched) install `/usr/share/terminfo/{x,f}/…`.
+  `packages.<system>.terminfo` copies the committed tree (source filtered with
+  `lib.fileset`, all four layouts) into `$out/share/terminfo`; the main package installs it
+  too. `nixosModules.default` (`nix/nixos-module.nix`): `programs.freminal.terminfo.enable`
+  and `.package`, added to `environment.systemPackages` under `lib.hiPrio` so a
+  mixed-revision profile resolves deterministically. Verified: `nix build .#terminfo` plus
+  `infocmp`, `nix flake check --no-build`, a `nixosSystem` evaluation with and without the
+  option, darwin `drvPath` evaluation. Not run locally: the full package build and a real
+  rpm/deb.
+- **151.11 (done).** Both release jobs copy `res/freminal.ti` into `artifacts/` before the
+  upload (`deploy.yaml`'s release job gained a checkout). The `.ti` header records that the
+  path is public. `source_compiles_from_stdin_to_the_committed_entry` pipes the file through
+  `tic -x -o <tmp> -` and compares the result with the committed entry (skipped, with a
+  message, without `tic`). The raw `main` URL resolves once this branch merges.
+- **151.9 (done).** `tests/terminfo_child.rs` spawns `/bin/sh` through
+  `FreminalPtyInputOutput::new` with the default config and checks, inside the child, `TERM`,
+  that the first `TERMINFO_DIRS` entry holds `x/xterm-freminal`, that `infocmp -x` resolves
+  it from that directory with `Smulx` and `Sync`, and `tput colors` / `tput setaf 9`. Plan
+  correction: `tput` cannot read extended capabilities, so `Smulx` is checked through
+  `infocmp`. The child gets an empty `HOME` through the pane `env`, because ncurses searches
+  `~/.terminfo` before `TERMINFO_DIRS`; that surfaced 151.C1. 20 sequential runs and 5 under
+  load passed. Its macOS CI run settles the Apple ncurses question.
+- **151.10 (done).** New "TERM Strategy (Task 151)" in `DESIGN_DECISIONS.md` and a README
+  "Terminfo" section (symptom, the three decision-4 commands, the release asset, the
+  `~/.terminfo` note, packages, the `[shell] term` escape hatch). The listed
+  `xterm-256color` sentences are updated (COVERAGE, GAPS, kitty reference, `FREC_FORMAT.md`;
+  history notes in `PLAN_VERSION_090.md`, `PLAN_VERSION_150.md` and `MASTER_PLAN.md` get a
+  "superseded by Task 151" line). The GAPS "XTGETTCAP capability expansion" row is closed by
+  151.2. The `kbs` comments in `decbkm.rs` and `input.rs` stay accurate (`\177` in both
+  entries).
 
 ---
 

@@ -977,9 +977,10 @@ variants and the corresponding `pending_shell_action` field on
 Each shipped script starts with a `# freminal-shell-integration v<N>`
 comment (or `<!-- ... -->` for README.md). A single Rust constant
 `FREMINAL_SHELL_INTEGRATION_VERSION: u32` lives in `shell_integration.rs`.
-A `cargo test` invariant asserts the constant matches the marker in every
-shipped script. Forgetting to bump the constant after editing a script
-fails CI.
+A `cargo test` invariant asserts that the marker line in every shipped
+script agrees with the constant. It does not detect an edited script whose
+marker and constant were both left unchanged, so bumping the version after
+editing a script is a discipline, not a CI gate.
 
 The runtime install path (`sync_to_disk`) does NOT read the version
 marker. It compares bytes directly. The version is purely a development-
@@ -1318,6 +1319,205 @@ backends, `PlainSink::recording` or the fake daemon. The feature also turns on
 An exported item of a library is never dead code, so the crate carries no
 dead-code exceptions: the `NotifyAssets` fields and the `StandardIcon` methods
 are plain `pub` items with no `cfg` gate or `expect`.
+
+---
+
+## TERM Strategy (Task 151)
+
+### The reversed decision
+
+Task 12 decided that freminal would keep `TERM=xterm-256color` (as WezTerm and Alacritty do)
+and advertise anything extra through XTGETTCAP. Task 92 (a terminfo self-install subcommand)
+was dropped on the strength of that decision. Task 151 reverses it: children get
+`TERM=xterm-freminal` by default. The reasons:
+
+- **The entry was never read.** `res/terminfo.tar` was embedded and extracted for every PTY,
+  but the child's `TERM` named an entry that tar did not contain, so nothing used it.
+- **XTGETTCAP is a poor substitute.** Only programs that send the query see its answers, and
+  it is a runtime round trip per program. Terminfo is what ncurses, `tput`, tmux, vim and
+  readline already read.
+- **Programs should know which terminal they are in.** Capabilities such as `Smulx`,
+  `Setulc`, `Sync` and `Tc` are declared once, accurately, instead of being inherited from
+  an xterm that does not behave like freminal.
+- **The `xterm-` prefix keeps compatibility.** Programs that match `xterm*` keep working, as
+  they do for `xterm-kitty` and `xterm-ghostty`.
+
+The price is the ssh case: a host that does not have the entry reports `unknown terminal type`.
+The README's "Terminfo" section gives the fixes (below).
+
+### The entry is checked, not trusted
+
+A wrong capability is worse than a missing one once programs trust it, so the entry
+(`res/freminal.ti`) is held to what freminal does:
+
+- It was audited capability by capability against the parser, handler and input encoder
+  (Task 151.1). Capabilities freminal does not implement are not declared: `invis` and the
+  SGR 8 part of `sgr` (conceal is parsed and ignored), and `km` (Alt sends no 8th bit).
+  `acsc` is `xterm-256color`'s value.
+- A test parses `res/freminal.ti` and compares it with `lookup_termcap`, the XTGETTCAP
+  table. Every name XTGETTCAP answers must match the entry, except a short list of
+  XTGETTCAP-only names, and every entry capability is either answered identically or sits in
+  an explicit terminfo-only list with a reason. A new arm on either side fails the test. Every
+  `k*` value is also compared with the bytes the encoder sends, except `kent`, `kcbt` and
+  `kmous`, which are declared but not sent and sit in an explicit `DECLARED_NOT_SENT` list
+  with the reason for each.
+- XTGETTCAP `TN` reports the pane's actual `TERM`, so the two cannot disagree. `Se` is
+  `CSI 0 SP q` (DECSCUSR 0 restores the configured cursor style).
+- An integration test spawns a real child through the production spawn path and checks that
+  `infocmp -x xterm-freminal` and `tput` resolve the entry from the directory freminal put on
+  `TERMINFO`, with a stale `~/.terminfo` copy present in the child's `HOME`, and that
+  `TERM=xterm-256color` still resolves from the system database.
+- The committed tree under `res/terminfo/` holds the bytes the build host's `tic` produced,
+  and they can differ between ncurses versions. The tests therefore check that the tree and
+  `res/terminfo.tar` agree with each other and that `res/freminal.ti` compiles, on the same
+  host, to the committed entry; they do not pin one byte image across hosts.
+
+### Which value the child gets
+
+The effective `TERM` is resolved once per pane at spawn (`TermName::resolve`), in this order:
+
+1. A `TERM` in the pane's `env` table, or the layout's (taken as given, not validated). An
+   empty value is ignored. On Windows the key is matched case-insensitively (`term` names
+   `TERM`, as the environment does there); elsewhere only `TERM` itself matches.
+2. `[shell] term` in `config.toml`.
+3. The platform default: `xterm-freminal`, and `xterm-256color` on Windows.
+
+That single value is used for the child's environment, for XTGETTCAP `TN`, and for the FREC
+recording header, with one limitation: the header is per recording, not per pane, so it
+records the `[shell] term` resolution (steps 2 and 3) and a `TERM` set in one pane's `env` is
+not reflected there. `FREC_FORMAT.md` says the same.
+
+A `[shell] term` value is passed through unchecked apart from a syntax check (non-empty, at
+most 128 bytes, no whitespace, control characters or `/`). An invalid value is dropped with a
+config warning and the platform default is used. freminal does not check that the named entry
+exists: it cannot see the remote end of an ssh session. Changes apply to new panes only.
+
+**Windows keeps `xterm-256color`.** There is no terminfo distribution path on Windows, and
+MSYS2 and Cygwin programs running under ConPTY read their own terminfo databases, which do not
+have `xterm-freminal`. `TERM` is still set, and `[shell] term` is honoured on every platform.
+
+### How terminfo reaches programs
+
+The entry is shipped in two directory layouts: the letter layout (`x/xterm-freminal`,
+`f/freminal`) that most ncurses uses, and the hex layout (`78/…`, `66/…`) that Apple's ncurses
+uses. The compiled tree is committed under `res/terminfo/`, together with the embedded
+`res/terminfo.tar`, and `cargo xtask terminfo` regenerates both from `res/freminal.ti`.
+`build.rs` does not write them: a build script may write only to `OUT_DIR`, and a build that
+rewrote the tree could embed a tar that lags the tree. The stdin-compile test in
+`terminfo_tree.rs` fails when `res/freminal.ti` changes without a regeneration. Packaging
+copies the committed files, so no package build needs `tic`.
+
+The child's `TERMINFO` is `<dir>`, where `<dir>` is, in order of preference:
+
+1. **macOS, inside a `.app` bundle:** `Contents/Resources/terminfo`, when that directory exists.
+   The release workflows and the Nix Darwin package copy the tree into the bundle (before
+   `codesign --deep` in the workflows). Nothing is extracted. A `.app` built locally with
+   `cargo bundle` has no such directory.
+2. **Otherwise (Linux, a raw macOS binary):** a per-pane temporary directory that the embedded
+   tar is extracted into, deleted when the pane closes.
+
+`TERMINFO` is not an exclusive directory, and it outranks the user's home. ncurses searches
+`$TERMINFO`, then `$HOME/.terminfo`, then `$TERMINFO_DIRS` (an empty element means the system
+database), then the compiled-in default (`db_iterator.c`; the same order is in Apple's
+ncurses and in ncurses 5.7). The first directory that holds the requested entry wins and a
+miss falls through to the next, so the tree here, which holds only `xterm-freminal` and
+`freminal`, does not hide the system entries and every other `TERM` still resolves. kitty and
+Ghostty set `TERMINFO` to their bundled directory the same way. The inherited `TERMINFO_DIRS`
+is left as it is.
+
+On Windows nothing is extracted and `TERMINFO` is not touched. On the other platforms
+`TERMINFO` is set to the directory above. An inherited non-empty `TERMINFO` (a private database
+the user exported for a custom `TERM`) is not discarded: it is moved to the front of the child's
+`TERMINFO_DIRS`, followed by the inherited `TERMINFO_DIRS`, or by an empty element (which
+ncurses reads as the system database) when that is unset. Without an inherited `TERMINFO` the
+inherited `TERMINFO_DIRS` is left alone. Because the user's directory moves into
+`TERMINFO_DIRS`, it is searched after `~/.terminfo`, so a same-named entry in `~/.terminfo`
+shadows it (it ranked first while it was `TERMINFO`).
+
+`FREMINAL_TERMINFO` is set to the same directory as `TERMINFO`. It is internal, not a setting,
+and exists for one reason: a freminal started inside a pane inherits the parent pane's
+`TERMINFO`, which is not the user's. An inherited `TERMINFO` that equals the pane's own
+directory, or equals the inherited `FREMINAL_TERMINFO` (set by a parent freminal pane), is
+therefore not moved into `TERMINFO_DIRS`; otherwise each nesting level would add another
+ancestor's temporary directory to the list. A `TERMINFO` the user exports inside a pane
+differs from `FREMINAL_TERMINFO` and is kept. Both variables are set even when
+`set_term_program` is off.
+
+Installed copies:
+
+- The `.deb` and `.rpm` install `/usr/share/terminfo/{x,f}/…` (the `.deb` is repacked by
+  `assets/ci/fix-linux-icon-metadata.sh`).
+- The flake's `packages.<system>.terminfo` contains only `share/terminfo` (all four layouts),
+  with no GUI dependencies, for servers that do not install freminal. The main package
+  installs the same tree.
+- The NixOS module option `programs.freminal.terminfo.enable` adds that package to
+  `environment.systemPackages`. The home-manager module stays for desktops.
+- The AppImage ships nothing extra and relies on per-pane extraction. Users who need the
+  entry system-wide install one of the packages above or use the fallback commands.
+
+### Known limits
+
+- **`sudo` drops `TERMINFO`** (its `env_reset`), as it does for kitty and Ghostty, so `sudo`
+  programs only find a system-installed copy. Separately, ncurses ignores `TERMINFO` and
+  `TERMINFO_DIRS` in setuid and setgid programs; programs run as root read them unless ncurses
+  was configured with `--disable-root-environ`. The `[shell_integration] sudo_preserve_terminfo` toggle
+  (default on, maintainer decision 2026-11-19; Task 151.12) wraps `sudo` in the bundled bash,
+  zsh and fish integrations as `sudo --preserve-env=TERMINFO` (except an edit, `-e` /
+  `--edit`, which sudo refuses to combine with `--preserve-env`). The wrappers are freminal's
+  own implementation, written clean-room from sudo(8)'s option syntax (Task 151.C5; the first
+  version copied third-party GPL code and was replaced). An argument scan decides whether the
+  call is an edit: it reads the arguments left to right up to the command word, skips option
+  operands (`-u root`, `--user root`, `--user=root`, a value letter ending a grouped `-ku`
+  word, or taking the rest of its word as in `-uroot`; a standalone `-h` also takes the next
+  word as the host unless it starts with `-` or is a `NAME=value` assignment) and `NAME=value` words, stops at `--`,
+  and treats `e` / `--edit` as an edit, so `sudo -u root -e file` is recognised as an edit and
+  left unchanged. The feature is on by default whenever shell integration is active; a
+  sudoers policy that forbids preserving the environment makes `sudo` refuse the command, and
+  the user then sets the toggle to `false`. Freminal tells the scripts the feature is on
+  through `FREMINAL_SHELL_FEATURES=sudo` (a comma-separated list matched by whole item), set
+  at spawn only when the toggle is on and shell integration is injected, and removed otherwise
+  so a value inherited from a parent freminal pane cannot turn it on.
+- **Other users and other environments cannot read the pane's directory.** The per-pane
+  directory is a temporary directory created mode 0700, so `sudo -u otheruser`, `su`, `doas`
+  and containers (`docker exec -it` passes `TERM` but not the entry) cannot read it, and
+  those tools typically reset the environment as well. They need a system-wide copy or
+  `[shell] term`. ssh is not the only such case.
+- **`tic -x` inside a pane installs into the pane's directory.** `tic` writes to `$TERMINFO`
+  first, and in a pane that is the pane's temporary (or signed-bundle) directory, so the
+  documented local installs name their target: `tic -x -o ~/.terminfo -` per user and
+  `sudo env -u TERMINFO tic -x -` system-wide (the sudo wrapper keeps `TERMINFO`, so it has
+  to be unset for a system install). `ssh HOST -- tic -x -` is unaffected because ssh does not
+  forward `TERMINFO`.
+- **Detached processes outlive the pane's temporary directory.** A tmux server started from a
+  pane keeps running after the pane closes and deletes the per-pane directory, so it needs a
+  system-wide or per-user copy.
+- **A per-user `~/.terminfo` copy no longer shadows the pane's entry**, because `TERMINFO` is
+  searched first, so a copy installed there by the `tic -x -o ~/.terminfo` fallback below cannot go stale
+  inside a pane after freminal is upgraded. It is still the copy that other terminals and ssh
+  sessions on the same account use, since they do not set `TERMINFO`.
+- **Remote hosts have no entry** unless one of the fallbacks is used. Copying it automatically
+  belongs to SSH integration (Task 86); there is deliberately no install subcommand
+  (Task 92 stays dropped).
+
+### The fallback that always works
+
+The README documents installing the entry on any host, with or without freminal present, as
+Ghostty's terminfo help page does:
+
+- From inside a freminal pane (every build, the AppImage included, because each pane has the
+  entry on `TERMINFO`): `infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -`.
+- From anywhere, from the source file, piped through `ssh YOUR-SERVER -- tic -x -`, or on the
+  local machine with an explicit target (see the limit above):
+  `curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -o ~/.terminfo -`
+  per user, or `... | sudo env -u TERMINFO tic -x -` system-wide. `res/freminal.ti` is therefore
+  a public URL and must not be moved or renamed; its header comment says so.
+- A version-pinned copy: every release and nightly carries `freminal.ti` as an asset.
+  `releases/latest/download/…` is not used, because every release so far is a prerelease and
+  GitHub's `latest` skips prereleases.
+
+Outside freminal, `tic -x` run without root installs to `~/.terminfo`, which needs no
+privileges; inside a pane it does not, which is why the local forms above use `-o`. Setting
+`[shell] term = "xterm-256color"` is the other way out, at the cost of the extra capabilities.
 
 ---
 

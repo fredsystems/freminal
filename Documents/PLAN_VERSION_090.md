@@ -3087,6 +3087,9 @@ no behavior change (decided with the user):**
     `TERM=xterm-256color` as the documented Task-12 compatibility
     strategy (mirroring WezTerm/Alacritty). Reporting `freminal` would
     desync TN from TERM and break terminfo lookups.
+    _Superseded by Task 151 (2026-11-19): children now get
+    `TERM=xterm-freminal` by default and `TN` reports the pane's actual
+    `TERM`, so the two still cannot desync._
   - **XTVERSION stays `>|XTerm(Freminal <version>)`** (not
     `freminal v<version>`). The `XTerm(` prefix is load-bearing: tmux
     only enables `extkeys` / `modifyOtherKeys` when it recognises the

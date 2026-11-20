@@ -136,6 +136,79 @@ All settings are optional and can also be edited in the Settings window from the
 
 ---
 
+## Terminfo
+
+Freminal sets `TERM=xterm-freminal` for the programs it runs, so they get its real capabilities (curly and coloured underlines, synchronized output, true colour and more) from terminfo. The `xterm-` prefix keeps programs that look for `xterm*` working. On Windows the default stays `xterm-256color`.
+
+Freminal embeds the entry and makes it available to every pane, so it works locally with nothing installed. A host that does not have it, such as a server you `ssh` into, fails with a message like this:
+
+```text
+'xterm-freminal': unknown terminal type.
+```
+
+Programs may also complain that the terminal is unknown or fall back to a dumb terminal. Install the entry on that host with whichever of these suits you.
+
+From inside a Freminal pane on Linux, macOS or BSD (Freminal provides the entry there; on Windows it does not, so use the source-file command below):
+
+```bash
+infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -
+```
+
+From anywhere, without Freminal, using the source file (`curl` runs on this machine, `tic` on the server):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | ssh YOUR-SERVER -- tic -x -
+```
+
+On this machine, name where the entry goes. Inside a Freminal pane `TERMINFO` points at the pane's own copy, and `tic` writes to `$TERMINFO` first, so a bare `tic -x -` would install into that temporary (or app-bundle) directory instead of anywhere lasting. For your account only:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -o ~/.terminfo -
+```
+
+System-wide:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | sudo env -u TERMINFO tic -x -
+```
+
+The `env -u TERMINFO` matters because Freminal's `sudo` wrapper (below) keeps `TERMINFO` for the command it runs, which would send `tic` back to the pane's directory. `ssh` does not forward `TERMINFO`, so the `ssh YOUR-SERVER -- tic -x -` forms need nothing extra.
+
+Every release also attaches the file as `freminal.ti`, matching that version: `https://github.com/fredsystems/freminal/releases/download/<tag>/freminal.ti`.
+
+Outside Freminal, `tic -x` run without root installs the entry to `~/.terminfo`, which needs no privileges; inside a pane it does not (see above), hence `-o ~/.terminfo`. Inside a Freminal pane the pane's own copy is searched first, so it never goes stale after an upgrade; other terminals and `ssh` sessions on that account use the `~/.terminfo` copy.
+
+A `TERMINFO` you export yourself (a private database for a custom `TERM`) stays reachable: Freminal moves it to the front of the pane's `TERMINFO_DIRS`, ahead of any `TERMINFO_DIRS` you set, and the system database stays reachable too. Because it moves into `TERMINFO_DIRS`, it is searched after `~/.terminfo`, so an entry of the same name in `~/.terminfo` shadows the one in your `TERMINFO`.
+
+Freminal also sets `FREMINAL_TERMINFO` to the pane's directory. It is internal and not a setting: it lets a Freminal started inside a pane recognise the `TERMINFO` it inherited as its parent pane's, so nested panes do not chain every ancestor's directory into `TERMINFO_DIRS`. Do not set or rely on it.
+
+Packages that carry the entry system-wide, which also covers `sudo` and tmux servers that outlive a pane:
+
+- The `.deb` and `.rpm` packages install it under `/usr/share/terminfo`.
+- Nix: `packages.<system>.terminfo` provides only `share/terminfo`, for servers that do not need Freminal itself. On NixOS, import `freminal.nixosModules.default` and set `programs.freminal.terminfo.enable = true;`.
+
+`sudo` resets its environment, so a program run under `sudo` loses the pane's copy and only finds one of those system-wide copies. To avoid that, Freminal's bash, zsh and fish integrations wrap `sudo` so it keeps `TERMINFO` (`sudo --preserve-env=TERMINFO ...`; `sudo -e` / `--edit` is left alone). This is on by default. A sudoers policy that forbids preserving the environment makes `sudo` refuse the command; if yours does, turn it off:
+
+```toml
+[shell_integration]
+sudo_preserve_terminfo = false
+```
+
+It applies to new panes, needs `set_term_program` (the default), and is also in the Settings modal's Shell Integration tab.
+
+If you would rather not install anything, tell Freminal to use a `TERM` that every host knows by setting this in `config.toml` (see [Configuration](#configuration)):
+
+```toml
+[shell]
+term = "xterm-256color"
+```
+
+It applies to new panes. A `TERM` set in a layout's or pane's `env` table overrides it for that pane (an empty value is ignored; on Windows the key `TERM` matches in any case). The order is: the pane's `env` `TERM`, then `[shell] term`, then the default.
+
+The pane's terminfo directory is a temporary directory private to your user (mode 0700), so anything that runs as someone else, or in another environment, cannot read it (the macOS app-bundle copy is readable, but these tools generally do not carry `TERMINFO` over either): `sudo -u otheruser`, `su`, `doas`, and containers (`docker exec -it` passes `TERM` but not the entry). Those need a system-wide copy (above) or `[shell] term = "xterm-256color"`, the same as `ssh`.
+
+---
+
 ## Command line
 
 ```text

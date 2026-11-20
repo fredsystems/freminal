@@ -1064,10 +1064,10 @@ so neither needed a storage change.
   stays sparse. Whole-row IL, DL, SU, SD and line-feed fills use default
   attributes.
 - **Terminfo.** The bundled `xterm-freminal` entry (`res/freminal.ti`) lists `Su`,
-  `Smulx` and `Setulc`, with exactly the strings XTGETTCAP returns. Child processes
-  are started with `TERM=xterm-256color`, so that entry is used only if a user sets
-  `TERM=xterm-freminal`; the capabilities programs discover at runtime come from
-  XTGETTCAP.
+  `Smulx` and `Setulc`, with exactly the strings XTGETTCAP returns (a test keeps
+  the two identical). Child processes are started with `TERM=xterm-freminal` by
+  default (Task 151), so programs read the entry from terminfo as well as from
+  XTGETTCAP; `[shell] term` can select another `TERM`.
 
 ### Documented differences from kitty (underlines)
 
@@ -1106,7 +1106,7 @@ freminal's own earlier documentation wrongly called them BCE-aware.
   the per-style helpers `push_double_underline`, `push_curly_underline`,
   `push_dotted_underline` and `push_dashed_underline`.
 - **Terminfo** (`res/freminal.ti`, `res/terminfo.tar`,
-  `freminal-terminal-emulator/build.rs`): `build.rs` passes `-x` to `tic`, because
+  `freminal-terminal-emulator/build.rs`): `cargo xtask terminfo` passes `-x` to `tic`, because
   without it the user-defined capabilities `Su`, `Smulx` and `Setulc` are dropped
   with only a warning and never reach the compiled entry. `lookup_termcap`
   (`freminal-terminal-emulator/src/terminal_handler/dcs.rs`) is the XTGETTCAP side.

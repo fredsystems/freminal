@@ -61,6 +61,7 @@ use freminal_common::{
     cursor::CursorVisualStyle,
     host_capabilities::{HostCapabilities, Osc99Support},
     pty_write::{FreminalTerminalSize, PtyWrite},
+    term_name::TermName,
     themes::ThemePalette,
 };
 use kitty_keyboard_stack::KittyKeyboardStack;
@@ -335,6 +336,9 @@ pub struct TerminalHandler {
     /// Host-dependent capability facts (configuration and platform) the GUI
     /// supplies; see [`HostCapabilities`]. Default is everything unsupported.
     host_capabilities: HostCapabilities,
+    /// The `TERM` the pane's child was given; XTGETTCAP `TN` reports it so the two cannot
+    /// desync. Set once at spawn; default is the platform default.
+    term_name: TermName,
     /// Pointer (mouse cursor) shape stacks requested via OSC 22, one per
     /// screen.
     ///
@@ -535,6 +539,7 @@ impl TerminalHandler {
             allow_alt_screen: AllowAltScreen::Allow,
             pre_deccolm_width: None,
             host_capabilities: HostCapabilities::default(),
+            term_name: TermName::default(),
             pointer_shape_stack: ScreenScoped::default(),
             progress: ProgressReport::default(),
             progress_updated_at: None,
@@ -606,6 +611,20 @@ impl TerminalHandler {
             self.pending_osc99.clear();
         }
         self.host_capabilities = host_capabilities;
+    }
+
+    /// The `TERM` the pane's child was given, as reported by XTGETTCAP `TN`.
+    #[must_use]
+    pub const fn term_name(&self) -> &TermName {
+        &self.term_name
+    }
+
+    /// Set the `TERM` reported by XTGETTCAP `TN`.
+    ///
+    /// Called once at pane spawn with the same value the child's environment was given. Not
+    /// touched by a terminal reset: it describes the spawned process, not terminal state.
+    pub fn set_term_name(&mut self, term_name: TermName) {
+        self.term_name = term_name;
     }
 
     /// Get the current S8C1T mode.

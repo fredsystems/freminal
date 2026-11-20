@@ -4,7 +4,6 @@
 // https://opensource.org/licenses/MIT.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
@@ -51,7 +50,7 @@ pub use crate::input::{
 use conv2::ValueFrom;
 
 use crate::error::InterfaceError;
-use crate::io::{FreminalPtyInputOutput, GuiReply, PtySpawnConfig, ReplyQueue};
+use crate::io::{FreminalPtyInputOutput, GuiReply, PaneSpawnEnv, PtySpawnConfig, ReplyQueue};
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{TerminalSections, internal::TerminalState};
@@ -386,21 +385,28 @@ impl TerminalEmulator {
     /// `scrollback_limit` overrides the default scrollback history size when
     /// `Some(n)` is provided.  `None` keeps the compiled-in default (10000).
     ///
+    /// `spawn_env` carries the pane's own spawn settings (working directory,
+    /// extra environment, shell override, shell integration, resolved `TERM`);
+    /// see [`PaneSpawnEnv`].  Its `term` is set on the child's environment and
+    /// reported by XTGETTCAP `TN`, so the two cannot disagree.
+    ///
     /// # Errors
     ///
-    // 72.6: 8th parameter is the shell-integration TERM_PROGRAM flag,
-    // derived from the GUI's config and forwarded straight to PtySpawnConfig.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         args: &Args,
         scrollback_limit: Option<usize>,
         initial_size: FreminalTerminalSize,
-        cwd: Option<&Path>,
-        extra_env: Option<&std::collections::HashMap<String, String>>,
-        shell_override: Option<&str>,
         pane_id: u32,
-        set_term_program: bool,
+        spawn_env: PaneSpawnEnv<'_>,
     ) -> Result<(Self, Receiver<PtyRead>), InterfaceError> {
+        let PaneSpawnEnv {
+            cwd,
+            extra_env,
+            shell_override,
+            term_program,
+            sudo_terminfo,
+            term,
+        } = spawn_env;
         // Two channels feed the PTY writer thread (GHSA-6cxq-f7hx-92v2):
         // `write_tx`, unbounded, carries user input; `reply_tx`, bounded,
         // carries terminal-generated replies, so output made of queries cannot
@@ -450,7 +456,9 @@ impl TerminalEmulator {
                 shell,
                 cwd,
                 extra_env,
-                set_term_program,
+                term_program,
+                sudo_terminfo,
+                term,
             },
             &initial_size,
             pane_id,
@@ -471,6 +479,8 @@ impl TerminalEmulator {
         internal.handler.set_control_tx(write_tx.clone());
         internal.handler.set_reply_budget(queued_reply_bytes);
         internal.handler.set_pending_resize(pending_resize);
+        // XTGETTCAP `TN` reports the same `TERM` the child was just given.
+        internal.handler.set_term_name(term.clone());
 
         let ret = Self {
             internal,

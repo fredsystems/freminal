@@ -91,6 +91,11 @@ assets = [
   { source = "assets/icons/hicolor/128x128/apps/freminal.png", dest = "/usr/share/icons/hicolor/128x128/apps/freminal.png", mode = "644" },
   { source = "assets/icons/hicolor/256x256/apps/freminal.png", dest = "/usr/share/icons/hicolor/256x256/apps/freminal.png", mode = "644" },
   { source = "assets/icons/hicolor/512x512/apps/freminal.png", dest = "/usr/share/icons/hicolor/512x512/apps/freminal.png", mode = "644" },
+  # The compiled `xterm-freminal` terminfo entry (Task 151), in the Linux letter
+  # directories only; the hex copies are for Apple's ncurses.  The entry is not
+  # in any distro's ncurses-term, so there is no file conflict.
+  { source = "res/terminfo/x/xterm-freminal", dest = "/usr/share/terminfo/x/xterm-freminal", mode = "644" },
+  { source = "res/terminfo/f/freminal", dest = "/usr/share/terminfo/f/freminal", mode = "644" },
 ]
 # Refresh the freedesktop icon-theme cache and desktop database after the icon
 # and .desktop files land.  Without this, the running window manager (KDE

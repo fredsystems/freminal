@@ -8,3 +8,7 @@
 # line endings or treat them as text.
 fuzz/seeds/** binary
 fuzz/regressions/** binary
+
+# Compiled terminfo entries -- binary, byte-exact.
+res/terminfo/** binary
+res/terminfo.tar binary

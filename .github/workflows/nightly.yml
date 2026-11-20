@@ -287,6 +287,11 @@ jobs:
       - name: Stage .app for signing
         run: |
           cp -R target/release/bundle/osx/Freminal.app ./Freminal.app
+          # cargo-bundle cannot place a resource directory at an arbitrary
+          # path, so the committed terminfo tree is copied in here, before
+          # signing, so that `codesign --deep` seals it.
+          mkdir -p Freminal.app/Contents/Resources
+          cp -R res/terminfo Freminal.app/Contents/Resources/terminfo
 
       - name: Import signing certificate
         if: env.MACOS_CERTIFICATE != ''
@@ -348,6 +353,9 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Attach the terminfo source
+        run: cp res/freminal.ti artifacts/freminal.ti
 
       - name: Create nightly tag
         run: |

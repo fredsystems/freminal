@@ -95,6 +95,17 @@ light_name = "catppuccin-latte"
 # This can be overridden at runtime with the --shell CLI flag.
 # path = "/bin/zsh"
 
+# The TERM value advertised to programs run in a pane. If omitted, the default
+# is "xterm-freminal" (freminal's own terminfo entry); on Windows the default
+# is "xterm-256color".
+# Change it when you ssh to hosts that do not have the xterm-freminal entry
+# (for example `term = "xterm-256color"`).
+# A TERM set in a layout or pane `env` table overrides this value for that pane.
+# The value must be non-empty, at most 128 bytes, and contain no whitespace,
+# control characters or "/". An invalid value is ignored with a warning and the
+# default is used. Changes apply to new panes only.
+# term = "xterm-256color"
+
 ## ##############################################################################
 # LOGGING SETTINGS
 ## ##############################################################################
@@ -378,6 +389,19 @@ limit = 10000
 # No manual sourcing is required.
 # Default: true.
 # set_term_program = true
+
+# When true, the bundled bash/zsh/fish integrations wrap `sudo` so it keeps
+# TERMINFO (`sudo --preserve-env=TERMINFO ...`).  sudo's default env_reset drops
+# TERMINFO, so without this, programs run under sudo cannot find freminal's own
+# terminfo entry (the default TERM, xterm-freminal).  `sudo -e` / `--edit`
+# (sudoedit) is called unchanged.  Behaves like Ghostty's `sudo`
+# shell-integration feature, except that it is ON by default here (it is opt-in
+# in Ghostty).
+# A sudoers policy that forbids preserving the environment makes sudo refuse the
+# command; if yours does, set this to false.  Needs set_term_program = true;
+# applies to panes spawned after the change.
+# Default: true.
+# sudo_preserve_terminfo = true
 
 ## ##############################################################################
 # COMMAND BLOCKS (OSC 133 visualization)

@@ -48,7 +48,10 @@ Open questions (decide at activation):
   `keyring` 4.x decisions captured for AI key storage in `PLAN_VERSION_180.md` may apply
   here too).
 - Whether a `freminal` TERM is introduced at all (today: `TERM=xterm-256color` +
-  XTGETTCAP per Task 12); if not, terminfo propagation is moot.
+  XTGETTCAP per Task 12); if not, terminfo propagation is moot. _Superseded by
+  Task 151 (2026-11-19): freminal defaults to `TERM=xterm-freminal`, so terminfo
+  propagation to remote hosts is a real question for this task; the README
+  documents the manual fallbacks (`infocmp -x xterm-freminal | ssh HOST -- tic -x -`)._
 - Minimum viable first ship vs. full feature set. SSH may itself slip into more than one
   version if scope balloons during design — decompose conservatively at activation.
 

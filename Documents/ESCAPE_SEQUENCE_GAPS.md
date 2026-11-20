@@ -1,12 +1,26 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-11-19 — Task 151 (own `TERM` and terminfo). The "XTGETTCAP
+capability expansion" row in "Priority 2 — Polish" is removed (it was Task 147.22,
+which moved to Task 151.2): `indn`, `rin` <!-- codespell:ignore rin -->
+and `query-os-name` are answered, `Se` is `CSI 0 SP q`, and `TN` is the pane's
+actual `TERM`, which is `xterm-freminal` by default. No new gap is added.
+`kitty-query-os_name` (kitty's own namespace) is deliberately not answered.
+
+Last updated: 2026-11-19 — Task 151.3 (terminfo entry corrections). New row in
+"CSI Gaps": SGR 8 (conceal) is parsed to `Conceal` but `apply_sgr` ignores it, so
+`res/freminal.ti` no longer declares `invis` and the `sgr` string no longer has
+the `%?%p7%t;8%;` part. The entry now matches what freminal implements, and the
+XTGETTCAP `Se` answer is `CSI 0 SP q` (DECSCUSR 0 restores the configured style).
+
 Last updated: 2026-11-19 — Task 140 (underline and SGR parity), closed. The
 "CSI 221 m / CSI 222 m" row in "CSI Gaps" is removed: SGR 221 (bold off only) and
 SGR 222 (faint off only) are implemented, SGR 21 is double underline instead of
 bold-off, `4:N` follows kitty (N above 5 is dashed), underlines are clamped to the
 cell and laid out per cell, and the bundled `xterm-freminal` terminfo entry lists
-`Su` / `Smulx` / `Setulc` (programs get `TERM=xterm-256color`, so what they
-discover at runtime comes from XTGETTCAP). The open "erase format" question is
+`Su` / `Smulx` / `Setulc` (when this was written programs got
+`TERM=xterm-256color` and discovered them through XTGETTCAP; since Task 151 they
+get `TERM=xterm-freminal` by default). The open "erase format" question is
 resolved too: erased cells take only the current background colour. See
 `ESCAPE_SEQUENCE_COVERAGE.md`. Not gaps, but deliberate differences from kitty,
 recorded in `KITTY_PROTOCOL_REFERENCE.md`: an empty `4:;` is a single underline
@@ -361,7 +375,8 @@ remaining gaps are:
 - **DECRQM for ANSI modes:** a query for an unknown ANSI mode is answered in
   the DEC-private form (issue #528); LNM and IRM are correct since Task 130
 - **Rare/low-priority:** SRM and KAM standard modes, ?1034, functional ?1001
-  hilite tracking, DECSCA/selective-erase (no per-cell protected bit);
+  hilite tracking, DECSCA/selective-erase (no per-cell protected bit),
+  SGR 8 conceal (parsed, ignored);
   three narrow xterm divergences in cursor save/restore (DECOM scroll-region
   re-clamp, the pending-wrap flag, resize with the alternate screen active) and
   Sixel placement under DECSDM (see below)
@@ -510,6 +525,7 @@ ignored (warn-logged, no output) until its task lands; none of them misroutes an
 | `CSI < 288 ; x ; y M` (mouse-leave report)                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Not sent on window leave or pane-to-pane transitions under SGR-pixel mouse encoding                                                                                  |
 | `CSI > … SP q` (multiple cursors)                                          | 🟨         | ⬜   | v0.13.2 Task 103 | Missing. Recognised and ignored since 126.3 (before, it triggered an unsolicited XTVERSION reply); Task 128 makes this a routing rule                                |
 | `CSI … $ t` (DECRARA)                                                      | ⬜         | ⬜   | —                | Not implemented and not planned. Recognised and ignored since Task 128 (before, it was handled as a window operation)                                                |
+| `CSI 8 m` (SGR conceal)                                                    | ⬜         | ⬜   | —                | Parsed to `Conceal` and ignored by `apply_sgr`; text stays visible. The terminfo entry does not declare `invis` (Task 151.3)                                         |
 
 ---
 
@@ -610,10 +626,9 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 2 — Polish
 
-| Item                            | Rationale                                                                                                                                                                                  | Planned                 |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
-| XTGETTCAP capability expansion  | Common queries we currently decline: `indn` (scroll forward N lines), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | Task 147.22             |
-| ANSI-mode DECRQM (`CSI Pa $ p`) | Unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps"                                                                                                             | Task 147.1 (issue #528) |
+| Item                            | Rationale                                                                      | Planned                 |
+| ------------------------------- | ------------------------------------------------------------------------------ | ----------------------- |
+| ANSI-mode DECRQM (`CSI Pa $ p`) | Unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps" | Task 147.1 (issue #528) |
 
 ### Priority 3 — Low priority / optional
 

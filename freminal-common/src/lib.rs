@@ -64,6 +64,8 @@ pub mod logging;
 pub mod pty_write;
 /// SGR (Select Graphic Rendition) parameter types.
 pub mod sgr;
+/// The `TERM` value advertised to spawned programs: platform default and validation.
+pub mod term_name;
 /// Terminal window size type.
 pub mod terminal_size;
 /// Embedded terminfo database blob.

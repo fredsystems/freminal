@@ -283,7 +283,7 @@ impl TerminalHandler {
                 continue;
             }
 
-            if let Some(value) = Self::lookup_termcap(&cap_name) {
+            if let Some(value) = Self::lookup_termcap(&cap_name, self.term_name.as_str()) {
                 let hex_value = Self::hex_encode(value);
                 self.write_dcs_response(&format!("1+r{hex_name}={hex_value}"));
             } else {
@@ -349,8 +349,9 @@ impl TerminalHandler {
     /// Look up a termcap/terminfo capability by decoded name.
     ///
     /// Returns `Some(value_str)` for known capabilities, `None` for unknown ones.
-    /// The returned string is the raw value (not yet hex-encoded).
-    fn lookup_termcap(name: &str) -> Option<&'static str> {
+    /// The returned string is the raw value (not yet hex-encoded).  `term` is the
+    /// pane's `TERM`, the only capability that is not a constant (`TN`).
+    fn lookup_termcap<'a>(name: &str, term: &'a str) -> Option<&'a str> {
         match name {
             // RGB — terminal supports direct-color (24-bit) via SGR 38/48;2;R;G;B
             "RGB" => Some("8/8/8"),
@@ -366,20 +367,17 @@ impl TerminalHandler {
             "setrgbb" => Some("\x1b[48;2;%p1%d;%p2%d;%p3%dm"),
             // colors — number of colors supported
             "colors" | "Co" => Some("256"),
-            // TN — terminal name.  This MUST match the runtime `TERM` value
-            // (`xterm-256color`, set in `io::pty::run_terminal`), since TN is
-            // defined as "the value of $TERM".  Freminal deliberately presents
-            // as `xterm-256color` for maximum compatibility (the Task-12
-            // strategy mirroring WezTerm/Alacritty); the freminal identity is
-            // advertised separately via `TERM_PROGRAM=freminal` (Task 72.6)
-            // and the XTVERSION `>|XTerm(Freminal ...)` payload.  Do not change
-            // TN to `freminal` — it would desync from TERM and break terminfo
-            // lookups.
-            "TN" => Some("xterm-256color"),
+            // TN — terminal name: the value of $TERM.  It is the `TERM` the pane's child
+            // was actually given (`TermName::resolve`, computed once at spawn), never a
+            // constant, so the two cannot desync.  The freminal identity is advertised
+            // separately via `TERM_PROGRAM=freminal` (Task 72.6) and the XTVERSION
+            // `>|XTerm(Freminal ...)` payload.
+            "TN" => Some(term),
             // Ms — set selection (clipboard) via OSC 52
             "Ms" => Some("\x1b]52;%p1%s;%p2%s\x1b\\"),
-            // Se — reset cursor to default style (DECSCUSR 0)
-            "Se" => Some("\x1b[2 q"),
+            // Se — reset cursor to default style (DECSCUSR 0, which restores the
+            // configured style rather than a steady block)
+            "Se" => Some("\x1b[0 q"),
             // Ss — set cursor style (DECSCUSR)
             "Ss" => Some("\x1b[%p1%d q"),
             // Smulx — extended underline (SGR 4:N for curly, dotted, etc.)
@@ -399,19 +397,48 @@ impl TerminalHandler {
             "smkx" => Some("\x1b[?1h\x1b="),
             // rmkx — exit keypad transmit mode (back to numeric)
             "rmkx" => Some("\x1b[?1l\x1b>"),
+            // indn / SF — scroll forward N lines (SU); respects the scroll region
+            "indn" | "SF" => Some("\x1b[%p1%dS"),
+            // rin / SR — scroll reverse N lines (SD); respects the scroll region // codespell:ignore rin
+            "rin" | "SR" => Some("\x1b[%p1%dT"), // codespell:ignore rin
+            // query-os-name — `uname -s` of the host, as answered by kitty and foot.
+            // Not a terminfo capability. `kitty-query-os_name` is kitty's own
+            // namespace and is deliberately not answered.
+            "query-os-name" | "query-os_name" => Some(os_name_for_target(std::env::consts::OS)),
             _ => None,
         }
     }
 }
+
+/// Map a Rust `target_os` name (as in `std::env::consts::OS`) to the
+/// `uname -s` name reported for `query-os-name`.
+fn os_name_for_target(target_os: &str) -> &'static str {
+    match target_os {
+        "linux" => "Linux",
+        "macos" => "Darwin",
+        "freebsd" => "FreeBSD",
+        "openbsd" => "OpenBSD",
+        "netbsd" => "NetBSD",
+        "dragonfly" => "DragonFly",
+        "windows" => "Windows",
+        _ => "Unknown",
+    }
+}
+
+// A child module of `dcs`, so it can reach the private `lookup_termcap` it checks.
+#[cfg(test)]
+mod terminfo_truth_tests;
 
 #[cfg(test)]
 mod tests {
     use freminal_common::{
         buffer_states::{modes::s8c1t::S8c1t, terminal_output::TerminalOutput},
         colors::TerminalColor,
+        config::ShellConfig,
         cursor::CursorVisualStyle,
         pty_write::PtyWrite,
         sgr::SelectGraphicRendition,
+        term_name::{TermName, TermPlatform},
     };
 
     use super::TerminalHandler;
@@ -895,9 +922,11 @@ mod tests {
         assert_eq!(response, "\x1bP1+r636F6C6F7273=323536\x1b\\");
     }
 
-    #[test]
-    fn xtgettcap_known_capability_tn() {
+    /// Answer a `TN` query on a handler whose child was given `term`, and
+    /// return the decoded `TN` value.
+    fn tn_reply_for(term: &TermName) -> String {
         let mut handler = TerminalHandler::new(80, 24);
+        handler.set_term_name(term.clone());
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
 
@@ -906,13 +935,72 @@ mod tests {
         handler.handle_device_control_string(&dcs);
 
         let response = recv_pty_response(&rx);
-        // Regression guard (Task 76.6): TN must report `xterm-256color`, the
-        // same value as the runtime `TERM` env var.  TN is "the value of
-        // $TERM"; reporting `freminal` would desync from TERM and break
-        // terminfo lookups.  Freminal advertises its identity via
-        // TERM_PROGRAM and XTVERSION instead.
-        let expected_hex = TerminalHandler::hex_encode("xterm-256color");
+        let Some(hex_value) = response
+            .strip_prefix("\x1bP1+r544E=")
+            .and_then(|r| r.strip_suffix("\x1b\\"))
+        else {
+            panic!("unexpected TN reply: {response:?}");
+        };
+        TerminalHandler::hex_decode(hex_value).unwrap_or_else(|| panic!("TN value is not hex"))
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_tn() {
+        // Regression guard (Task 76.6, reworked by Task 151.6): TN is "the value
+        // of $TERM", so it must equal the `TERM` the pane's child was given.  A
+        // freshly constructed handler holds the platform default.
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let dcs = build_dcs_payload(b"+q544E");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_hex = TerminalHandler::hex_encode(TermName::default().as_str());
         assert_eq!(response, format!("\x1bP1+r544E={expected_hex}\x1b\\"));
+    }
+
+    #[test]
+    fn xtgettcap_tn_default_is_xterm_freminal_off_windows() {
+        let term = TermName::platform_default(TermPlatform::Other);
+        assert_eq!(tn_reply_for(&term), "xterm-freminal");
+    }
+
+    #[test]
+    fn xtgettcap_tn_equals_the_resolved_term_in_every_precedence_case() {
+        let env =
+            std::collections::HashMap::from([("TERM".to_owned(), "screen-256color".to_owned())]);
+        let configured = ShellConfig {
+            term: Some("xterm-256color".to_owned()),
+            ..ShellConfig::default()
+        };
+        let cases = [
+            (ShellConfig::default(), None, "xterm-freminal"),
+            (configured.clone(), None, "xterm-256color"),
+            (configured, Some(&env), "screen-256color"),
+            (ShellConfig::default(), Some(&env), "screen-256color"),
+        ];
+        for (shell, pane_env, expected) in cases {
+            let term = TermName::resolve(&shell, TermPlatform::Other, pane_env);
+            assert_eq!(term.as_str(), expected);
+            assert_eq!(tn_reply_for(&term), expected);
+        }
+    }
+
+    #[test]
+    fn xtgettcap_tn_survives_a_full_reset() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_term_name(TermName::resolve(
+            &ShellConfig {
+                term: Some("xterm-256color".to_owned()),
+                ..ShellConfig::default()
+            },
+            TermPlatform::Other,
+            None,
+        ));
+        handler.full_reset();
+        assert_eq!(handler.term_name().as_str(), "xterm-256color");
     }
 
     #[test]
@@ -945,7 +1033,7 @@ mod tests {
         assert_eq!(response1, "\x1bP1+r524742=382F382F38\x1b\\");
 
         let response2 = recv_pty_response(&rx);
-        let tn_hex = TerminalHandler::hex_encode("xterm-256color");
+        let tn_hex = TerminalHandler::hex_encode(TermName::default().as_str());
         assert_eq!(response2, format!("\x1bP1+r544E={tn_hex}\x1b\\"));
     }
 
@@ -1032,8 +1120,8 @@ mod tests {
         handler.handle_device_control_string(&dcs);
 
         let response = recv_pty_response(&rx);
-        // "\x1b[2 q" → hex "1B5B322071"
-        let expected_hex = TerminalHandler::hex_encode("\x1b[2 q");
+        // "\x1b[0 q" → hex "1B5B302071"
+        let expected_hex = TerminalHandler::hex_encode("\x1b[0 q");
         assert_eq!(response, format!("\x1bP1+r5365={expected_hex}\x1b\\"));
     }
 
@@ -1204,50 +1292,101 @@ mod tests {
         );
     }
 
-    /// Extract a string capability from the `xterm-freminal` entry in
-    /// `res/freminal.ti`, undoing the terminfo source escapes `\E` and `\:`.
-    fn terminfo_source_string(entry: &str, name: &str) -> Option<String> {
-        let start = entry.find(&format!(" {name}="))? + name.len() + 2;
-        let mut out = String::new();
-        let mut chars = entry[start..].chars();
-        while let Some(c) = chars.next() {
-            match c {
-                ',' => break,
-                '\\' => match chars.next()? {
-                    'E' => out.push('\x1b'),
-                    other => out.push(other),
-                },
-                other => out.push(other),
-            }
-        }
-        Some(out)
+    /// Send one XTGETTCAP request for `names` and return every reply.
+    fn xtgettcap_replies(names: &[&str]) -> Vec<String> {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_names = names
+            .iter()
+            .map(|n| TerminalHandler::hex_encode(n))
+            .collect::<Vec<_>>()
+            .join(";");
+        let dcs = build_dcs_payload(format!("+q{hex_names}").as_bytes());
+        handler.handle_device_control_string(&dcs);
+
+        names.iter().map(|_| recv_pty_response(&rx)).collect()
+    }
+
+    fn expected_reply(name: &str, value: &str) -> String {
+        format!(
+            "\x1bP1+r{}={}\x1b\\",
+            TerminalHandler::hex_encode(name),
+            TerminalHandler::hex_encode(value)
+        )
     }
 
     #[test]
-    fn terminfo_source_advertises_styled_underline_caps_matching_xtgettcap() {
-        let source = include_str!("../../../res/freminal.ti");
-        let entry = source
-            .lines()
-            .skip_while(|l| !l.starts_with("xterm-freminal|"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!entry.is_empty(), "xterm-freminal entry not found");
-
-        let without_escaped_commas = entry.replace("\\,", "");
-        assert!(
-            without_escaped_commas.split(',').any(|t| t.trim() == "Su"),
-            "boolean Su missing from terminfo"
-        );
-        assert_eq!(TerminalHandler::lookup_termcap("Su"), Some(""));
-
-        for name in ["Smulx", "Setulc"] {
-            let from_source = terminfo_source_string(&entry, name);
-            assert!(from_source.is_some(), "{name} missing from terminfo");
+    fn xtgettcap_scroll_capabilities_and_aliases() {
+        for (name, value) in [
+            ("indn", "\x1b[%p1%dS"),
+            ("SF", "\x1b[%p1%dS"),
+            ("rin", "\x1b[%p1%dT"), // codespell:ignore rin
+            ("SR", "\x1b[%p1%dT"),
+        ] {
             assert_eq!(
-                from_source.as_deref(),
-                TerminalHandler::lookup_termcap(name),
-                "{name} in res/freminal.ti disagrees with XTGETTCAP"
+                xtgettcap_replies(&[name]),
+                vec![expected_reply(name, value)],
+                "{name}"
             );
+        }
+        assert_eq!(
+            xtgettcap_replies(&["indn"]),
+            vec!["\x1bP1+r696E646E=1B5B257031256453\x1b\\".to_string()]
+        );
+    }
+
+    #[test]
+    fn xtgettcap_query_os_name_and_alias() {
+        let os = super::os_name_for_target(std::env::consts::OS);
+        for name in ["query-os-name", "query-os_name"] {
+            assert_eq!(
+                xtgettcap_replies(&[name]),
+                vec![expected_reply(name, os)],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn xtgettcap_does_not_answer_kitty_query_os_name() {
+        let name = "kitty-query-os_name";
+        let hex_name = TerminalHandler::hex_encode(name);
+        assert_eq!(
+            xtgettcap_replies(&[name]),
+            vec![format!("\x1bP0+r{hex_name}\x1b\\")]
+        );
+    }
+
+    #[test]
+    fn xtgettcap_mixed_request_with_os_name_and_scroll_caps() {
+        let os = super::os_name_for_target(std::env::consts::OS);
+        assert_eq!(
+            xtgettcap_replies(&["query-os-name", "indn", "nosuchcap", "SR"]),
+            vec![
+                expected_reply("query-os-name", os),
+                expected_reply("indn", "\x1b[%p1%dS"),
+                format!("\x1bP0+r{}\x1b\\", TerminalHandler::hex_encode("nosuchcap")),
+                expected_reply("SR", "\x1b[%p1%dT"),
+            ]
+        );
+    }
+
+    #[test]
+    fn os_name_for_target_maps_uname_names() {
+        for (target, expected) in [
+            ("linux", "Linux"),
+            ("macos", "Darwin"),
+            ("freebsd", "FreeBSD"),
+            ("openbsd", "OpenBSD"),
+            ("netbsd", "NetBSD"),
+            ("windows", "Windows"),
+            ("dragonfly", "DragonFly"),
+            ("illumos", "Unknown"),
+            ("", "Unknown"),
+        ] {
+            assert_eq!(super::os_name_for_target(target), expected, "{target}");
         }
     }
 

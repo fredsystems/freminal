@@ -11,6 +11,7 @@ use egui_glow::CallbackFn;
 use freminal_common::config::{CommandBlocksConfig, ThemeMode};
 use freminal_common::geometry::Rect;
 use freminal_common::send_or_log;
+use freminal_common::term_name::{TermName, TermPlatform};
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::{GlContextState, WindowId};
 use tracing::{debug, error, trace, warn};
@@ -844,9 +845,15 @@ impl freminal_windowing::App for FreminalGui {
                     cwd: None,
                     shell_override: None,
                     extra_env: None,
+                    term: TermName::resolve(&self.config.shell, TermPlatform::current(), None),
                     recording_swap: self.recording_swap.clone(),
                     recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
-                    set_term_program: self.config.shell_integration.set_term_program,
+                    term_program: super::pty::term_program_from_config(
+                        &self.config.shell_integration,
+                    ),
+                    sudo_terminfo: super::pty::sudo_terminfo_from_config(
+                        &self.config.shell_integration,
+                    ),
                 },
             ) {
                 Ok(channels) => {
@@ -4595,9 +4602,13 @@ impl FreminalGui {
                 cwd: None,
                 shell_override: None,
                 extra_env: None,
+                term: TermName::resolve(&self.config.shell, TermPlatform::current(), None),
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
-                set_term_program: self.config.shell_integration.set_term_program,
+                term_program: super::pty::term_program_from_config(&self.config.shell_integration),
+                sudo_terminfo: super::pty::sudo_terminfo_from_config(
+                    &self.config.shell_integration,
+                ),
             },
         ) {
             Ok(channels) => channels,
