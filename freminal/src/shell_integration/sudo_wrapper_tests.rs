@@ -210,6 +210,14 @@ fn zsh_scan_is_independent_of_ksh_arrays() {
         preserved("[--us] [root] [ls]")
     );
     assert_eq!(ksh(&["ls"]), preserved("[ls]"));
+    assert_eq!(
+        ksh(&["-h", "localhost", "-e", "f"]),
+        "[-h] [localhost] [-e] [f]"
+    );
+    assert_eq!(
+        ksh(&["-kh", "host", "-e", "f"]),
+        preserved("[-kh] [host] [-e] [f]")
+    );
 }
 
 /// `sudo <args>` with the whole-argv expectation: the flag is added, or not.
@@ -229,7 +237,7 @@ fn expect_argv(shell: TestShell, args: &[&str], flag_added: bool) {
 
 #[test]
 fn commands_get_preserve_env() {
-    let cases: [&[&str]; 20] = [
+    let cases: [&[&str]; 23] = [
         &["ls"],
         &["ls", "-l", "/tmp"],
         &["-u", "root", "ls"],
@@ -259,6 +267,12 @@ fn commands_get_preserve_env() {
         &["--preserve-env=X", "ls"],
         // `-a` requires a value, which is not mistaken for the command.
         &["-a", "x", "ls"],
+        // A standalone `-h` takes the next word as the host, so `ls` is not a
+        // command here and no edit follows; an assignment is not a host.
+        &["-h", "ls"],
+        &["-h", "VAR=1", "ls"],
+        // Grouped `-kh` takes no detached host: `host` is the command.
+        &["-kh", "host", "-e", "f"],
     ];
     for_each_shell(|shell| {
         for args in cases {
@@ -269,7 +283,7 @@ fn commands_get_preserve_env() {
 
 #[test]
 fn edit_invocations_are_left_unchanged() {
-    let cases: [&[&str]; 22] = [
+    let cases: [&[&str]; 25] = [
         &["-e", "f"],
         &["--edit", "f"],
         &["-u", "root", "-e", "f"],
@@ -290,6 +304,10 @@ fn edit_invocations_are_left_unchanged() {
         &["--login-c", "c", "-e", "f"],
         // Value-required options consume the next word, `h` does not.
         &["-h", "-e", "f"],
+        &["-h", "localhost", "-e", "f"],
+        &["-hfoo", "-e", "f"],
+        // A word with `=` that starts with `/` is a host, not an assignment.
+        &["-h", "/a=b", "-e", "f"],
         &["-a", "x", "-e", "f"],
         &["-c", "cls", "-e", "f"],
         &["--auth-type", "x", "-e", "f"],

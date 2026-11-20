@@ -130,6 +130,18 @@ if [[ ",${FREMINAL_SHELL_FEATURES:-}," == *",sudo,"* && -n "${TERMINFO:-}" ]]; t
 				takes_value="no"
 				continue
 			fi
+			if [[ "$takes_value" == "host" ]]; then
+				# After a standalone `-h`: the next word is the host unless it is an
+				# option or a NAME=value assignment (a path-like word is a host).
+				# `[=]*` rather than `=*`, which zsh would try to expand as `=command`.
+				takes_value="no"
+				case "$word" in
+				-*) ;;
+				/* | [=]*) continue ;;
+				*=*) ;;
+				*) continue ;;
+				esac
+			fi
 			case "$word" in
 			--)
 				return 1
@@ -167,7 +179,11 @@ if [[ ",${FREMINAL_SHELL_FEATURES:-}," == *",sudo,"* && -n "${TERMINFO:-}" ]]; t
 						break
 						;;
 					h)
-						# An optional value: only the rest of this word.
+						# An optional value: the rest of this word; a standalone `-h`
+						# also takes the next word as the host (see above).
+						if [[ "$word" == "-h" ]]; then
+							takes_value="host"
+						fi
 						break
 						;;
 					esac

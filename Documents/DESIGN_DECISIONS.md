@@ -1468,7 +1468,8 @@ Installed copies:
   version copied third-party GPL code and was replaced). An argument scan decides whether the
   call is an edit: it reads the arguments left to right up to the command word, skips option
   operands (`-u root`, `--user root`, `--user=root`, a value letter ending a grouped `-ku`
-  word, or taking the rest of its word as in `-uroot`) and `NAME=value` words, stops at `--`,
+  word, or taking the rest of its word as in `-uroot`; a standalone `-h` also takes the next
+  word as the host unless it starts with `-` or is a `NAME=value` assignment) and `NAME=value` words, stops at `--`,
   and treats `e` / `--edit` as an edit, so `sudo -u root -e file` is recognised as an edit and
   left unchanged. The feature is on by default whenever shell integration is active; a
   sudoers policy that forbids preserving the environment makes `sudo` refuse the command, and

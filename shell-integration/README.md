@@ -85,8 +85,10 @@ Freminal's own implementation, and Freminal turns it on by default.
   value letter of a grouped word such as `-ku root`) skip that value, while
   `--user=root` and `-uroot` carry it in the same word; `NAME=value` words are
   skipped. Long options may be abbreviated to a unique prefix, as sudo allows
-  (`--ed` is `--edit`, `--us root` is `--user root`). `-h` takes only a value
-  attached to its own word. If `-e` or `--edit` turns up before the command,
+  (`--ed` is `--edit`, `--us root` is `--user root`). `-h` takes a value
+  attached to its own word, and a standalone `-h` also takes the next word as
+  the host unless that word starts with `-` or is a `NAME=value` assignment
+  (so `sudo -h localhost -e file` is an edit). If `-e` or `--edit` turns up before the command,
   the call is an edit.
   So `sudo -u root -e file` and `sudo -ke file` are edits, while
   `sudo -ue root file` (a user named `e`) and `sudo cmd -e` are not.

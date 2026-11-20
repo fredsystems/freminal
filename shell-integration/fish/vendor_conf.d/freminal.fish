@@ -120,7 +120,20 @@ if __freminal_should_init
                     set takes_value no
                     continue
                 end
-                switch $word
+                if test $takes_value = host
+                    # After a standalone `-h`: the next word is the host unless it is an
+                    # option or a NAME=value assignment (a path-like word is a host).
+                    set takes_value no
+                    switch "$word"
+                        case '-*'
+                        case '/*' '=*'
+                            continue
+                        case '*=*'
+                        case '*'
+                            continue
+                    end
+                end
+                switch "$word"
                     case --
                         return 1
                     case '--*'
@@ -152,7 +165,11 @@ if __freminal_should_init
                                     end
                                     break
                                 case h
-                                    # An optional value: only the rest of this word.
+                                    # An optional value: the rest of this word; a standalone `-h`
+                                    # also takes the next word as the host (see above).
+                                    if test "$word" = -h
+                                        set takes_value host
+                                    end
                                     break
                             end
                         end

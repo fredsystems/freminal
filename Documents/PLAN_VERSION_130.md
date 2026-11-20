@@ -11921,6 +11921,12 @@ edit; `-h VAR=1 ls` and `-h ls` get the flag (`ls` is the host there, so no comm
 before the end: not an edit); `-kh host -e f` gets the flag (grouped: no lookahead, `host` is
 the command); `-hfoo -e f` stays an edit; `-h /a=b -e f` is an edit (`/a=b` is a host).
 
+- **Status: done (2026-11-20).** The scanners carry a one-word "host" state after an exact
+  `-h`; a following word that is neither an option nor an assignment is consumed. Found while
+  testing: zsh expands an unquoted `=*` `case` pattern as `=command`, so bash and zsh use
+  `[=]*`; fish's `switch` now quotes its word. Six new cross-shell cases plus two in the zsh
+  `KSH_ARRAYS` run. Clean-room attested.
+
 #### 151 Status notes
 
 - **151.1 (done).** See "151 Audit".
