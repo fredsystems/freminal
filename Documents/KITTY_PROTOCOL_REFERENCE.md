@@ -1106,7 +1106,7 @@ freminal's own earlier documentation wrongly called them BCE-aware.
   the per-style helpers `push_double_underline`, `push_curly_underline`,
   `push_dotted_underline` and `push_dashed_underline`.
 - **Terminfo** (`res/freminal.ti`, `res/terminfo.tar`,
-  `freminal-terminal-emulator/build.rs`): `build.rs` passes `-x` to `tic`, because
+  `freminal-terminal-emulator/build.rs`): `cargo xtask terminfo` passes `-x` to `tic`, because
   without it the user-defined capabilities `Su`, `Smulx` and `Setulc` are dropped
   with only a warning and never reach the compiled entry. `lookup_termcap`
   (`freminal-terminal-emulator/src/terminal_handler/dcs.rs`) is the XTGETTCAP side.

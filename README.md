@@ -148,7 +148,7 @@ Freminal embeds the entry and makes it available to every pane, so it works loca
 
 Programs may also complain that the terminal is unknown or fall back to a dumb terminal. Install the entry on that host with whichever of these suits you.
 
-From inside a Freminal pane (the entry is available there in every build):
+From inside a Freminal pane on Linux, macOS or BSD (Freminal provides the entry there; on Windows it does not, so use the source-file command below):
 
 ```bash
 infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -

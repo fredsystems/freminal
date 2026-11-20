@@ -1400,9 +1400,12 @@ have `xterm-freminal`. `TERM` is still set, and `[shell] term` is honoured on ev
 
 The entry is shipped in two directory layouts: the letter layout (`x/xterm-freminal`,
 `f/freminal`) that most ncurses uses, and the hex layout (`78/…`, `66/…`) that Apple's ncurses
-uses. The compiled tree is committed under `res/terminfo/` and `build.rs` keeps it, and the
-embedded `res/terminfo.tar`, in step with `res/freminal.ti`. Packaging copies the committed
-files, so no package build needs `tic`.
+uses. The compiled tree is committed under `res/terminfo/`, together with the embedded
+`res/terminfo.tar`, and `cargo xtask terminfo` regenerates both from `res/freminal.ti`.
+`build.rs` does not write them: a build script may write only to `OUT_DIR`, and a build that
+rewrote the tree could embed a tar that lags the tree. The stdin-compile test in
+`terminfo_tree.rs` fails when `res/freminal.ti` changes without a regeneration. Packaging
+copies the committed files, so no package build needs `tic`.
 
 The child's `TERMINFO` is `<dir>`, where `<dir>` is, in order of preference:
 

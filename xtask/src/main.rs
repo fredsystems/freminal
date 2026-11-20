@@ -13,6 +13,7 @@
 //! acceptable here.
 
 mod fuzz;
+mod terminfo;
 
 use std::{fmt::Debug, fs, io, process::Output, vec};
 
@@ -197,6 +198,14 @@ enum Command {
         formats: Vec<LocalPackageFormat>,
     },
 
+    /// Regenerate the committed terminfo tree and archive from `res/freminal.ti`
+    ///
+    /// Runs `tic -x` and writes `res/terminfo/{x,f,78,66}/...` and
+    /// `res/terminfo.tar`, rewriting only files whose bytes change. Run it
+    /// after editing `res/freminal.ti`; `build.rs` no longer does this.
+    #[command(visible_alias = "ti")]
+    Terminfo,
+
     /// List the cargo-fuzz targets of the `fuzz/` crate
     ///
     /// Read from `fuzz/Cargo.toml`; works on stable (no fuzz shell needed).
@@ -317,6 +326,7 @@ impl Command {
             Self::Precommit => precommit(),
             Self::BumpVersion { version } => bump_version(&version),
             Self::PackageLocal { formats } => package_local(&formats),
+            Self::Terminfo => terminfo::terminfo(),
             Self::FuzzList => fuzz::fuzz_list(),
             Self::Fuzz(args) => fuzz::fuzz(&args),
             Self::FuzzSmoke(args) => fuzz::fuzz_smoke(&args),

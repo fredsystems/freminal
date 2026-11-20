@@ -6,8 +6,8 @@
 //! The embedded terminfo archive and the committed compiled tree (`res/terminfo/`)
 //! must agree, and must carry the entry in both the letter and the hex layout.
 //!
-//! `build.rs` writes the tree from `tic -x` and packs the tar from it; these tests
-//! pin the result, including that extraction (as the per-PTY extraction does) yields
+//! `cargo xtask terminfo` writes the tree from `tic -x` and packs the tar from it; these
+//! tests pin the result, including that extraction (as the per-PTY extraction does) yields
 //! a usable tree.
 
 #![allow(clippy::expect_used)]
@@ -164,7 +164,8 @@ fn source_compiles_from_stdin_to_the_committed_entry() {
         .expect("tic wrote the entry in the letter or the hex layout");
     assert!(
         compiled == committed,
-        "stdin compile differs from res/terminfo/x/xterm-freminal"
+        "stdin compile differs from res/terminfo/x/xterm-freminal: res/freminal.ti changed \
+         without regenerating the committed tree; run `cargo xtask terminfo`"
     );
 }
 

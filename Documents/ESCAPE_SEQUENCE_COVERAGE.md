@@ -29,7 +29,7 @@ default attributes (deliberate, kitty parity, keeps scrollback rows sparse), so
 they were never BCE-aware. Underline rendering is clamped to the cell box, and
 dotted, dashed and curly are laid out per cell on the cell grid. The bundled
 `res/freminal.ti` `xterm-freminal` entry now lists `Su`, `Smulx` and `Setulc`
-with XTGETTCAP's strings (and `build.rs` passes `-x` to `tic` so the extended
+with XTGETTCAP's strings (and `cargo xtask terminfo` passes `-x` to `tic` so the extended
 capabilities reach `res/terminfo.tar`); when this was written child processes got
 `TERM=xterm-256color` and discovered the capabilities through XTGETTCAP, and since
 Task 151 they get `TERM=xterm-freminal` by default. Review fixes: plain

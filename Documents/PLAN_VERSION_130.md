@@ -11855,6 +11855,14 @@ freminal bundles the entry, not on Windows; Windows users use the source-file co
 `DESIGN_DECISIONS.md` and `agents.md`'s xtask list (the new subcommand), and the `res/freminal.ti`
 header (how to regenerate).
 
+- **Status: done (2026-11-20).** `build.rs` keeps only the version logic and writes nothing
+  outside `OUT_DIR`; `cargo xtask terminfo` (alias `ti`, `xtask/src/terminfo.rs`) holds the
+  unchanged generation and fails clearly without `tic`. The stdin-compile test names the
+  xtask on failure. `terminfo_child.rs` accepts `x/` or `78/` in the setup and the child
+  probe. The README limits the in-pane command to Linux, macOS and BSD. Two stale "`build.rs`
+  passes `-x`" mentions (COVERAGE, kitty reference) were updated. A clean build and a
+  `cargo xtask terminfo` run both leave `res/` unchanged.
+
 #### 151 Status notes
 
 - **151.1 (done).** See "151 Audit".

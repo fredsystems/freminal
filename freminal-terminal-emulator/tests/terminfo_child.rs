@@ -63,7 +63,7 @@ fi
 echo "TERM=<$TERM>"
 echo "TERMINFO=<$TERMINFO>"
 echo "STALE_COLORS=<$(env -u TERMINFO tput -T xterm-freminal colors 2>&1)>"
-if ls "$TERMINFO/x/xterm-freminal" >/dev/null 2>&1; then
+if ls "$TERMINFO/x/xterm-freminal" >/dev/null 2>&1 || ls "$TERMINFO/78/xterm-freminal" >/dev/null 2>&1; then
     echo "PANE_DIR_HAS_ENTRY"
 else
     echo "PANE_DIR_MISSING_ENTRY"
@@ -131,9 +131,12 @@ fn install_stale_entry(home: &Path) -> bool {
         "tic rejected the stale entry: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Apple's ncurses `tic` writes the hex layout (`78/`), most others the letter layout.
     assert!(
-        home.join(".terminfo/x/xterm-freminal").is_file(),
-        "tic did not write x/xterm-freminal under the temp HOME"
+        [".terminfo/x/xterm-freminal", ".terminfo/78/xterm-freminal"]
+            .iter()
+            .any(|rel| home.join(rel).is_file()),
+        "tic did not write x/xterm-freminal or 78/xterm-freminal under the temp HOME"
     );
     true
 }
@@ -245,7 +248,7 @@ fn a_real_child_resolves_xterm_freminal() {
     );
     assert!(
         output.contains("PANE_DIR_HAS_ENTRY"),
-        "the directory $TERMINFO names must hold x/xterm-freminal (checked in the child, \
+        "the directory $TERMINFO names must hold x/xterm-freminal or 78/xterm-freminal (checked in the child, \
          because the pane directory is gone once the PTY drops); full child output:\n{output}"
     );
     assert!(

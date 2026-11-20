@@ -1,6 +1,7 @@
-#       Source of truth for freminal's terminfo entry.  freminal-terminal-emulator/build.rs
+#       Source of truth for freminal's terminfo entry.  `cargo xtask terminfo`
 #       compiles this file with `tic -x` into res/terminfo/ (letter and hex
-#       layouts) and packs that tree into res/terminfo.tar.  Capabilities are
+#       layouts) and packs that tree into res/terminfo.tar.  Run it after every
+#       edit to this file; building does not regenerate them.  Capabilities are
 #       declared only where freminal implements them, with two standard key
 #       capabilities as the exception: `kcbt` and `kent` are declared but not
 #       sent by the input encoder (see DECLARED_NOT_SENT in

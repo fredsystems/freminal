@@ -12,10 +12,12 @@
 //! entry are byte-identical.
 //!
 //! The archive is packed from the committed tree `res/terminfo/`, and both are regenerated
-//! automatically by `freminal-terminal-emulator/build.rs` whenever `res/freminal.ti` changes: the
-//! build script runs `tic -x`, writes the four files, and packs the tar.  Both are committed to
-//! source control so that builds without `tic` (e.g. Windows CI, minimal containers) still work
-//! and so that packaging (the macOS bundle, the rpm) can copy the tree without running `tic`.
+//! from `res/freminal.ti` by `cargo xtask terminfo`, which runs `tic -x`, writes the four files,
+//! and packs the tar.  Run it after editing `res/freminal.ti`; building does not do it, and the
+//! `source_compiles_from_stdin_to_the_committed_entry` test fails when the tree is stale.  Both
+//! are committed to source control so that builds without `tic` (e.g. Windows CI, minimal
+//! containers) still work and so that packaging (the macOS bundle, the rpm) can copy the tree
+//! without running `tic`.
 
 /// The compiled terminfo archive, extracted per PTY into a temporary terminfo directory.
 pub const TERMINFO: &[u8] = include_bytes!("../../res/terminfo.tar");
