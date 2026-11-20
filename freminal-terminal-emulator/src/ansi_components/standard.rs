@@ -9,6 +9,13 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use crate::ansi::ParserOutcome;
 use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
+/// How many intermediate bytes a [`StandardParser`] keeps. The intermediates
+/// are read for dispatch (the first) and the debug log, so a designator's run
+/// of extra ones (`ESC ( % % % ...`) is swallowed past this count without
+/// being stored: the sequence ends only at its final, so the run is otherwise
+/// unbounded.
+const MAX_STORED_INTERMEDIATES: usize = 8;
+
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) enum StandardParserState {
     Params,
@@ -100,11 +107,16 @@ impl StandardParser {
                 }
 
                 // A designator takes further intermediates (0x20-0x2F) before
-                // its final, as in `ESC ( % 5` or `ESC ( " 4`. None is a set
-                // freminal implements, so the whole sequence is ignored (xterm
-                // `CASE_ESC_IGNORE`: swallowed up to its final byte).
+                // its final, as in `ESC ( % 5` or `ESC ( " 4`. xterm acts on
+                // these multi-byte designators (`CASE_SCS_PERCENT`,
+                // `CASE_SCS_DQUOTE`, `CASE_SCS_AMPRSND`: DEC Supplemental
+                // Graphics, Hebrew, Cyrillic, ...), but freminal has none of
+                // those sets: it deliberately recognises and ignores the whole
+                // sequence up to its final byte, leaving the slot unchanged.
                 if self.is_designator() && (0x20..=0x2f).contains(&b) {
-                    self.intermediates.push(b);
+                    if self.intermediates.len() < MAX_STORED_INTERMEDIATES {
+                        self.intermediates.push(b);
+                    }
 
                     return ParserOutcome::Continue;
                 }
@@ -373,7 +385,7 @@ pub const fn is_standard_param(b: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::StandardParser;
+    use super::{MAX_STORED_INTERMEDIATES, StandardParser};
     use crate::ansi::ParserOutcome;
     use freminal_common::buffer_states::charset::{CharacterSet, CharsetSlot};
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -633,6 +645,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_long_run_of_designator_intermediates_is_not_stored() {
+        const RUN: usize = 1024 * 1024;
+
+        let mut parser = StandardParser::new();
+        let mut output = Vec::new();
+        assert!(matches!(
+            parser.standard_parser_inner(b'(', &mut output),
+            ParserOutcome::Continue
+        ));
+        for _ in 0..RUN {
+            assert!(matches!(
+                parser.standard_parser_inner(b'%', &mut output),
+                ParserOutcome::Continue
+            ));
+        }
+        assert_eq!(parser.intermediates.len(), MAX_STORED_INTERMEDIATES);
+        assert!(parser.intermediates.capacity() < 1024);
+
+        // The final still ends the sequence, which is ignored as a whole.
+        assert!(matches!(
+            parser.standard_parser_inner(b'B', &mut output),
+            ParserOutcome::Finished
+        ));
+        assert_eq!(output, Vec::<TerminalOutput>::new());
     }
 
     #[test]

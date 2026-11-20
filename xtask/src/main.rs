@@ -1309,9 +1309,49 @@ impl ExpressionExt for duct::Expression {
 
 #[cfg(test)]
 mod tests {
-    use super::{rpm_version, rustdoc_flags_denying_warnings, Args, Command};
+    use super::{
+        gl_pixel_only_clippy_args, rpm_version, rustdoc_flags_denying_warnings, Args, Command,
+    };
     use crate::fuzz::{CrashPolicy, Sandbox};
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn gl_pixel_only_clippy_args_without_a_target() {
+        assert_eq!(
+            gl_pixel_only_clippy_args(None),
+            [
+                "clippy",
+                "-p",
+                "freminal",
+                "--features",
+                "gl-pixel",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings"
+            ]
+        );
+    }
+
+    #[test]
+    fn gl_pixel_only_clippy_args_with_a_target() {
+        assert_eq!(
+            gl_pixel_only_clippy_args(Some("x86_64-pc-windows-gnu")),
+            [
+                "clippy",
+                "-p",
+                "freminal",
+                "--features",
+                "gl-pixel",
+                "--target",
+                "x86_64-pc-windows-gnu",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings"
+            ]
+        );
+    }
 
     #[test]
     fn cli_definition_is_consistent() {

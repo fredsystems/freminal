@@ -7923,7 +7923,7 @@ finding is fixed on this branch or routed to the task that owns the code.
 | B6  | nit      | 147.5     | an over-long, badly wrapped doc line in `input.rs`                             | fix                                |
 | B7  | minor    | 147.10    | `inject_layout_commands` and recording are untested                            | fix                                |
 | B8  | minor    | 147.11    | the `apply_new_config` glue is untested                                        | fix                                |
-| B9  | minor    | 147.27    | opacity < 1 under DECSCNM may tint explicit-background cells                   | investigate, then fix              |
+| B9  | minor    | 147.27    | opacity < 1 under DECSCNM may tint explicit-background cells                   | Task 136 (confirmed, not fixed)    |
 | B10 | nit      | 147.24    | `modifyOtherKeys` Alt+letter form                                              | Task 137                           |
 | C1  | major    | 147.26    | the gl-pixel-only clippy fails on Windows/macOS CI legs                        | fix                                |
 | C2  | minor    | 147.31    | `check-docs` skips feature-gated modules (30 warnings)                         | fix (`--all-features`)             |
@@ -7971,6 +7971,21 @@ finding is fixed on this branch or routed to the task that owns the code.
     ignored at runtime, so it is deliberately not exposed in the module or the example.
   - New, routed to Task 137: under kitty flags 1/8, Alt+text sends `CSI 98 u` with no Alt
     modifier (147.24 left Alt to Task 137; the kitty spec gives `CSI 98;3u`).
+
+#### 147 Confirmation review (2026-11-20)
+
+All 37 dispositions confirmed (reproducers re-run; mutations on A1-A5, B1, B2, B8 fail the new
+tests); `cargo xtask test`, clippy, `check-docs`, `check-gl-pixel`, `check-windows` and
+`lint-markdown` pass. New findings: (1) A4's designator intermediates were stored without a
+cap (unbounded memory on a hostile stream) — fixed with a bound and a regression test;
+(2, 4, 5, 6) COVERAGE/GAPS, the `standard.rs` xterm attribution and the `push()` state-machine
+doc did not yet describe the A1-A5 behaviour (multi-byte designators are ignored, unlike
+xterm's `CASE_SCS_PERCENT`/`_DQUOTE`/`_AMPRSND`) — fixed; (3, 8) plan text — fixed; (7) the
+whole-string `associated_text` under flags 8+16 — routed to Task 137; (10) a unit test for
+`gl_pixel_only_clippy_args` — added. (9) `apply_config_state` carries the
+`too_many_lines` allowance that `apply_new_config` already had on `main` (same justification:
+seven config dimensions); not shrunk here. (11) `prettier --check` differences on three plan
+files predate the review (hook excludes `.md`).
 
 ### 147 Status notes
 
@@ -11651,7 +11666,9 @@ combination, in legacy mode as well.
   `CSI Z`. The terminfo entry declares `kcbt=\E[Z` (Task 151), so fixing B3 makes it
   true; the Task 151 table-of-truth test then moves `kcbt` out of `DECLARED_NOT_SENT`.
 - **B4 (high), key identity comes from typed text.**
-  - Non-ASCII text is emitted as one `CSI u` per UTF-8 byte.
+  - Non-ASCII text is emitted as one `CSI u` per UTF-8 byte. (Fixed for flag 8 by the Task 147
+    review, A5: one `CSI codepoint u` per character. The flag-4 shifted key for non-ASCII is
+    still missing.)
   - Shifted symbols lose Shift and use the wrong code.
   - Caps Lock is inferred as Shift.
   - Text-key repeat is reported as press.
@@ -11707,7 +11724,9 @@ keypad keys need `ESC ? <final>` (`input.c:855-859`). B10: under `modifyOtherKey
 some Alt+letter combinations as `CSI 27 ; mod ; code ~`; freminal always uses the ESC prefix.
 
 **Also routed (2026-11-20):** under kitty flags 1 and 8, Alt+text is sent as `CSI <cp> u`
-without the Alt modifier (`;3`).
+without the Alt modifier (`;3`). Under flags 8 and 16, `associated_text` is the whole `Event::Text`
+(`gui/terminal/input.rs`), so a multi-character commit (`ab`, an IME string) repeats the full
+text on every per-character `CSI u`.
 
 ### Task 152 — macOS Option as Alt & Per-Side Alt (stub, v0.13.1)
 

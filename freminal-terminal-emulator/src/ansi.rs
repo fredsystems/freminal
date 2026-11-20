@@ -579,16 +579,23 @@ impl FreminalAnsiParser {
     ///                  final byte in 0x40–0x7E is received; then dispatches
     ///                  to the appropriate csi_commands sub-handler.
     /// Osc            — collecting the OSC string until BEL (0x07) or ST
-    ///                  (ESC '\') terminates it; then dispatches to osc.rs.
-    ///                  A bare ESC (not followed by '\') also ends it: the
-    ///                  body so far is dispatched and the ESC starts a new
-    ///                  escape sequence (Escape state, next byte its second).
+    ///                  (ESC '\', or the C1 byte 0x9C while S8C1T is active)
+    ///                  terminates it; then dispatches to osc.rs. A bare ESC
+    ///                  (not followed by '\') also ends it: the body so far is
+    ///                  dispatched and the ESC starts a new escape sequence
+    ///                  (Escape state, next byte its second). CAN (0x18) and
+    ///                  SUB (0x1A) cancel it: nothing is dispatched.
     /// Standard       — handles two-byte Fe sequences (ESC # Pn, ESC ( G, …).
+    ///                  A designator (ESC ( ) * +) also takes extra
+    ///                  intermediates (ESC ( % 5) and is ignored as a whole.
+    ///                  An ESC inside it abandons the sequence and restarts
+    ///                  Escape.
     /// Dcs            — Device Control String; passes bytes to dcs.rs until ST
-    ///                  or a bare ESC (as for Osc; inside `DCS tmux;` an
+    ///                  (as for Osc, including C1 ST under S8C1T and CAN/SUB
+    ///                  cancelling it) or a bare ESC (inside `DCS tmux;` an
     ///                  `ESC ESC` pair is data).
     /// Apc            — Application Program Command; passes bytes to apc.rs
-    ///                  until ST or a bare ESC (as for Osc).
+    ///                  until ST, a bare ESC, or CAN/SUB (as for Osc).
     /// Vt52Escape     — waiting for the single command byte after ESC in VT52
     ///                  mode; 'Y' transitions to Vt52CursorAddress.
     /// Vt52CursorAddress — collects the row byte then column byte for the
@@ -3310,6 +3317,16 @@ mod tests {
             );
             assert_eq!(p.inner, ParserInner::Empty);
         }
+    }
+
+    #[test]
+    fn a_very_long_run_of_designator_intermediates_is_swallowed() {
+        let mut p = FreminalAnsiParser::new();
+        let mut input = b"\x1b(".to_vec();
+        input.resize(input.len() + 1024 * 1024, b'%');
+        input.extend_from_slice(b"5abc");
+        assert_eq!(p.push(&input), vec![data("abc")]);
+        assert_eq!(p.inner, ParserInner::Empty);
     }
 
     #[test]

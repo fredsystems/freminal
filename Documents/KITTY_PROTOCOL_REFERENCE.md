@@ -1,7 +1,7 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
 Last updated: 2026-11-20 — Task 147 — string terminators, graphics transfer and
-keyboard encoding notes. A bare ESC (one not followed by `\`) now ends an OSC,
+keyboard encoding notes (including per-character non-ASCII text under flag 8). A bare ESC (one not followed by `\`) now ends an OSC,
 DCS or APC string, which is a freminal difference from kitty for the OSC 99,
 OSC 22 and graphics envelopes (147.8). The graphics notes record the chunk
 assembler's cap (147.13), the debug-level log for an `a=p` naming an unknown id
@@ -1626,7 +1626,9 @@ sub-32/127 legacy numbers. Selected values freminal must confirm/emit:
 
 F3 must be `13 ~` only (not `CSI R`, which collides with CPR). Modifier keys,
 keypad keys, and media keys are reported as their own `CSI u` codes primarily
-under flag 8.
+under flag 8. Under flag 8, freminal encodes non-ASCII text one character at a
+time (`é` is `CSI 233 u`, `É` is `CSI 233 ; 2 u`), not one `CSI u` per UTF-8 byte
+(Task 147 review, A5).
 
 ### Legacy ctrl mapping (reference for flag behaviour)
 

@@ -1,6 +1,7 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-11-20 — Task 147 (v0.13.0 correctness cleanup). Closed and
+Last updated: 2026-11-20 — Task 147 (v0.13.0 correctness cleanup). Added: the
+multi-byte designators (`ESC ( % 5`) as not planned (Task 147 review). Closed and
 removed: the DECRC scroll-region clamp row (a decision, not a gap: DECRC with
 DECOM set clamps to the screen only, as kitty, Ghostty and WezTerm do; xterm alone
 also clamps to the bottom and right margins, not the top or left); "DECSC saved
@@ -516,6 +517,7 @@ things are not done, and both are deliberate:
 | Feature                           | Importance  | Type            | Planned | Notes                                                                                                                                                                                                                         |
 | --------------------------------- | ----------- | --------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ESC - C` / `ESC . C` / `ESC / C` | not planned | not implemented | —       | 96-character set designation (G1 / G2 / G3). No modern reference implements it: Ghostty has a TODO; kitty and WezTerm lack it                                                                                                 |
+| Multi-byte designators            | not planned | not implemented | —       | `ESC ( % 5`, `ESC ( " 4`, `ESC ( & 4` and the like (DEC Supplemental, Hebrew, Cyrillic): recognised and ignored, slot unchanged. xterm implements some (`charproc.c` `CASE_SCS_PERCENT` / `_DQUOTE` / `_AMPRSND`)             |
 | GR applied to `0x80` and above    | not planned | partial         | —       | `ESC ~` / `ESC }` / `ESC \|` (LS1R / LS2R / LS3R) are tracked, saved and restored, but never applied: those bytes are UTF-8, and xterm in UTF-8 mode and Ghostty do not apply GR either (`ptydata.c:94`, `Terminal.zig:1660`) |
 
 ---
