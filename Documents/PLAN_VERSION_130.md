@@ -7969,6 +7969,15 @@ Stale stub text was corrected at the same time:
   routing and daemon; routing and toggle changes; fields capabilities do not read (font,
   cursor, non-OSC-99 routings, a routing change with `osc_99` off); and real `crossbeam`
   senders in two windows (one in flight) receive exactly one event per pane, or none.
+- **147.12 (done).** `Buffer::switch_to_alternate_cleared` is the `?1049` entry: a first-ever
+  (or post-RIS) alternate screen is built once, blank with the erase background; a parked one
+  is switched in and cleared by the usual rebuild (renumbered past it). Both switch entries
+  share `enter_alternate(AlternateContents)`, and `blank_alternate_store` is the one BCE row
+  builder. The handler's `?1049` Enter arm calls a handler counterpart that also clears the
+  alternate placements (`scroll_ops.rs`, outside the listed file, approved). A first version
+  that kept the store by inferring "untouched" from row shape was rejected in review as a
+  heuristic. `bench_alternate_screen_switch` vs `before_147_12`: `enter_alternate` −12.2%,
+  `leave_alternate` −5.4% (noise), `alternate_reenter` −15.2% (its setup uses the new entry).
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

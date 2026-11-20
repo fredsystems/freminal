@@ -1454,6 +1454,18 @@ impl TerminalHandler {
         self.real_placements.get_mut(BufferType::Alternate).clear();
     }
 
+    /// Switch to the alternate screen and blank it, dropping the kitty
+    /// placements recorded against it: [`Self::clear_alternate_screen`]'s
+    /// bookkeeping around the buffer's single-store
+    /// [`Buffer::switch_to_alternate_cleared`]. This is the `?1049` entry.
+    pub(super) fn switch_to_alternate_cleared(&mut self) {
+        self.buffer.switch_to_alternate_cleared();
+        self.virtual_placements
+            .get_mut(BufferType::Alternate)
+            .clear();
+        self.real_placements.get_mut(BufferType::Alternate).clear();
+    }
+
     /// Like [`Self::visible_image_placements`] but extends the window upward by
     /// `extra_rows` (command-block fold support). The returned vector matches
     /// the extended `visible_chars` layout.

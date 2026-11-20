@@ -192,6 +192,102 @@ fn clear_alternate_screen_gives_blank_rows_with_fresh_higher_numbers() {
 }
 
 #[test]
+fn a_first_alternate_entry_builds_one_store() {
+    let mut buf = Buffer::new(20, 4);
+
+    buf.switch_to_alternate_cleared();
+
+    assert_eq!(buf.kind(), BufferType::Alternate);
+    assert_eq!(buf.rows().len(), 4);
+    assert_eq!(buf.row_base(), RowNumber::ALTERNATE_BASE);
+    assert_eq!(
+        buf.next_row_number(),
+        RowNumber::ALTERNATE_BASE.saturating_add(4),
+        "one store was numbered, so no block of row numbers was skipped"
+    );
+    for i in 0..4 {
+        assert_eq!(row_text(&buf, i), "");
+    }
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn a_cleared_re_entry_renumbers_past_the_parked_store() {
+    let (mut buf, id) = buffer_with_parked_alternate();
+    let parked_next = buf
+        .parked_alternate
+        .as_ref()
+        .expect("the alternate screen is parked")
+        .rows
+        .next_number();
+
+    buf.switch_to_alternate_cleared();
+
+    assert_eq!(buf.kind(), BufferType::Alternate);
+    assert_eq!(buf.rows().len(), 4);
+    assert!(
+        buf.row_base() >= parked_next,
+        "blank rows are numbered past the parked store ({} < {parked_next})",
+        buf.row_base()
+    );
+    for i in 0..4 {
+        assert_eq!(row_text(&buf, i), "", "row {i} is blank");
+    }
+    assert_eq!(buf.image_cell_count, 0);
+    assert!(!buf.image_store().contains(id), "alt image store emptied");
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn a_cleared_entry_is_the_pair_of_a_switch_and_a_clear() {
+    let (mut cleared, _) = buffer_with_parked_alternate();
+    let (mut pair, _) = buffer_with_parked_alternate();
+    cleared.set_format(loud_tag());
+    pair.set_format(loud_tag());
+
+    cleared.switch_to_alternate_cleared();
+    pair.switch_to_alternate();
+    pair.clear_alternate_screen();
+
+    assert_eq!(cleared.row_base(), pair.row_base());
+    assert_eq!(cleared.next_row_number(), pair.next_row_number());
+    assert_eq!(cleared.cursor_screen_pos(), pair.cursor_screen_pos());
+    for i in 0..4 {
+        assert_eq!(cleared.rows()[i].cells(), pair.rows()[i].cells());
+    }
+
+    // Already on the alternate screen it only clears, as the pair does.
+    cleared.insert_text(&text("x"));
+    pair.insert_text(&text("x"));
+    cleared.switch_to_alternate_cleared();
+    pair.switch_to_alternate();
+    pair.clear_alternate_screen();
+    assert_eq!(cleared.row_base(), pair.row_base());
+    assert_eq!(row_text(&cleared, 0), "");
+}
+
+#[test]
+fn a_cleared_first_entry_applies_the_current_background() {
+    let mut buf = Buffer::new(6, 3);
+    buf.set_format(loud_tag());
+
+    buf.switch_to_alternate_cleared();
+
+    assert_eq!(buf.rows().len(), 3);
+    for (index, row) in buf.rows().iter().enumerate() {
+        assert_eq!(row.cells().len(), 6, "row {index} has explicit blank cells");
+        for cell in row.cells() {
+            let tag = cell.tag();
+            assert_eq!(tag.colors.background_color, TerminalColor::Blue);
+            assert_eq!(tag.colors.color, TerminalColor::Default, "no foreground");
+            assert_eq!(tag.font_weight, FontWeight::Normal, "no weight");
+            assert!(tag.url.is_none(), "no hyperlink");
+        }
+    }
+    buf.debug_assert_invariants();
+}
+
+#[test]
 fn repeated_clears_never_reissue_a_row_number() {
     let mut buf = Buffer::new(20, 3);
     buf.switch_to_alternate();

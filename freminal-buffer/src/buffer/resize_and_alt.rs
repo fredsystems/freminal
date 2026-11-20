@@ -25,6 +25,15 @@ use super::reflow_remap::{OldRowMeta, ReflowRemap};
 use super::{Buffer, ParkedScreen, RowStore};
 use crate::image_store::ImageStore;
 
+/// What entering the alternate screen does to its contents.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AlternateContents {
+    /// Keep a parked alternate screen as it was; a first-ever one is blank.
+    Keep,
+    /// The alternate screen comes up blank, with the current background.
+    Clear,
+}
+
 impl Buffer {
     /// Resize the terminal buffer and return the adjusted `scroll_offset`.
     ///
@@ -1304,20 +1313,54 @@ impl Buffer {
     /// screen row). The scroll margins are shared by both screens and are not
     /// touched. Tab stops are shared too, matching xterm.
     pub fn switch_to_alternate(&mut self) {
+        self.enter_alternate(AlternateContents::Keep);
+    }
+
+    /// Switch to the alternate screen and blank it: [`Self::switch_to_alternate`]
+    /// followed by [`Self::clear_alternate_screen`], which is the `?1049` entry.
+    ///
+    /// For a first-ever (or post-RIS) alternate screen the incoming store is
+    /// built once, already blank with the current background (BCE), where the
+    /// pair builds a blank store and then a second to replace it. A parked
+    /// alternate screen is switched in and cleared by the ordinary rebuild, so
+    /// its rows are renumbered past the parked store's. When the alternate
+    /// screen is already active this only clears it, as the pair does.
+    pub fn switch_to_alternate_cleared(&mut self) {
+        if self.kind == BufferType::Alternate {
+            self.clear_alternate_screen();
+        } else {
+            self.enter_alternate(AlternateContents::Clear);
+        }
+    }
+
+    /// Shared body of [`Self::switch_to_alternate`] and
+    /// [`Self::switch_to_alternate_cleared`]; a no-op when the alternate screen
+    /// is already active.
+    fn enter_alternate(&mut self, contents: AlternateContents) {
         if self.kind == BufferType::Alternate {
             return;
         }
 
         let screen_y = self.cursor_screen_pos().y;
 
-        let incoming = self.parked_alternate.take().unwrap_or_else(|| {
+        let parked = self.parked_alternate.take();
+        let needs_clear = parked.is_some() && contents == AlternateContents::Clear;
+        let incoming = parked.unwrap_or_else(|| {
+            // Blank with the erase background when the entry clears, which is
+            // exactly what `clear_alternate_screen` would make of it; the
+            // default tag leaves plain sparse rows.
+            let blank_tag = match contents {
+                AlternateContents::Keep => FormatTag::default(),
+                AlternateContents::Clear => self.erase_tag(),
+            };
             // The alternate screen's rows are numbered in their own
             // namespace (Task 125.14), so a primary row number can never
             // alias an alternate row.
             ParkedScreen {
-                rows: RowStore::from_rows_at(
+                rows: Self::blank_alternate_store(
                     self.next_alt_base,
-                    (0..self.height).map(|_| Row::new(self.width)),
+                    (self.width, self.height),
+                    &blank_tag,
                 ),
                 reflow_anchor: CursorState::default(),
                 saved_cursor: None,
@@ -1341,6 +1384,10 @@ impl Buffer {
         self.merge_cache = None;
 
         self.cursor.pos.y = self.buffer_row_for_screen_row(screen_y);
+
+        if needs_clear {
+            self.clear_alternate_screen();
+        }
 
         self.debug_assert_invariants();
         self.debug_assert_screen_parking();
@@ -1413,16 +1460,10 @@ impl Buffer {
         }
 
         let blank_tag = self.erase_tag();
-        let width = self.width;
-        self.rows = RowStore::from_rows_at(
+        self.rows = Self::blank_alternate_store(
             self.rows.next_number(),
-            (0..self.height).map(|_| {
-                let mut row = Row::new(width);
-                if !blank_tag.is_visually_default() {
-                    row.clear_with_tag(&blank_tag);
-                }
-                row
-            }),
+            (self.width, self.height),
+            &blank_tag,
         );
         self.image_store.clear();
         self.image_cell_count = 0;
@@ -1430,6 +1471,26 @@ impl Buffer {
         self.merge_cache = None;
 
         self.debug_assert_invariants();
+    }
+
+    /// A store of `height` blank alternate-screen rows numbered from `base`,
+    /// each carrying `blank_tag`'s background (BCE) as
+    /// [`Self::clear_alternate_screen`] documents.
+    fn blank_alternate_store(
+        base: RowNumber,
+        (width, height): (usize, usize),
+        blank_tag: &FormatTag,
+    ) -> RowStore {
+        RowStore::from_rows_at(
+            base,
+            (0..height).map(|_| {
+                let mut row = Row::new(width);
+                if !blank_tag.is_visually_default() {
+                    row.clear_with_tag(blank_tag);
+                }
+                row
+            }),
+        )
     }
 
     /// Exchange the active screen's per-screen state with `incoming`'s,
