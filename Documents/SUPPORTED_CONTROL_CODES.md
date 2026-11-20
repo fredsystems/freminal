@@ -181,7 +181,7 @@ is the authoritative status table; where the two disagree, COVERAGE is right.
 | ?1048 | Save/Restore Cursor (legacy)             | done        | Save/restore through the DECSC slot of the active screen                                                                                  |
 | ?1049 | Alt Screen Buffer + Save Cursor          | done        | DECSC, switch to the alternate screen, then clear it; leaving restores the cursor                                                         |
 | ?1070 | Private Color Registers                  | done        | Per-graphic Sixel palette; default on (Task 20.11)                                                                                        |
-| ?2004 | Bracketed Paste                          | done        | `TerminalModes.bracketed_paste`; GUI wraps paste with `\e[200~` / `\e[201~`                                                               |
+| ?2004 | Bracketed Paste                          | done        | `TerminalModes.bracketed_paste`; GUI wraps paste with `\e[200~` / `\e[201~` (7-bit), or `0x9B 200~` / `0x9B 201~` under S8C1T             |
 | ?2026 | Synchronized Output                      | done        | `TerminalModes.synchronized_updates`                                                                                                      |
 | ?2027 | Grapheme Clustering                      | done        | Always-on via `unicode-segmentation`; DECRQM reports permanently set (Task 20.7)                                                          |
 | ?2048 | In-Band Resize Notifications             | done        | Set sends an in-band size report immediately; DECRQM supported                                                                            |

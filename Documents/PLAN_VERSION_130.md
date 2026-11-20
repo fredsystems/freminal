@@ -8033,6 +8033,20 @@ diff). Dispositions:
   against HEAD on a quiet machine: parser and encoder within ±4%, `instanced_bg*` within ±3%
   (one +23% case re-ran at −0.9% and −2.1%).
 
+- **Second round (CodeRabbit, 2026-11-20), R23-R35:** R23 the bracketed-paste row gives the
+  S8C1T form; R24 the saved cursor's wrap edge is the row's (`wrap_column_for_row`, the same
+  `row_wrap_bounds` `insert_text` uses), so a double-width row wraps at half its span; R25 a
+  pending cell that settles anywhere but exactly at the edge becomes the next column; R26-R27
+  the UTF-8 tracker validates each continuation against its lead (`E0 9C` is ST) and resets
+  when a string ends; R28 a bare ESC that ends a `DCS tmux;` wrapper leaves its second byte
+  for after the payload (`resume_pending_escape` picks the escape table); R29 the exact-cap
+  CSI test compares with `ESC [ 0 m`; R30 `finish_output_batch` runs once per read; R31 a
+  suppressed frame refreshes the carried modifiers (`observe_suppressed_frame`); R32 the
+  ground state applies the same UTF-8 rule to every 8-bit C1 byte (`Ŏ` is text, not SS2);
+  R34 a parked screen is resized under the shared left/right margins; R35 an empty inherited
+  `CARGO_ENCODED_RUSTDOCFLAGS` carries the denial. R33 (per-destination broadcast encoding)
+  is routed to Task 137. Mutation checks were run on R24-R28, R31, R32 and R34.
+
 ### 147 Status notes
 
 - **147.1 (done).** `Mode::UnknownQuery { namespace, params }` reuses `ModeNamespace`; the
@@ -11769,6 +11783,12 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 `SS3 <final>` with no modifier parameter (xterm adds one, `input.c:1394-1396`), and VT52
 keypad keys need `ESC ? <final>` (`input.c:855-859`). B10: under `modifyOtherKeys`, xterm sends
 some Alt+letter combinations as `CSI 27 ; mod ; code ~`; freminal always uses the ESC prefix.
+
+**Routed from PR #589 review (R33, 2026-11-20):** broadcast input encodes a key once, with the
+active pane's modes, and sends those bytes to every target pane. A target in a different mode
+(DECCKM, keypad, kitty flags, and since 147.4 S8C1T framing) gets bytes for the wrong mode.
+The fix is to send the logical key and encode it per destination, which is the same
+key-identity boundary this task decides.
 
 **Also routed (2026-11-20):** under kitty flags 1 and 8, Alt+text is sent as `CSI <cp> u`
 without the Alt modifier (`;3`). Under flags 8 and 16, `associated_text` is the whole `Event::Text`

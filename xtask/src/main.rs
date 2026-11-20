@@ -395,11 +395,14 @@ fn rustdoc_env_denying_warnings(
     plain: Option<&str>,
 ) -> (&'static str, String) {
     match encoded {
-        Some(flags) if !flags.is_empty() => (
+        // Cargo prefers the encoded variable even when it is empty (an empty
+        // argument list), so an inherited empty value must carry the denial.
+        Some("") => ("CARGO_ENCODED_RUSTDOCFLAGS", "-D\u{1f}warnings".to_owned()),
+        Some(flags) => (
             "CARGO_ENCODED_RUSTDOCFLAGS",
             format!("{flags}\u{1f}-D\u{1f}warnings"),
         ),
-        _ => ("RUSTDOCFLAGS", rustdoc_flags_denying_warnings(plain)),
+        None => ("RUSTDOCFLAGS", rustdoc_flags_denying_warnings(plain)),
     }
 }
 
@@ -1499,8 +1502,16 @@ mod tests {
             ("RUSTDOCFLAGS", "--cfg docsrs -D warnings".to_owned())
         );
         assert_eq!(
-            rustdoc_env_denying_warnings(Some(""), None),
+            rustdoc_env_denying_warnings(None, None),
             ("RUSTDOCFLAGS", "-D warnings".to_owned())
+        );
+    }
+
+    #[test]
+    fn rustdoc_env_fills_an_empty_encoded_value() {
+        assert_eq!(
+            rustdoc_env_denying_warnings(Some(""), Some("ignored")),
+            ("CARGO_ENCODED_RUSTDOCFLAGS", "-D\u{1f}warnings".to_owned())
         );
     }
 
