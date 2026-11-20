@@ -274,6 +274,10 @@ impl FreminalGui {
     /// broadcast. Pass `None` when no window is out of the map (e.g. from the
     /// settings window's frame); passing a window that is also in the map
     /// would send to its panes twice.
+    ///
+    /// Only the notification-daemon glue calls it (a daemon state change);
+    /// a config change goes through [`Self::broadcast_config_host_capabilities`].
+    #[cfg(all(unix, not(target_os = "macos")))]
     pub(super) fn broadcast_host_capabilities(
         &self,
         capabilities: HostCapabilities,

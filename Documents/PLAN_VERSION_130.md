@@ -7995,6 +7995,18 @@ Stale stub text was corrected at the same time:
   decode into a scratch buffer bounded by `max_decoded_len` and are checked before they are
   appended; `finish()` flushes the final quantum the same way. Small-cap tests pin capacity
   `<=` cap for raw, base64 and the flush. The unknown-id `a=p` log is `debug!`.
+- **147.14 (done).** The deletion decision is made before the open
+  (`KittyFileUse { Read, Consume }` → `KittyFileFate { Keep, Delete }`, same
+  `may_delete_kitty_temp_file` rule). On Windows a `Delete` file is opened with
+  `GENERIC_READ | DELETE`, read/write/delete sharing and `FILE_FLAG_DELETE_ON_CLOSE` (winapi
+  0.3.9 `winbase` feature on the existing dependency; no new crate), checked to be a regular
+  file by handle, read and dropped; `delete_kitty_temp_file` only reports a path still
+  present. Unix unchanged. Three Windows-only tests run on the Windows CI job. **Platform
+  difference, routed to Task 135:** on Windows a marked `t=t` file is deleted even if reading
+  it then fails (over the size cap); on unix it is kept. Task 135 settles which is right
+  against kitty's source and aligns both. The orchestrator also gated
+  `FreminalGui::broadcast_host_capabilities` to the daemon platforms: 147.11 left the
+  daemon glue as its only caller, which `check-windows` flagged as dead code.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
@@ -11331,6 +11343,10 @@ the audit:
 - Silence for id-less commands: follow kitty's code (silent) or the spec's "when specifying
   an id" reading; the two agree.
 - `c`+`r` given together: stretch (kitty code; freminal today) or letterbox (spec prose).
+
+**Routed from 147.14 (2026-11-20).** Decide, against kitty's source, whether a marked `t=t`
+file is deleted when the read fails after the open (over the size cap, read error). Today
+Windows deletes it (delete-on-close is requested at open) and unix keeps it. Align both.
 
 ### Task 136 — Graphics Placement Model & Z-Layers (stub, v0.13.1)
 

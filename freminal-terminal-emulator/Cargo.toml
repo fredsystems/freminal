@@ -39,7 +39,7 @@ tracing.workspace = true
 nix = { workspace = true, features = ["fs", "hostname", "mman", "term", "user"] }
 
 [target.'cfg(windows)'.dependencies]
-winapi = { workspace = true, features = ["handleapi", "memoryapi", "winnt"] }
+winapi = { workspace = true, features = ["handleapi", "memoryapi", "winbase", "winnt"] }
 
 # dev dependencies
 [dev-dependencies]
