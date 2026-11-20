@@ -7962,6 +7962,13 @@ Stale stub text was corrected at the same time:
   the `TabChannels` field and the `pty.rs` clone are removed, with their test and bench
   constructors; the orchestrator also removed `TerminalEmulator::clone_write_tx`, which then
   had no caller.
+- **147.11 (done).** `host_capabilities::config_change(old, new, daemon)` decides (`Some`
+  only when the resolved capabilities differ); `broadcast_config_change` sends through the
+  existing `send_host_capabilities`; `settings_dispatch::apply_new_config` calls
+  `FreminalGui::broadcast_config_host_capabilities`. Tests: unchanged config across every
+  routing and daemon; routing and toggle changes; fields capabilities do not read (font,
+  cursor, non-OSC-99 routings, a routing change with `osc_99` off); and real `crossbeam`
+  senders in two windows (one in flight) receive exactly one event per pane, or none.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

@@ -265,13 +265,12 @@ impl FreminalGui {
 
         // Broadcast host-dependent capability changes to all panes (Task
         // 130.4), e.g. when the OSC 99 routing gains or loses a system leg.
-        let daemon = self.osc99_daemon.get();
-        let new_host_capabilities = super::host_capabilities::host_capabilities(&new_cfg, daemon);
-        if new_host_capabilities
-            != super::host_capabilities::host_capabilities(&self.config, daemon)
-        {
-            self.broadcast_host_capabilities(new_host_capabilities, current.as_deref());
-        }
+        self.broadcast_config_host_capabilities(
+            &self.config,
+            &new_cfg,
+            self.osc99_daemon.get(),
+            current.as_deref(),
+        );
 
         self.apply_osc99_filters(&new_cfg);
 

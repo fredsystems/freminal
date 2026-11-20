@@ -198,6 +198,38 @@ pub(super) fn daemon_state_change(
     (before != after).then_some(after)
 }
 
+/// The capabilities to broadcast when the config goes from `old` to `new` with
+/// the notification daemon in state `daemon`: `Some` exactly when the resolved
+/// [`HostCapabilities`] differ.
+///
+/// A config change that touches nothing [`host_capabilities`] reads (font,
+/// theme, the OSC text routing, ...) returns `None`.
+#[must_use]
+pub(super) fn config_change(
+    old: &Config,
+    new: &Config,
+    daemon: LinuxDaemon,
+) -> Option<HostCapabilities> {
+    let before = host_capabilities(old, daemon);
+    let after = host_capabilities(new, daemon);
+    (before != after).then_some(after)
+}
+
+/// Broadcast the capability change, if any, a config change from `old` to
+/// `new` produces to every pane of every tab in `windows` and in `in_flight`.
+/// Does nothing when the capabilities are unchanged.
+fn broadcast_config_change<'a>(
+    windows: impl IntoIterator<Item = &'a TabManager>,
+    in_flight: Option<&'a TabManager>,
+    old: &Config,
+    new: &Config,
+    daemon: LinuxDaemon,
+) {
+    if let Some(capabilities) = config_change(old, new, daemon) {
+        send_host_capabilities(windows, in_flight, capabilities);
+    }
+}
+
 /// Send `capabilities` to every pane of every tab in `windows` and in
 /// `in_flight` (`InputEvent::HostCapabilitiesChange`).
 ///
@@ -251,6 +283,24 @@ impl FreminalGui {
             self.windows.values().map(|win| &win.tabs),
             current.map(|win| &win.tabs),
             capabilities,
+        );
+    }
+
+    /// Broadcast the capability change, if any, that replacing `old` with
+    /// `new` produces. See [`Self::broadcast_host_capabilities`] for `current`.
+    pub(super) fn broadcast_config_host_capabilities(
+        &self,
+        old: &Config,
+        new: &Config,
+        daemon: LinuxDaemon,
+        current: Option<&PerWindowState>,
+    ) {
+        broadcast_config_change(
+            self.windows.values().map(|win| &win.tabs),
+            current.map(|win| &win.tabs),
+            old,
+            new,
+            daemon,
         );
     }
 }
@@ -1685,6 +1735,125 @@ mod tests {
             assert_eq!(received(rx), vec![capabilities]);
         }
         for rx in &untouched_rxs {
+            assert_eq!(received(rx), Vec::<HostCapabilities>::new());
+        }
+    }
+
+    /// The configs a settings change moves between: OSC 99 routed to the toast,
+    /// then disabled (a capability change on every platform).
+    fn changed_config_pair() -> (Config, Config) {
+        (
+            config_with(NotificationRouting::Toast),
+            config_with(NotificationRouting::Disabled),
+        )
+    }
+
+    #[test]
+    fn an_unchanged_config_is_not_a_capability_change() {
+        for routing in ALL_ROUTINGS {
+            for daemon in all_daemons() {
+                let config = config_with(routing);
+                assert_eq!(
+                    config_change(&config, &config.clone(), daemon),
+                    None,
+                    "{routing:?}, {daemon:?}"
+                );
+            }
+        }
+        assert_eq!(
+            config_change(
+                &Config::default(),
+                &Config::default(),
+                LinuxDaemon::assumed()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_routing_change_is_a_capability_change_carrying_the_new_value() {
+        let (old, new) = changed_config_pair();
+        let daemon = LinuxDaemon::assumed();
+        assert_eq!(
+            config_change(&old, &new, daemon),
+            Some(host_capabilities(&new, daemon))
+        );
+        assert_eq!(
+            config_change(&new, &old, daemon),
+            Some(host_capabilities(&old, daemon))
+        );
+    }
+
+    #[test]
+    fn toggling_a_capability_switch_is_a_capability_change() {
+        let daemon = LinuxDaemon::assumed();
+        let on = config_with(NotificationRouting::Toast);
+        let mut master_off = on.clone();
+        master_off.notifications.enabled = false;
+        let mut osc_99_off = on.clone();
+        osc_99_off.notifications.osc_99 = false;
+        let mut file_transfer = on.clone();
+        file_transfer.security.allow_kitty_file_transfer = true;
+        for changed in [master_off, osc_99_off, file_transfer] {
+            assert_eq!(
+                config_change(&on, &changed, daemon),
+                Some(host_capabilities(&changed, daemon))
+            );
+        }
+    }
+
+    #[test]
+    fn fields_host_capabilities_does_not_read_are_not_a_capability_change() {
+        let daemon = LinuxDaemon::assumed();
+        let old = config_with(NotificationRouting::Both);
+        let mut new = old.clone();
+        new.notifications.routing_osc_text = NotificationRouting::System;
+        new.notifications.routing_command_finished = NotificationRouting::System;
+        new.notifications.routing_error = NotificationRouting::Disabled;
+        new.font.size += 2.0;
+        new.cursor.blink = !old.cursor.blink;
+        assert_eq!(config_change(&old, &new, daemon), None);
+
+        // A routing change while OSC 99 is off resolves to Unsupported both
+        // ways, so it changes nothing either.
+        let mut off_old = config_with(NotificationRouting::Toast);
+        off_old.notifications.osc_99 = false;
+        let mut off_new = off_old.clone();
+        off_new.notifications.routing_osc99 = NotificationRouting::Disabled;
+        assert_eq!(config_change(&off_old, &off_new, daemon), None);
+    }
+
+    #[test]
+    fn a_routing_change_sends_one_event_to_every_pane() {
+        let mut ids = crate::gui::panes::PaneIdGenerator::new(0);
+        let (in_map, rxs_map) = window_of(&mut ids, 2);
+        let (in_flight, rxs_flight) = window_of(&mut ids, 2);
+        let (old, new) = changed_config_pair();
+        let daemon = LinuxDaemon::assumed();
+
+        broadcast_config_change([&in_map], Some(&in_flight), &old, &new, daemon);
+
+        let expected = vec![host_capabilities(&new, daemon)];
+        for rx in rxs_map.iter().chain(&rxs_flight) {
+            assert_eq!(received(rx), expected);
+        }
+    }
+
+    #[test]
+    fn an_unchanged_config_and_a_non_capability_change_send_no_events() {
+        let mut ids = crate::gui::panes::PaneIdGenerator::new(0);
+        let (in_map, rxs_map) = window_of(&mut ids, 2);
+        let (in_flight, rxs_flight) = window_of(&mut ids, 1);
+        let daemon = LinuxDaemon::assumed();
+        let old = config_with(NotificationRouting::Both);
+        let mut font_only = old.clone();
+        font_only.font.size += 2.0;
+        font_only.notifications.routing_error = NotificationRouting::Disabled;
+
+        broadcast_config_change([&in_map], Some(&in_flight), &old, &old.clone(), daemon);
+        broadcast_config_change([&in_map], Some(&in_flight), &old, &font_only, daemon);
+
+        for rx in rxs_map.iter().chain(&rxs_flight) {
             assert_eq!(received(rx), Vec::<HostCapabilities>::new());
         }
     }
