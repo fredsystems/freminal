@@ -61,7 +61,8 @@ use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::{
     alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
     decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
-    mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket, s8c1t::S8c1t,
+    meta_sends_escape::MetaSendsEscape, mouse::MouseEncoding, mouse::MouseTrack,
+    rl_bracket::RlBracket, s8c1t::S8c1t,
 };
 use freminal_common::buffer_states::row_number::RowNumber;
 
@@ -84,6 +85,7 @@ struct SnapshotModeFields {
     alternate_scroll: AlternateScroll,
     line_feed_mode: Lnm,
     s8c1t: S8c1t,
+    meta_sends_escape: MetaSendsEscape,
     kitty_keyboard_flags: u32,
 }
 
@@ -1063,6 +1065,7 @@ impl TerminalEmulator {
             alternate_scroll: mode_fields.alternate_scroll,
             line_feed_mode: mode_fields.line_feed_mode,
             s8c1t: mode_fields.s8c1t,
+            meta_sends_escape: mode_fields.meta_sends_escape,
             kitty_keyboard_flags: mode_fields.kitty_keyboard_flags,
             cwd,
             shell_histfile,
@@ -1210,6 +1213,7 @@ impl TerminalEmulator {
             alternate_scroll: self.internal.modes.alternate_scroll,
             line_feed_mode: self.internal.modes.line_feed_mode,
             s8c1t: *self.internal.handler.s8c1t_mode(),
+            meta_sends_escape: self.internal.modes.meta_sends_escape,
             kitty_keyboard_flags: self.internal.handler.kitty_keyboard_flags(),
         }
     }

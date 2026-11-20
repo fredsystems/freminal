@@ -14,6 +14,7 @@ use super::mode::SetMode;
 
 pub mod allow_alt_screen;
 pub mod allow_column_mode_switch;
+pub mod alt_sends_escape;
 pub mod alternate_scroll;
 pub mod application_escape_key;
 pub mod decanm;
@@ -39,6 +40,7 @@ pub mod keypad;
 pub mod kitty_keyboard;
 pub mod lnm;
 pub mod meta_sends_eighth_bit;
+pub mod meta_sends_escape;
 pub mod mouse;
 pub mod numlock_overrides_keypad;
 pub mod private_color_registers;

@@ -7820,6 +7820,24 @@ Stale stub text was corrected at the same time:
 - **Scheduling:** when Task 147 rebases onto `main` after #588 merges (if Task 147 merges
   first instead, Task 151 does it on its rebase). Before the Task 147 adversarial review.
 
+#### 147.C4 — Licence check of the shell-integration scripts' third-party-derived parts
+
+- **Surfaced:** Task 151 PR review P1 and 151.C5 (2026-11-20). Predates Task 147.
+- **Impact:** Task 151 found that Ghostty's bash and zsh integration files are GPLv3 (they
+  derive from kitty's), and that copying from them into freminal's MIT scripts is not
+  allowed. `Documents/DESIGN_DECISIONS.md` (around the zsh `.zshenv` `ZDOTDIR` description)
+  calls part of freminal's existing zsh bootstrap "Ghostty-derived". If that code was copied,
+  the same problem exists on `main` today.
+- **Scope of fix:** a READ-ONLY provenance audit of `shell-integration/` (git history of each
+  file, the comments, and a comparison with the upstream files done by someone who then does
+  not write the replacement), then, for anything copied from a GPL source, a clean-room
+  rewrite from a behaviour specification, as 151.C5 did. Ghostty's MIT-licensed files (for
+  example its fish integration) may be used with the MIT notice in `ATTRIBUTIONS.md`.
+- **Verification:** each script's third-party-derived parts are either rewritten clean-room
+  or attributed under a compatible licence; the existing shell-integration tests pass.
+- **Scheduling:** within Task 147, before 147.17. If the audit finds GPL-derived code, stop
+  and report to the maintainer before rewriting.
+
 ### 147 Status notes
 
 - **147.1 (done).** `Mode::UnknownQuery { namespace, params }` reuses `ModeNamespace`; the
@@ -7915,6 +7933,17 @@ Stale stub text was corrected at the same time:
   button reports or claims support. Changed tests: the four `test_hilite_mouse_tracking_*`
   tests and three `?1001` dispatch tests (rewritten for "recognised, not implemented"); the
   147.1 "unknown ANSI mode" tests query `99` now that `2` is KAM. COVERAGE/GAPS are 147.17.
+- **147.24 (done, macOS half moved to Task 152).** `?1036` (`MetaSendsEscape`, default set)
+  and `?1039` (`AltSendsEscape`, stored and reported) as typed modes; DECRQM 1/2; RIS and
+  DECSTR return them to default (`TerminalModes`, so no handler reset-table row). The GUI
+  builds `TerminalInput::AltText` where the event is read (`gui/terminal/alt_text.rs`, a pure
+  decision over `HostPlatform`): Alt without Ctrl prefixes `ESC` while `?1036` is set, Ctrl+Alt
+  (Windows AltGr) never does, and with any kitty keyboard flag the bytes equal plain text.
+  **Maintainer decision (2026-11-19, option 1):** on macOS Option keeps composing; the
+  `[keyboard] macos_option_as_alt` option was implemented, found not to work (egui's text is
+  the Option-composed character, so `both` sent `ESC ∫`) and removed; it is Task 152, with
+  per-side `left`/`right`. `bench_to_payload` (vs `before_147_24`): `legacy_mix` −14.3%,
+  `kkp_mix` −5.3% (baseline under load; no regression).
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

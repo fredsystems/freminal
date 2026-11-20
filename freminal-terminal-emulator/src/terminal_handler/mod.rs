@@ -2106,6 +2106,8 @@ impl TerminalHandler {
                 | Mode::SynchronizedUpdates(_)
                 | Mode::Decnkm(_)
                 | Mode::Decbkm(_)
+                | Mode::MetaSendsEscape(_)
+                | Mode::AltSendsEscape(_)
                 | Mode::AlternateScroll(_)
                 | Mode::Theming(_)
                 | Mode::GraphemeClustering(

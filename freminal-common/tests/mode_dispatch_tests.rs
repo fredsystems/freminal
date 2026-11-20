@@ -7,6 +7,7 @@ use freminal_common::buffer_states::mode::{Mode, SetMode};
 use freminal_common::buffer_states::modes::{
     allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
+    alt_sends_escape::AltSendsEscape,
     alternate_scroll::AlternateScroll,
     decanm::Decanm,
     decarm::Decarm,
@@ -27,6 +28,7 @@ use freminal_common::buffer_states::modes::{
     kam::Kam,
     lnm::Lnm,
     meta_sends_eighth_bit::MetaSendsEighthBit,
+    meta_sends_escape::MetaSendsEscape,
     mouse::{MouseEncoding, MouseTrack},
     numlock_overrides_keypad::NumLockOverridesKeypad,
     private_color_registers::PrivateColorRegisters,
@@ -745,6 +747,40 @@ fn q1035_dispatches_to_numlock_overrides_keypad() {
     assert_eq!(
         dispatch(b"?1035", SetMode::DecQuery),
         Mode::NumLockOverridesKeypad(NumLockOverridesKeypad::Query)
+    );
+}
+
+// ── ?1036 and ?1039 — Alt sends ESC (Task 147.24) ─────────────────────────
+
+#[test]
+fn q1036_dispatches_to_meta_sends_escape() {
+    assert_eq!(
+        dispatch(b"?1036", SetMode::DecSet),
+        Mode::MetaSendsEscape(MetaSendsEscape::Set)
+    );
+    assert_eq!(
+        dispatch(b"?1036", SetMode::DecRst),
+        Mode::MetaSendsEscape(MetaSendsEscape::Reset)
+    );
+    assert_eq!(
+        dispatch(b"?1036", SetMode::DecQuery),
+        Mode::MetaSendsEscape(MetaSendsEscape::Query)
+    );
+}
+
+#[test]
+fn q1039_dispatches_to_alt_sends_escape() {
+    assert_eq!(
+        dispatch(b"?1039", SetMode::DecSet),
+        Mode::AltSendsEscape(AltSendsEscape::Set)
+    );
+    assert_eq!(
+        dispatch(b"?1039", SetMode::DecRst),
+        Mode::AltSendsEscape(AltSendsEscape::Reset)
+    );
+    assert_eq!(
+        dispatch(b"?1039", SetMode::DecQuery),
+        Mode::AltSendsEscape(AltSendsEscape::Query)
     );
 }
 

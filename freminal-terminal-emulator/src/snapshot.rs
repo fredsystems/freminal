@@ -29,6 +29,7 @@ use freminal_common::{
             decscnm::ScreenInversion,
             keypad::KeypadMode,
             lnm::Lnm,
+            meta_sends_escape::MetaSendsEscape,
             mouse::{MouseEncoding, MouseTrack},
             rl_bracket::RlBracket,
             s8c1t::S8c1t,
@@ -306,6 +307,13 @@ pub struct TerminalSnapshot {
     /// Reset to `SevenBit` by a full reset (RIS).
     pub s8c1t: S8c1t,
 
+    /// Meta sends escape (`?1036`).
+    ///
+    /// Needed by the GUI-side input encoder: while set (the default) Alt+text
+    /// is built with its `ESC` prefix, while reset it is sent as plain text.
+    /// Returns to set on RIS and DECSTR.
+    pub meta_sends_escape: MetaSendsEscape,
+
     /// Currently active Kitty keyboard protocol flags (stack top, 0 if empty).
     ///
     /// When non-zero, the GUI must encode key events using KKP format instead
@@ -501,6 +509,7 @@ impl TerminalSnapshot {
             backarrow_sends_bs: Decbkm::BackarrowSendsDel,
             line_feed_mode: Lnm::LineFeed,
             s8c1t: S8c1t::SevenBit,
+            meta_sends_escape: MetaSendsEscape::Set,
             kitty_keyboard_flags: 0,
             alternate_scroll: AlternateScroll::Disabled,
             cwd: None,
@@ -537,6 +546,14 @@ mod tests {
     #[test]
     fn empty_s8c1t_is_seven_bit() {
         assert_eq!(TerminalSnapshot::empty().s8c1t, S8c1t::SevenBit);
+    }
+
+    #[test]
+    fn empty_meta_sends_escape_is_set() {
+        assert_eq!(
+            TerminalSnapshot::empty().meta_sends_escape,
+            MetaSendsEscape::Set
+        );
     }
 
     #[test]

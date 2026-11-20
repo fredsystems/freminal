@@ -379,6 +379,20 @@ pub fn collect_text(text: &str) -> Cow<'static, [TerminalInput]> {
         .into()
 }
 
+/// Collect text typed with Alt held as one [`TerminalInput::AltText`].
+///
+/// The caller decides whether the Alt prefix applies (`?1036`, the platform's
+/// Option setting); text that gets no prefix is collected with
+/// [`collect_text`] instead. Empty text yields no input at all, so it can
+/// never become a bare `ESC`.
+#[must_use]
+pub fn collect_alt_text(text: &str) -> Cow<'static, [TerminalInput]> {
+    if text.is_empty() {
+        return Cow::Borrowed(&[]);
+    }
+    vec![TerminalInput::AltText(text.into())].into()
+}
+
 /// Modifier key state for xterm-style modified key encoding.
 ///
 /// When any modifier is set, special keys (arrows, Home/End, function keys,
@@ -510,6 +524,17 @@ pub enum TerminalInput {
     Ascii(u8),
     // Normal keypress with ctrl
     Ctrl(u8),
+    /// Text typed with Alt held, where Alt acts as the prefix key.
+    ///
+    /// In the legacy encoding it is sent as `ESC` followed by the text, one
+    /// `ESC` however many bytes the text has. While any kitty keyboard flag is
+    /// active the prefix is not added: the text encodes exactly as the same
+    /// bytes typed without Alt, byte by byte, leaving Alt+text to the kitty
+    /// encoding.
+    ///
+    /// Built where the event is read, from the Alt state and `?1036` at that
+    /// point, never by rewriting bytes that were already encoded.
+    AltText(Box<str>),
     Enter,
     LineFeed,
     Backspace,
@@ -586,6 +611,14 @@ impl TerminalInput {
 
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
+            Self::AltText(text) => {
+                let mut bytes = Vec::with_capacity(text.len() + 1);
+                if kitty_keyboard_flags == 0 {
+                    bytes.push(0x1b);
+                }
+                bytes.extend_from_slice(text.as_bytes());
+                TerminalInputPayload::Owned(bytes)
+            }
             Self::Ctrl(c) => {
                 // modifyOtherKeys level 2: encode Ctrl+key as
                 // `CSI 27 ; modifier ; code ~` so tmux and programs
@@ -946,6 +979,29 @@ impl TerminalInput {
                     TerminalInputPayload::Single(*c)
                 }
             }
+
+            // ── Alt+text ────────────────────────────────────────────────
+            //
+            // No Alt prefix under KKP: the text encodes as the bytes typed
+            // without Alt would, which is what it did before `AltText` existed.
+            Self::AltText(text) => TerminalInputPayload::Owned(
+                text.bytes()
+                    .flat_map(|byte| {
+                        match Self::Ascii(byte).to_payload_kkp(
+                            flags,
+                            decckm_mode,
+                            backarrow_sends_bs,
+                            line_feed_mode,
+                            s8c1t,
+                            meta,
+                        ) {
+                            TerminalInputPayload::Single(b) => vec![b],
+                            TerminalInputPayload::Many(bs) => bs.to_vec(),
+                            TerminalInputPayload::Owned(bs) => bs,
+                        }
+                    })
+                    .collect(),
+            ),
 
             // ── Ctrl+letter ─────────────────────────────────────────────
             Self::Ctrl(c) => {
@@ -1336,6 +1392,79 @@ mod tests {
             S8c1t::SevenBit,
             &meta,
         )
+    }
+
+    // ── AltText (Task 147.24) ───────────────────────────────────────────────
+
+    fn alt_text(text: &str) -> TerminalInput {
+        TerminalInput::AltText(text.into())
+    }
+
+    #[test]
+    fn alt_text_legacy_is_one_escape_then_the_text() {
+        assert_eq!(
+            to_payload_defaults(&alt_text("b")),
+            TerminalInputPayload::Owned(b"\x1bb".to_vec())
+        );
+        assert_eq!(
+            to_payload_defaults(&alt_text("\u{e9}\u{1f600}")),
+            TerminalInputPayload::Owned("\u{1b}\u{e9}\u{1f600}".as_bytes().to_vec()),
+            "multi-byte text gets exactly one prefix"
+        );
+    }
+
+    #[test]
+    fn alt_text_prefix_is_a_plain_escape_in_either_c1_mode() {
+        // Alt+`[` and Alt+`O` are an Alt prefix plus a character, never an
+        // introducer, so S8C1T must not touch them.
+        for mode in [S8c1t::SevenBit, S8c1t::EightBit] {
+            for text in ["[", "O"] {
+                let payload = alt_text(text).to_payload(
+                    Decckm::Ansi,
+                    0,
+                    ApplicationEscapeKey::Reset,
+                    Decbkm::BackarrowSendsDel,
+                    Lnm::LineFeed,
+                    0,
+                    mode,
+                    &KeyEventMeta::PRESS,
+                );
+                assert_eq!(
+                    payload,
+                    TerminalInputPayload::Owned([b"\x1b", text.as_bytes()].concat()),
+                    "{mode:?} Alt+{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn alt_text_with_any_kitty_flag_is_the_unprefixed_text() {
+        for flags in [1_u32, 2, 4, 8, 16, 1 | 2 | 8, 31] {
+            for text in ["b", "B", "ab", "\u{e9}"] {
+                let plain: Vec<u8> = text
+                    .bytes()
+                    .flat_map(
+                        |byte| match to_payload_kkp(&TerminalInput::Ascii(byte), flags) {
+                            TerminalInputPayload::Single(b) => vec![b],
+                            TerminalInputPayload::Many(bs) => bs.to_vec(),
+                            TerminalInputPayload::Owned(bs) => bs,
+                        },
+                    )
+                    .collect();
+                assert_eq!(
+                    to_payload_kkp(&alt_text(text), flags),
+                    TerminalInputPayload::Owned(plain),
+                    "text {text:?}, kitty flags {flags}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn collect_alt_text_is_one_input_and_empty_text_is_none() {
+        assert_eq!(collect_alt_text("abc").len(), 1);
+        assert!(collect_alt_text("").is_empty());
     }
 
     // ── us_qwerty_shifted ────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ use freminal_common::{
         mode::{Mode, TerminalModes},
         modes::{
             MouseModeNumber, ReportMode,
+            alt_sends_escape::AltSendsEscape,
             alternate_scroll::AlternateScroll,
             decanm::Decanm,
             decarm::Decarm,
@@ -21,6 +22,7 @@ use freminal_common::{
             decscnm::ScreenInversion,
             keypad::KeypadMode,
             lnm::Lnm,
+            meta_sends_escape::MetaSendsEscape,
             mouse::{MouseEncoding, MouseTrack},
             s8c1t::S8c1t,
             sync_updates::SynchronizedUpdates,
@@ -278,7 +280,8 @@ impl TerminalState {
             // its own subset of Table 5-9 of the VT510 Programmer Reference.
             // Of the `TerminalState`-owned mode fields only DECCKM (cursor
             // keys) and DECNKM (keypad) are on that table, so only those two
-            // are reset here. Mouse tracking, bracketed paste, focus
+            // are reset here, plus `?1036` / `?1039`, which Task 147.24
+            // returns to their defaults on both resets. Mouse tracking, bracketed paste, focus
             // reporting, synchronized updates, DECSCNM and the rest of
             // `TerminalModes` are deliberately left alone: none are in
             // Table 5-9.
@@ -291,6 +294,8 @@ impl TerminalState {
             TerminalOutput::SoftReset => {
                 self.modes.cursor_key = Decckm::Ansi;
                 self.modes.keypad_mode = KeypadMode::Numeric;
+                self.modes.meta_sends_escape = MetaSendsEscape::default();
+                self.modes.alt_sends_escape = AltSendsEscape::default();
             }
             _ => {}
         }
@@ -310,6 +315,8 @@ impl TerminalState {
             | Mode::SynchronizedUpdates(SynchronizedUpdates::Query)
             | Mode::Decnkm(Decnkm::Query)
             | Mode::Decbkm(Decbkm::Query)
+            | Mode::MetaSendsEscape(MetaSendsEscape::Query)
+            | Mode::AltSendsEscape(AltSendsEscape::Query)
             | Mode::AlternateScroll(AlternateScroll::Query)
             | Mode::Theming(Theming::Query) => {
                 self.handle_mode_query(mode);
@@ -336,6 +343,8 @@ impl TerminalState {
                 self.modes.keypad_mode = KeypadMode::Numeric;
             }
             Mode::Decbkm(v) => self.modes.backarrow_key_mode = *v,
+            Mode::MetaSendsEscape(v) => self.modes.meta_sends_escape = *v,
+            Mode::AltSendsEscape(v) => self.modes.alt_sends_escape = *v,
             Mode::AlternateScroll(v) => self.modes.alternate_scroll = *v,
             // ── Modes handled entirely by TerminalHandler ──────
             Mode::XtExtscrn(_)
@@ -458,6 +467,14 @@ impl TerminalState {
             }
             Mode::Decbkm(Decbkm::Query) => {
                 let resp = self.modes.backarrow_key_mode.report(None);
+                self.handler.write_csi_response(&resp);
+            }
+            Mode::MetaSendsEscape(MetaSendsEscape::Query) => {
+                let resp = self.modes.meta_sends_escape.report(None);
+                self.handler.write_csi_response(&resp);
+            }
+            Mode::AltSendsEscape(AltSendsEscape::Query) => {
+                let resp = self.modes.alt_sends_escape.report(None);
                 self.handler.write_csi_response(&resp);
             }
             Mode::AlternateScroll(AlternateScroll::Query) => {

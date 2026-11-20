@@ -960,3 +960,115 @@ fn not_implemented_dec_modes_decrqm_in_8bit_mode_uses_0x9b_with_question_mark() 
         assert!(!contains_7bit_csi(&resp));
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ?1036 (meta sends escape) and ?1039 (alt sends escape) — Task 147.24.
+// Real modes: DECRQM reports the stored state as Ps=1 / Ps=2. ?1036 defaults
+// to set, ?1039 to reset, and both return to their defaults on RIS and DECSTR.
+// ═══════════════════════════════════════════════════════════════════════════
+
+struct AltEscapeMode {
+    label: &'static str,
+    set: &'static [u8],
+    reset: &'static [u8],
+    query: &'static [u8],
+    /// The DECRPM reply in the default state.
+    default_reply: &'static str,
+    /// The sequence that leaves the default state, and the reply after it.
+    away: &'static [u8],
+    away_reply: &'static str,
+}
+
+const ALT_ESCAPE_MODES: [AltEscapeMode; 2] = [
+    AltEscapeMode {
+        label: "?1036",
+        set: b"\x1b[?1036h",
+        reset: b"\x1b[?1036l",
+        query: b"\x1b[?1036$p",
+        default_reply: "\x1b[?1036;1$y",
+        away: b"\x1b[?1036l",
+        away_reply: "\x1b[?1036;2$y",
+    },
+    AltEscapeMode {
+        label: "?1039",
+        set: b"\x1b[?1039h",
+        reset: b"\x1b[?1039l",
+        query: b"\x1b[?1039$p",
+        default_reply: "\x1b[?1039;2$y",
+        away: b"\x1b[?1039h",
+        away_reply: "\x1b[?1039;1$y",
+    },
+];
+
+#[test]
+fn alt_escape_modes_report_their_defaults() {
+    for mode in &ALT_ESCAPE_MODES {
+        let (mut state, rx) = make_state();
+        assert_eq!(
+            feed_and_collect(&mut state, &rx, mode.query),
+            mode.default_reply,
+            "{}",
+            mode.label
+        );
+    }
+}
+
+#[test]
+fn alt_escape_modes_report_set_and_reset_truthfully() {
+    for mode in &ALT_ESCAPE_MODES {
+        let label = mode.label;
+        let (mut state, rx) = make_state();
+
+        let _ = feed_and_collect(&mut state, &rx, mode.set);
+        assert_eq!(
+            feed_and_collect(&mut state, &rx, mode.query),
+            format!("\x1b[{label};1$y"),
+            "{label} after set"
+        );
+
+        let _ = feed_and_collect(&mut state, &rx, mode.reset);
+        assert_eq!(
+            feed_and_collect(&mut state, &rx, mode.query),
+            format!("\x1b[{label};2$y"),
+            "{label} after reset"
+        );
+    }
+}
+
+#[test]
+fn alt_escape_modes_return_to_their_defaults_on_ris_and_decstr() {
+    for reset_sequence in [&b"\x1bc"[..], &b"\x1b[!p"[..]] {
+        for mode in &ALT_ESCAPE_MODES {
+            let label = mode.label;
+            let (mut state, rx) = make_state();
+
+            let _ = feed_and_collect(&mut state, &rx, mode.away);
+            assert_eq!(
+                feed_and_collect(&mut state, &rx, mode.query),
+                mode.away_reply,
+                "{label} moved off its default"
+            );
+
+            let _ = feed_and_collect(&mut state, &rx, reset_sequence);
+            assert_eq!(
+                feed_and_collect(&mut state, &rx, mode.query),
+                mode.default_reply,
+                "{label} after {reset_sequence:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn alt_escape_modes_decrqm_in_8bit_mode_uses_0x9b() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    for (number, expected) in [
+        ("1036", &b"\x9b?1036;1$y"[..]),
+        ("1039", &b"\x9b?1039;2$y"[..]),
+    ] {
+        let query = format!("\x1b[?{number}$p");
+        let resp = feed_and_collect_bytes(&mut state, &rx, query.as_bytes());
+        assert_eq!(resp, expected, "?{number}");
+    }
+}

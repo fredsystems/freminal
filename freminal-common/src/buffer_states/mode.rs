@@ -11,6 +11,7 @@ use crate::buffer_states::modes::{
     ReportMode,
     allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
+    alt_sends_escape::AltSendsEscape,
     alternate_scroll::AlternateScroll,
     application_escape_key::ApplicationEscapeKey,
     decanm::Decanm,
@@ -35,6 +36,7 @@ use crate::buffer_states::modes::{
     keypad::KeypadMode,
     lnm::Lnm,
     meta_sends_eighth_bit::MetaSendsEighthBit,
+    meta_sends_escape::MetaSendsEscape,
     mouse::{MouseEncoding, MouseTrack},
     numlock_overrides_keypad::NumLockOverridesKeypad,
     private_color_registers::PrivateColorRegisters,
@@ -86,6 +88,10 @@ pub struct TerminalModes {
     pub line_feed_mode: Lnm,
     pub keypad_mode: KeypadMode,
     pub backarrow_key_mode: Decbkm,
+    /// `?1036`: whether legacy Alt+text is prefixed with `ESC`. Defaults to set.
+    pub meta_sends_escape: MetaSendsEscape,
+    /// `?1039`: stored and reported, read by nothing else.
+    pub alt_sends_escape: AltSendsEscape,
     pub alternate_scroll: AlternateScroll,
     /// DEC private mode `?2031` — the current dark/light theming state.
     ///
@@ -159,6 +165,10 @@ pub enum Mode {
     /// `NumLock` overrides the application keypad (`?1035`) — recognised, not
     /// implemented.
     NumLockOverridesKeypad(NumLockOverridesKeypad),
+    /// Meta sends escape (`?1036`) -- gates the legacy Alt prefix.
+    MetaSendsEscape(MetaSendsEscape),
+    /// Alt sends escape (`?1039`) -- stored and reported only.
+    AltSendsEscape(AltSendsEscape),
     /// DECRQM for a mode with no handler. `namespace` records whether the
     /// query carried the `?` prefix so the reply can keep the same form.
     UnknownQuery {
@@ -227,6 +237,8 @@ impl Mode {
             b"?1016" => Self::mouse_encoding_mode(mode, MouseEncoding::SgrPixels, 1016),
             b"?1034" => Self::MetaSendsEighthBit(MetaSendsEighthBit::new(&mode)),
             b"?1035" => Self::NumLockOverridesKeypad(NumLockOverridesKeypad::new(&mode)),
+            b"?1036" => Self::MetaSendsEscape(MetaSendsEscape::new(&mode)),
+            b"?1039" => Self::AltSendsEscape(AltSendsEscape::new(&mode)),
             b"?1045" => Self::XtRevWrap2(XtRevWrap2::new(&mode)),
             b"?1046" => Self::AllowAltScreen(AllowAltScreen::new(&mode)),
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
@@ -319,6 +331,8 @@ impl ReportMode for Mode {
             Self::HiliteMouseTracking(hilite) => hilite.report(override_mode),
             Self::MetaSendsEighthBit(meta) => meta.report(override_mode),
             Self::NumLockOverridesKeypad(numlock) => numlock.report(override_mode),
+            Self::MetaSendsEscape(meta) => meta.report(override_mode),
+            Self::AltSendsEscape(alt) => alt.report(override_mode),
             Self::Unknown(mode) => mode.report(override_mode),
             Self::UnknownQuery { namespace, params } => {
                 let digits = params.iter().map(|&x| x as char).collect::<String>();
@@ -380,6 +394,8 @@ impl fmt::Display for Mode {
             Self::HiliteMouseTracking(hilite) => write!(f, "{hilite}"),
             Self::MetaSendsEighthBit(meta) => write!(f, "{meta}"),
             Self::NumLockOverridesKeypad(numlock) => write!(f, "{numlock}"),
+            Self::MetaSendsEscape(meta) => write!(f, "{meta}"),
+            Self::AltSendsEscape(alt) => write!(f, "{alt}"),
             Self::Unknown(params) => write!(f, "{params}"),
             Self::UnknownQuery { namespace, params } => {
                 write!(f, "{namespace} Unknown Query({params:?})")

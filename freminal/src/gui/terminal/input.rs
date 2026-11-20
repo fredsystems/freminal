@@ -35,7 +35,7 @@ use freminal_terminal_emulator::{
         KKP_MEDIA_TRACK_NEXT_CODEPOINT, KKP_MEDIA_TRACK_PREVIOUS_CODEPOINT, KKP_MENU_CODEPOINT,
         KKP_MUTE_VOLUME_CODEPOINT, KKP_PAUSE_CODEPOINT, KKP_PRINT_SCREEN_CODEPOINT,
         KKP_RAISE_VOLUME_CODEPOINT, KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput,
-        TerminalInputPayload, collect_text,
+        TerminalInputPayload,
     },
     io::InputEvent,
     recording::{EventPayload, RecordingContext},
@@ -43,6 +43,7 @@ use freminal_terminal_emulator::{
 };
 use std::borrow::Cow;
 
+use super::alt_text::{HostPlatform, text_inputs};
 use super::coords::{
     cursor_buffer_row, encode_egui_mouse_pos, visible_window_start, visible_window_start_for,
 };
@@ -1953,7 +1954,15 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             Event::Text(text)
                 if repeat_characters == Decarm::RepeatKey || previous_key.is_none() =>
             {
-                collect_text(text)
+                // Alt is read from the frame's modifiers: `Event::Text`
+                // carries none of its own. The prefix is built here, from
+                // `?1036` as it is now, never added to encoded bytes.
+                text_inputs(
+                    text,
+                    input.modifiers,
+                    HostPlatform::CURRENT,
+                    snap.meta_sends_escape,
+                )
             }
             Event::Text(_) => continue,
             Event::Key {
@@ -4475,6 +4484,173 @@ mod pointer_moved_frame_path_tests {
             "a pixel-granular position change under SgrPixels must be treated as \
              \"reportable\", so this arm must not fall through to extend the selection"
         );
+    }
+}
+
+/// Task 147.24: Alt+text reaches the PTY with its `ESC` prefix, through the
+/// real `Event::Text` path, from the `?1036` state the snapshot carries.
+#[cfg(test)]
+mod alt_text_tests {
+    use super::*;
+    use freminal_terminal_emulator::interface::TerminalEmulator;
+
+    const ALT: Modifiers = Modifiers {
+        alt: true,
+        ..Modifiers::NONE
+    };
+
+    fn snapshot_after(sequence: &[u8]) -> TerminalSnapshot {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(sequence);
+        emu.build_snapshot()
+    }
+
+    fn key_press(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// Feed `events` with `mods` held and return each message sent to the PTY.
+    fn drive(snap: &TerminalSnapshot, mods: Modifiers, events: Vec<Event>) -> Vec<Vec<u8>> {
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+        let mut input_state = InputState::default();
+        input_state.raw.events.extend(events);
+        input_state.modifiers = mods;
+        let binding_map = BindingMap::default();
+        let _ = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &binding_map,
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: InputCarryState {
+                last_reported_mouse_pos: None,
+                previous_key: None,
+                scroll_amount: 0.0,
+                super_state: SuperKeyState::default(),
+            },
+        });
+        input_rx
+            .try_iter()
+            .map(|event| match event {
+                InputEvent::Key(bytes) => bytes,
+                other => panic!("unexpected input event: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn text(s: &str) -> Event {
+        Event::Text(s.to_owned())
+    }
+
+    #[test]
+    fn the_snapshot_carries_1036_and_it_defaults_to_set() {
+        use freminal_common::buffer_states::modes::meta_sends_escape::MetaSendsEscape;
+        assert_eq!(
+            snapshot_after(b"").meta_sends_escape,
+            MetaSendsEscape::Set,
+            "default"
+        );
+        assert_eq!(
+            snapshot_after(b"\x1b[?1036l").meta_sends_escape,
+            MetaSendsEscape::Reset
+        );
+        assert_eq!(
+            snapshot_after(b"\x1b[?1036l\x1b[?1036h").meta_sends_escape,
+            MetaSendsEscape::Set
+        );
+    }
+
+    #[test]
+    fn alt_b_sends_esc_b_while_1036_is_set_and_b_while_it_is_reset() {
+        assert_eq!(
+            drive(&snapshot_after(b""), ALT, vec![text("b")]),
+            vec![b"\x1bb".to_vec()]
+        );
+        assert_eq!(
+            drive(&snapshot_after(b"\x1b[?1036l"), ALT, vec![text("b")]),
+            vec![b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn the_stray_alt_key_event_sends_nothing_so_the_text_is_sent_once() {
+        let events = vec![key_press(Key::B, ALT), text("b")];
+        assert_eq!(
+            drive(&snapshot_after(b""), ALT, events),
+            vec![b"\x1bb".to_vec()]
+        );
+    }
+
+    #[test]
+    fn text_without_alt_is_plain() {
+        assert_eq!(
+            drive(&snapshot_after(b""), Modifiers::NONE, vec![text("b")]),
+            vec![b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn multi_byte_alt_text_gets_a_single_prefix() {
+        assert_eq!(
+            drive(&snapshot_after(b""), ALT, vec![text("\u{e9}")]),
+            vec![b"\x1b\xc3\xa9".to_vec()]
+        );
+    }
+
+    #[test]
+    fn kitty_flags_leave_alt_text_as_it_was() {
+        for flags in [1_u32, 2, 8, 1 | 2 | 8] {
+            let mut snap = snapshot_after(b"");
+            snap.kitty_keyboard_flags = flags;
+            assert_eq!(
+                drive(&snap, ALT, vec![text("b")]),
+                drive(&snap, Modifiers::NONE, vec![text("b")]),
+                "kitty flags {flags}"
+            );
+        }
+    }
+
+    #[test]
+    fn altgr_as_ctrl_alt_is_never_prefixed() {
+        let ctrl_alt = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            drive(&snapshot_after(b""), ctrl_alt, vec![text("@")]),
+            vec![b"@".to_vec()]
+        );
+    }
+
+    #[test]
+    fn alt_prefixed_bracket_is_not_an_introducer_in_either_c1_mode() {
+        for select_mode in [&b"\x1b F"[..], b"\x1b G"] {
+            let snap = snapshot_after(select_mode);
+            for ch in ["[", "O"] {
+                assert_eq!(
+                    drive(&snap, ALT, vec![text(ch)]),
+                    vec![[b"\x1b", ch.as_bytes()].concat()],
+                    "{select_mode:?} Alt+{ch}"
+                );
+            }
+        }
     }
 }
 
