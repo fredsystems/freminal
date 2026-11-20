@@ -4834,6 +4834,33 @@ mod alt_text_tests {
     }
 
     #[test]
+    fn an_alt_released_while_input_is_suppressed_does_not_prefix_later_text() {
+        use super::super::widget::PaneRenderCache;
+        let snap = snapshot_after(b"");
+        let map = BindingMap::default();
+        let mut cache = PaneRenderCache::new();
+        cache.text_modifiers = ALT;
+        // A modal is open while Alt is released.
+        cache.observe_suppressed_frame(Modifiers::NONE);
+        assert_eq!(
+            drive_carrying(
+                &map,
+                &snap,
+                cache.text_modifiers,
+                Modifiers::NONE,
+                vec![text("b")]
+            ),
+            vec![b"b".to_vec()]
+        );
+        // Alt still held when the modal closes keeps its prefix.
+        cache.observe_suppressed_frame(ALT);
+        assert_eq!(
+            drive_carrying(&map, &snap, cache.text_modifiers, ALT, vec![text("b")]),
+            vec![alt_typed(b"b")]
+        );
+    }
+
+    #[test]
     fn text_without_a_key_event_uses_the_modifiers_carried_from_the_last_frame() {
         let snap = snapshot_after(b"");
         let map = BindingMap::default();

@@ -1833,6 +1833,14 @@ pub struct PaneRenderCache {
 }
 
 impl PaneRenderCache {
+    /// Record a frame whose pane input was suppressed (a modal, menu, search
+    /// overlay or drag). No key event reached the input path, so the
+    /// modifiers carried for text are taken from this frame: an Alt released
+    /// while a modal was open must not prefix text typed after it closes.
+    pub(super) const fn observe_suppressed_frame(&mut self, modifiers: egui::Modifiers) {
+        self.text_modifiers = modifiers;
+    }
+
     /// Create a new cache with default initial values.
     #[must_use]
     pub fn new() -> Self {
@@ -3230,6 +3238,7 @@ impl FreminalTerminalWidget {
         };
 
         if suppressors.any() {
+            cache.observe_suppressed_frame(ui.input(|input_state| input_state.modifiers));
             let request_scroll_repaint = if suppressors.scroll_passes_through(pane_focus_now) {
                 let result = ui.input(|input_state| {
                     scroll_overlay_passthrough(
