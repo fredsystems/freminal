@@ -8052,6 +8052,10 @@ Stale stub text was corrected at the same time:
   (`-p freminal --features gl-pixel --all-targets`, `-D warnings`) runs from `cargo xtask check`
   (the CI `check` matrix) and `cargo xtask lint`/`ci`; the weekly `gl-pixel` workflow only
   runs tests.
+- **147.28 (done).** `command_finished_template` (`nullOr str`, default null) is in the
+  home-manager module and its `notificationsSection` binding; a `lib.evalModules` evaluation
+  setting it produced `command_finished_template = ...` under `[notifications]` in the
+  generated `config.toml`. nixfmt, statix and deadnix pass.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

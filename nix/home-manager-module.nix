@@ -179,6 +179,7 @@ let
           routing_recording
           routing_paste_blocked
           routing_config_reload
+          command_finished_template
           osc99_filters
           ;
       };
@@ -1154,6 +1155,21 @@ in
             Routing for the "config reloaded" toast: "toast" (in-app only)
             or "disabled" (suppress).
             Null uses the default ("toast").
+          '';
+        };
+
+        command_finished_template = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = ''
+            Template for the body of command-finished notifications.
+            Tokens: {command} (the command text, or "Command" if it scrolled
+            away), {duration} (human-readable elapsed time, e.g. "3s" or
+            "2m15s"), {exit_code} (the numeric exit code, or "?" if the shell
+            omitted it), {cwd} (the working directory at prompt start, or
+            empty), and {tab_name} (the display name of the tab the command
+            ran in).
+            Null uses the default ("{command} finished in {duration} (exit {exit_code})").
           '';
         };
 
