@@ -74,6 +74,8 @@ mod resize_and_alt_tests;
 mod row_number_tests;
 mod row_store;
 #[cfg(test)]
+mod saved_cursor_resize_tests;
+#[cfg(test)]
 mod screen_switch_tests;
 mod scroll;
 mod tabs;

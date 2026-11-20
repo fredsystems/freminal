@@ -253,15 +253,54 @@ fn decrc_without_pending_wrap_overwrites_the_last_column() {
 }
 
 #[test]
-fn decrc_after_a_narrowing_resize_clamps_without_pending_wrap() {
+fn decrc_after_a_narrowing_resize_keeps_pending_wrap_on_the_reflowed_cell() {
     let mut h = TerminalHandler::new(10, 5);
     feed(&mut h, "abcdefghij\x1b7\x1b[4;1H");
     h.handle_resize(5, 5, 0, 0);
     feed(&mut h, "\x1b8");
-    assert_eq!(pos(&h).0, 4, "clamped to the new right edge");
 
+    // The saved 'j' reflowed to the last column of the second row, so the
+    // cursor is still just past it (Task 147.18, Ghostty `Screen.resize`).
     let row = pos(&h).1;
+    assert_eq!(cell_at(&h, 4, row).into_utf8(), "j");
+    assert_eq!(pos(&h).0, 5, "pending wrap at the new right edge");
+
     feed(&mut h, "K");
-    assert_eq!(pos(&h).1, row, "the print did not wrap");
-    assert_eq!(cell_at(&h, 4, row).into_utf8(), "K");
+    assert_eq!(pos(&h).1, row + 1, "the print wrapped");
+    assert_eq!(cell_at(&h, 0, row + 1).into_utf8(), "K");
+}
+
+#[test]
+fn decrc_after_a_widening_resize_continues_after_the_saved_character() {
+    let mut h = TerminalHandler::new(10, 5);
+    feed(&mut h, "abcdefghij\x1b7\x1b[4;1H");
+    h.handle_resize(20, 5, 0, 0);
+    feed(&mut h, "\x1b8");
+
+    assert_eq!(pos(&h), (10, 0), "the column after 'j'");
+    feed(&mut h, "K");
+    assert_eq!(cell_at(&h, 10, 0).into_utf8(), "K", "no wrap");
+}
+
+#[test]
+fn mode_1049_leave_after_a_resize_restores_onto_the_saved_text() {
+    // The classic case: `?1049h`, resize the window, `?1049l`.
+    let mut h = TerminalHandler::new(20, 4);
+    for i in 0..10 {
+        feed(&mut h, &format!("row {i}\r\n"));
+    }
+    feed(&mut h, "\x1b[2;3H");
+    let saved_row = pos(&h).1;
+    assert_eq!(cell_at(&h, 0, saved_row).into_utf8(), "r");
+    feed(&mut h, "\x1b[?1049h");
+    assert!(h.is_alternate_screen());
+
+    h.handle_resize(20, 8, 0, 0);
+    feed(&mut h, "\x1b[?1049l");
+
+    assert!(!h.is_alternate_screen());
+    assert_eq!(pos(&h).0, 2);
+    let row = pos(&h).1;
+    let text: String = (0..5).map(|x| cell_at(&h, x, row).into_utf8()).collect();
+    assert_eq!(text, "row 8", "the cursor is on the row it was saved on");
 }

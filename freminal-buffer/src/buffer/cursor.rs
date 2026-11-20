@@ -45,8 +45,13 @@ pub(in crate::buffer) enum SavedWrapState {
 /// `cursor.pos` is therefore in **screen coordinates** (row 0 is the top of
 /// the visible window), unlike the live cursor, whose `pos.y` indexes the
 /// retained rows. Because the saved row never names a stored row, scrolling,
-/// eviction, reflow and a switch between the primary and alternate screens
-/// cannot invalidate it; a resize only matters through the clamp on restore.
+/// eviction and a switch between the primary and alternate screens cannot
+/// invalidate it.
+///
+/// A resize is the exception: it changes which screen row holds a given
+/// cell (reflow re-wraps it, a taller window pulls rows back from
+/// scrollback, a shorter one pushes them out), so the slot follows its cell
+/// through [`Buffer::set_size`]. See [`SavedCursorPin`].
 ///
 /// Each screen has its own slot (`Buffer::saved_cursor` for the active screen,
 /// `ParkedScreen::saved_cursor` for the parked one), so a switch parks the
@@ -55,9 +60,8 @@ pub(in crate::buffer) enum SavedWrapState {
 ///
 /// DECSC also saves the pending-wrap flag and DECRC restores it (xterm
 /// `CursorSave`/`CursorRestore` keep `do_wrap` in `DECSC_FLAGS`; Ghostty and
-/// `WezTerm` do the same), but only while the screen width is unchanged since
-/// the save. After a resize the saved column no longer names the right edge,
-/// so DECRC clamps the column and clears pending wrap.
+/// `WezTerm` do the same). A resize that leaves the saved cell short of the
+/// right edge converts pending wrap into the column after the cell.
 #[derive(Debug, Clone)]
 pub(in crate::buffer) struct SavedCursor {
     /// The cursor state at the time of the save, with `pos` in screen
@@ -72,7 +76,74 @@ pub(in crate::buffer) struct SavedCursor {
     pub(in crate::buffer) wrap: SavedWrapState,
 }
 
+/// Where a screen's saved cursor sits for the duration of a resize.
+///
+/// The slot is kept in screen coordinates, which a resize invalidates, so
+/// [`Buffer::set_size`] pins the saved cell to its row number and column
+/// first, carries that through the reflow, height change and eviction like
+/// the live cursor, and reads it back as screen coordinates afterwards
+/// ([`Buffer::settle_saved_cursor`]). This is Ghostty's `saved_cursor_pin`
+/// (`Screen.zig` `resize`); xterm's `AdjustSavedCursor` is the same idea for
+/// the one case it handles, rows pulled back from scrollback.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::buffer) enum SavedCursorPin {
+    /// The saved cell, as a row of the screen's row store and a column.
+    /// Row numbers survive eviction and popped rows; a reflow translates it.
+    Cell { row: RowNumber, x: usize },
+    /// The reflow could not place the cell.
+    Lost,
+}
+
 impl Buffer {
+    /// Pin the saved cursor's cell ahead of a resize, or `None` when there is
+    /// nothing to follow: no saved cursor, or one saved below every stored
+    /// row (blank screen space no text occupies), which keeps its screen
+    /// position.
+    pub(in crate::buffer) fn pin_saved_cursor(&self) -> Option<SavedCursorPin> {
+        let saved = self.saved_cursor.as_ref()?;
+        let index = self.visible_window_start(0) + saved.cursor.pos.y;
+        (index < self.rows.len()).then(|| SavedCursorPin::Cell {
+            row: self.rows.number_of(index),
+            x: saved.cursor.pos.x,
+        })
+    }
+
+    /// Read a pinned saved cursor back as screen coordinates, once the
+    /// resize has settled the dimensions and the rows.
+    ///
+    /// When the cell left the active area (evicted, or in scrollback now) the
+    /// slot goes to the top-left with no pending wrap, as Ghostty does. A
+    /// cell held in pending wrap that is no longer in the last column loses
+    /// the pending state and its column advances by one, so the next print
+    /// lands where it would have wrapped to (Ghostty `Screen.resize`).
+    pub(in crate::buffer) fn settle_saved_cursor(&mut self, pin: Option<SavedCursorPin>) {
+        let Some(pin) = pin else {
+            return;
+        };
+        let screen_y = match pin {
+            SavedCursorPin::Cell { row, .. } => row
+                .rows_after(self.rows.base())
+                .and_then(|index| index.checked_sub(self.visible_window_start(0)))
+                .filter(|&y| y < self.height),
+            SavedCursorPin::Lost => None,
+        };
+        let last_column = self.width.saturating_sub(1);
+        let Some(saved) = self.saved_cursor.as_mut() else {
+            return;
+        };
+        if let (SavedCursorPin::Cell { x, .. }, Some(y)) = (pin, screen_y) {
+            saved.cursor.pos.y = y;
+            saved.cursor.pos.x = x.min(last_column);
+            if saved.wrap == SavedWrapState::Pending && saved.cursor.pos.x < last_column {
+                saved.cursor.pos.x += 1;
+                saved.wrap = SavedWrapState::Settled;
+            }
+        } else {
+            saved.cursor.pos = CursorPos::default();
+            saved.wrap = SavedWrapState::Settled;
+        }
+    }
+
     /// Logical number of the oldest retained row of the active screen.
     ///
     /// Row `i` of [`Self::rows`] is numbered `row_base() + i`. Advances when
@@ -314,17 +385,16 @@ impl Buffer {
     /// with `sc->saved == False`, Ghostty `restoreCursor`).
     ///
     /// The saved position is screen-relative, so the cursor returns to the
-    /// same screen row and column however much output has scrolled, evicted
-    /// or reflowed the content in between (xterm `CursorRestore`). The
-    /// position is clamped to the current screen dimensions, so a resize
-    /// between save and restore never produces an out-of-bounds cursor, and
-    /// the cursor is never placed in off-screen scrollback.
+    /// same screen row and column however much output has scrolled or evicted
+    /// the content in between (xterm `CursorRestore`). A resize in between
+    /// moves the slot with its cell (see [`SavedCursorPin`]), and the position
+    /// is clamped to the current screen dimensions, so the cursor is never
+    /// out of bounds nor placed in off-screen scrollback.
     ///
     /// A save made in the pending-wrap position restores pending wrap, so the
-    /// next printed character wraps (xterm, Ghostty, `WezTerm`). That holds only
-    /// while the saved column is still the right edge, i.e. the width has not
-    /// changed since the save: after a resize the column is clamped and pending
-    /// wrap is cleared.
+    /// next printed character wraps (xterm, Ghostty, `WezTerm`). That holds
+    /// while the saved column is the right edge; a resize that leaves it
+    /// elsewhere has already turned the pending wrap into the next column.
     ///
     /// The slot is per screen: each screen has its own DECSC slot, parked and
     /// restored with the screen (xterm `sc[]`, Ghostty `saved_cursor` per

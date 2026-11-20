@@ -21,6 +21,7 @@ use freminal_common::buffer_states::{
 use crate::row::{Row, RowJoin, RowOrigin};
 
 use super::command_block_log::CommandBlockLog;
+use super::cursor::SavedCursorPin;
 use super::reflow_remap::{OldRowMeta, ReflowRemap};
 use super::{Buffer, ParkedScreen, RowStore};
 use crate::image_store::ImageStore;
@@ -56,6 +57,11 @@ impl Buffer {
         let parked_primary = self.parked_primary.take();
         let parked_alternate = self.parked_alternate.take();
 
+        // The saved cursor (DECSC) is kept in screen coordinates, which this
+        // resize invalidates. Pin its cell now, carry it through the reflow,
+        // height change and eviction below, and read it back at the end.
+        let mut saved_pin = self.pin_saved_cursor();
+
         // ---- NO BLANKET DECOMPACT NEEDED (Task 118.3 fix / 118.x follow-up) ----
         // An earlier version of this function force-decompacted every row
         // (including all of scrollback) up front on every resize, which was a
@@ -88,7 +94,7 @@ impl Buffer {
         // update each row's max_width (content that extends beyond the new width
         // is simply clipped, which matches xterm/VT behaviour).
         let after_reflow = if width_changed && self.kind != BufferType::Alternate {
-            self.reflow_to_width(new_width);
+            self.reflow_rows(new_width, &mut saved_pin);
             0
         } else {
             scroll_offset
@@ -190,6 +196,8 @@ impl Buffer {
         // `Buffer::compact_idle_scrollback`, called from the PTY thread's
         // idle tick.
         let final_offset = self.enforce_scrollback_limit(after_resize);
+
+        self.settle_saved_cursor(saved_pin);
 
         // Resize whichever screen is parked, so every store matches the
         // buffer's dimensions and a later switch installs a screen of the
@@ -401,10 +409,6 @@ impl Buffer {
         (resized, remap)
     }
 
-    // Inherently large: the reflow algorithm walks every logical line, splits/joins rows at the
-    // new width, and preserves all cell content and tags. The size reflects algorithmic
-    // complexity, not lack of structure.
-    #[allow(clippy::too_many_lines)]
     /// Re-wrap all rows to `new_width` columns without losing any text.
     ///
     /// ## Algorithm
@@ -434,8 +438,23 @@ impl Buffer {
     ///    prompt marks and command blocks and kept for
     ///    [`Buffer::take_reflow_remap`].
     ///
+    /// The saved cursor (DECSC) follows its cell through the reflow.
+    ///
     /// The operation is O(total cells) — linear in the amount of text.
     pub fn reflow_to_width(&mut self, new_width: usize) {
+        let mut saved_pin = self.pin_saved_cursor();
+        self.reflow_rows(new_width, &mut saved_pin);
+        self.settle_saved_cursor(saved_pin);
+    }
+
+    /// The reflow itself, carrying `saved_pin` (the pinned saved cursor, see
+    /// [`SavedCursorPin`]) through the row renumbering. The caller settles it
+    /// once the dimensions are final.
+    // Inherently large: the reflow algorithm walks every logical line, splits/joins rows at the
+    // new width, and preserves all cell content and tags. The size reflects algorithmic
+    // complexity, not lack of structure.
+    #[allow(clippy::too_many_lines)]
+    fn reflow_rows(&mut self, new_width: usize, saved_pin: &mut Option<SavedCursorPin>) {
         if new_width == 0 || self.rows.is_empty() || new_width == self.width {
             // Nothing to do
             return;
@@ -836,6 +855,16 @@ impl Buffer {
             line_new_starts,
             new_row_cells,
         );
+        if let Some(pin) = saved_pin.as_mut()
+            && let SavedCursorPin::Cell { row, x } = *pin
+        {
+            *pin = remap
+                .map_cell(row, x)
+                .map_or(SavedCursorPin::Lost, |(row, x)| SavedCursorPin::Cell {
+                    row,
+                    x,
+                });
+        }
         self.record_reflow_remap(remap);
     }
 

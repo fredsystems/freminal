@@ -7978,6 +7978,18 @@ Stale stub text was corrected at the same time:
   that kept the store by inferring "untouched" from row shape was rejected in review as a
   heuristic. `bench_alternate_screen_switch` vs `before_147_12`: `enter_alternate` −12.2%,
   `leave_alternate` −5.4% (noise), `alternate_reenter` −15.2% (its setup uses the new entry).
+- **147.18 (done).** `set_size` pins the DECSC slot to its cell (`pin_saved_cursor`: row number
+  plus column), carries it through reflow with the new `ReflowRemap::map_cell` (the stage
+  remap that carries marks and blocks, now cell-granular; `offset_to_new_row` delegates to
+  it), and settles it back to screen coordinates after the scrollback limit
+  (`settle_saved_cursor`). Parked screens get it through `resize_parked_screen`'s `set_size`,
+  which covers xterm's `AdjustSavedCursor`. Ghostty's fallbacks: a cell off the active area goes
+  to the top-left; pending wrap off the last column becomes `x + 1`. A slot saved on blank
+  space below every stored row keeps its screen position. 13 buffer tests plus two handler
+  tests (widening, `?1049h`/resize/`?1049l`). Five earlier tests (147.6's "clear pending wrap
+  on resize", two 125.C6 reflow tests) were rewritten to the 147.18 semantics.
+  `buffer_resize` / `reflow_full_depth`: within noise (a back-to-back rerun; the first run's
+  baseline was taken under load).
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

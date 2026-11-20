@@ -973,7 +973,9 @@ fn decrc_without_pending_wrap_restores_the_column_as_before() {
 }
 
 #[test]
-fn decrc_after_a_narrowing_resize_clamps_and_clears_pending_wrap() {
+fn decrc_after_a_narrowing_resize_keeps_pending_wrap_on_the_reflowed_cell() {
+    // Task 147.18: the saved 'j' reflows to the last column of the second
+    // piece, so the cursor is still just past it and the next print wraps.
     let mut buf = Buffer::new(10, 5);
     buf.set_cursor_pos(Some(0), Some(2));
     buf.insert_text(&text("abcdefghij"));
@@ -983,27 +985,27 @@ fn decrc_after_a_narrowing_resize_clamps_and_clears_pending_wrap() {
     buf.set_size(5, 5, 0);
     buf.set_cursor_pos(Some(0), Some(0));
     buf.restore_cursor();
-    assert_eq!(buf.cursor.pos.x, 4, "clamped to the new right edge");
+    assert_eq!(buf.cursor.pos.x, 5, "pending wrap at the new right edge");
 
     let row = buf.cursor_screen_pos().y;
     buf.insert_text(&text("K"));
     assert_eq!(
         buf.cursor_screen_pos().y,
-        row,
-        "no wrap on the print after a resize-clamped restore"
+        row + 1,
+        "the print after the restore wraps"
     );
-    assert_eq!(buf.cursor.pos.x, 5, "K filled the last column");
+    assert_eq!(buf.cursor.pos.x, 1);
 }
 
 #[test]
-fn decrc_after_a_widening_resize_clears_pending_wrap() {
+fn decrc_after_a_widening_resize_moves_to_the_column_after_the_saved_cell() {
     let mut buf = Buffer::new(10, 5);
     buf.insert_text(&text("abcdefghij"));
     buf.save_cursor();
 
     buf.set_size(20, 5, 0);
     buf.restore_cursor();
-    assert_eq!(buf.cursor.pos.x, 9, "the saved column, no longer the edge");
+    assert_eq!(buf.cursor.pos.x, 10, "pending wrap became the next column");
     assert_eq!(buf.cursor_screen_pos().y, 0);
 }
 
