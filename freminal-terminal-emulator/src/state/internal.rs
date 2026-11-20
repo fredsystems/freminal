@@ -40,7 +40,7 @@ use freminal_common::{
 use std::{fmt::Write as _, time::Instant};
 
 use crate::{
-    ansi::{FreminalAnsiParser, apply_parser_mode_change},
+    ansi::{FreminalAnsiParser, Utf8Tracker, apply_parser_mode_change},
     ansi_components::tracer::BoundedDisplay,
     input::{KeyEventMeta, TerminalInput, TerminalInputPayload},
     io::PtyWrite,
@@ -741,8 +741,12 @@ impl TerminalState {
                     continue;
                 };
                 // If the declared sequence extends past the end of the buffer,
-                // this leading byte begins an incomplete sequence.
-                if i + seq_len > len {
+                // this leading byte begins an incomplete sequence -- held back
+                // only when what is there is a well-formed prefix. An
+                // ill-formed tail (`E0 84`: `E0` needs `A0`-`BF` next) is not
+                // a character in progress and is processed now, so a C1 byte
+                // in it acts under S8C1T without waiting for another read.
+                if i + seq_len > len && Utf8Tracker::is_incomplete_prefix(&incoming[i..]) {
                     found = Some(i);
                 }
                 // Whether or not it's incomplete we stop scanning: a leading byte
@@ -1058,6 +1062,26 @@ mod tests {
             state.leftover_data.is_none(),
             "leftover should be cleared after reassembly"
         );
+    }
+
+    #[test]
+    fn an_ill_formed_utf8_tail_is_processed_now() {
+        // `84` cannot continue `E0`, so the tail is not held back: under
+        // S8C1T the `84` is IND in this read (PR #589 review).
+        let mut state = TerminalState::default();
+        let before = state.handler.cursor_pos();
+        state.handle_incoming_data(b"\x1b G\xe0\x84");
+        assert!(state.leftover_data.is_none(), "nothing is held back");
+        assert_eq!(state.handler.cursor_pos().y, before.y + 1, "IND moved down");
+    }
+
+    #[test]
+    fn a_well_formed_incomplete_utf8_tail_is_held_back() {
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b G\xf0\x9f");
+        assert_eq!(state.leftover_data, Some(vec![0xF0, 0x9F]));
+        state.handle_incoming_data(b"\x98\x80");
+        assert!(state.leftover_data.is_none());
     }
 
     #[test]

@@ -8046,6 +8046,12 @@ diff). Dispositions:
   R34 a parked screen is resized under the shared left/right margins; R35 an empty inherited
   `CARGO_ENCODED_RUSTDOCFLAGS` carries the denial. R33 (per-destination broadcast encoding)
   is routed to Task 137. Mutation checks were run on R24-R28, R31, R32 and R34.
+- **Third round (CodeRabbit, 2026-11-20), R36 (outside the diff):** the state layer held back a
+  read's tail whenever a lead byte's declared length ran past the end, so `ESC SP G E0 84`
+  withheld the `84` (IND under S8C1T) until the next read. The tail is now held only when it
+  is a well-formed incomplete prefix (`Utf8Tracker::is_incomplete_prefix`, the parser's own
+  Table 3-7 ranges); `F0 9F` is still held. End-to-end tests for both; the IND test fails
+  without the fix.
 
 ### 147 Status notes
 

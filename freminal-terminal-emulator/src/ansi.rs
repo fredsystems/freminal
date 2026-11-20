@@ -153,7 +153,7 @@ pub fn parse_param_as<T: std::str::FromStr>(
 /// (`C5 8E`) is a letter there, not SS2; freminal applies the same rule in
 /// the ground state and inside OSC, DCS and APC strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Utf8Tracker {
+pub(crate) struct Utf8Tracker {
     /// Continuation bytes the character in progress still expects.
     pending: u8,
     /// The lowest byte the next continuation may take: the second byte of an
@@ -195,6 +195,23 @@ impl Utf8Tracker {
         };
         *self = Self { pending, lo, hi };
         false
+    }
+
+    /// Whether `bytes` is a well-formed UTF-8 prefix that is not yet a whole
+    /// character: a valid lead byte followed only by continuations its
+    /// prefix allows (`F0 9F` is; `E0 84` is not, since `E0` needs `A0`-`BF`
+    /// next). Used to decide whether a read's tail is held back for the next
+    /// read or processed now.
+    pub(crate) fn is_incomplete_prefix(bytes: &[u8]) -> bool {
+        let Some((&lead, rest)) = bytes.split_first() else {
+            return false;
+        };
+        let mut tracker = Self::NONE;
+        let _ = tracker.continues(lead);
+        if tracker.pending == 0 {
+            return false;
+        }
+        rest.iter().all(|&b| tracker.continues(b)) && tracker.pending > 0
     }
 
     /// Whether `b`, the next byte of an open string, is the 8-bit C1 String
@@ -3412,6 +3429,32 @@ mod tests {
         // The invalid `1` is consumed, as it is in a short sequence.
         assert_eq!(out, vec![TerminalOutput::Invalid, data("X")]);
         assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn incomplete_prefix_accepts_only_well_formed_partial_characters() {
+        for ok in [
+            &[0xC3][..],
+            &[0xE0, 0xA0],
+            &[0xF0, 0x9F],
+            &[0xF0, 0x9F, 0x98],
+            &[0xED, 0x9F],
+        ] {
+            assert!(Utf8Tracker::is_incomplete_prefix(ok), "{ok:x?}");
+        }
+        for bad in [
+            &[][..],
+            b"a",
+            &[0x84],
+            &[0xC0],
+            &[0xE0, 0x84],
+            &[0xED, 0xA0],
+            &[0xF4, 0x90],
+            &[0xF5, 0x80],
+            &[0xC3, 0xA9],
+        ] {
+            assert!(!Utf8Tracker::is_incomplete_prefix(bad), "{bad:x?}");
+        }
     }
 
     #[test]
