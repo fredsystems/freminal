@@ -61,3 +61,5 @@ pub mod unicode_placeholder;
 pub mod url;
 /// `WindowManipulation` — window-level commands (resize, title, report queries).
 pub mod window_manipulation;
+/// XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`) item and action types.
+pub mod xtsmgraphics;

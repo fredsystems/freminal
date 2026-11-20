@@ -58,10 +58,12 @@
 //! | `?`    | none         | `h` / `l`     | DECSET / DECRST              | `dec_modes`         |
 //! | `?`    | none         | `n`           | DEC private DSR              | `dsr`               |
 //! | `?`    | none         | `u`           | Kitty keyboard: query        | `scorc`             |
+//! | `?`    | none         | `S`           | XTSMGRAPHICS                 | `xtsmgraphics`      |
 //! | `?`    | `$`          | `p`           | DECRQM (DEC private mode)    | `decrqm`            |
 //! | `>`    | none         | `c`           | DA2                          | `da`                |
 //! | `>`    | none         | `q`           | XTVERSION                    | `xtversion`         |
 //! | `>`    | none         | `m`           | XTMODKEYS (modifyOtherKeys)  | `modify_other_keys` |
+//! | `>`    | none         | `t` / `T`     | XTSMTITLE / XTRMTITLE        | (ignored, in router)|
 //! | `>`    | none         | `u`           | Kitty keyboard: push         | `scorc`             |
 //! | `<`    | none         | `u`           | Kitty keyboard: pop          | `scorc`             |
 //! | `=`    | none         | `c`           | DA3                          | `da`                |
@@ -104,4 +106,5 @@ pub mod su;
 pub mod tbc;
 pub mod util;
 pub mod vpa;
+pub mod xtsmgraphics;
 pub mod xtversion;

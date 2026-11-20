@@ -9,6 +9,7 @@ use crate::{
         mode::Mode,
         osc::AnsiOscType,
         window_manipulation::WindowManipulation,
+        xtsmgraphics::{GraphicsAttributeAction, GraphicsAttributeItem},
     },
     cursor::CursorVisualStyle,
     sgr::SelectGraphicRendition,
@@ -211,6 +212,13 @@ pub enum TerminalOutput {
     /// CSI Ps x — DECREQTPARM: Request Terminal Parameters.
     /// Ps=0 → respond with `CSI 2 ; ... x`; Ps=1 → respond with `CSI 3 ; ... x`.
     RequestTerminalParameters(u8),
+    /// CSI ? Pi ; Pa ; Pv S — XTSMGRAPHICS: set or request a graphics attribute.
+    ///
+    /// The handler answers with `CSI ? Pi ; Ps [; Pv ...] S`.
+    GraphicsAttributeRequest {
+        item: GraphicsAttributeItem,
+        action: GraphicsAttributeAction,
+    },
     /// ENQ (0x05) — transmit the answerback message back to the PTY.
     ///
     /// The VT100 spec requires the terminal to send its configured answerback
@@ -339,6 +347,12 @@ impl std::fmt::Display for TerminalOutput {
             Self::ModifyOtherKeys(level) => write!(f, "ModifyOtherKeys({level})"),
             Self::RequestTertiaryDeviceAttributes => write!(f, "RequestTertiaryDeviceAttributes"),
             Self::RequestTerminalParameters(ps) => write!(f, "RequestTerminalParameters({ps})"),
+            Self::GraphicsAttributeRequest { item, action } => {
+                write!(
+                    f,
+                    "GraphicsAttributeRequest(item={item:?}, action={action:?})"
+                )
+            }
             Self::Enq => write!(f, "Enq"),
         }
     }
@@ -496,6 +510,19 @@ mod tests {
     fn display_request_terminal_parameters() {
         let s = TerminalOutput::RequestTerminalParameters(0).to_string();
         assert!(s.contains("RequestTerminalParameters"), "got: {s}");
+    }
+
+    #[test]
+    fn display_graphics_attribute_request() {
+        let s = TerminalOutput::GraphicsAttributeRequest {
+            item: GraphicsAttributeItem::SixelGeometry,
+            action: GraphicsAttributeAction::ReadMaximum,
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "GraphicsAttributeRequest(item=SixelGeometry, action=ReadMaximum)"
+        );
     }
 
     #[test]

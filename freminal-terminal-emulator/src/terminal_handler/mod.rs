@@ -2308,6 +2308,9 @@ impl TerminalHandler {
             TerminalOutput::RequestTerminalParameters(ps) => {
                 self.handle_request_terminal_parameters(*ps);
             }
+            TerminalOutput::GraphicsAttributeRequest { item, action } => {
+                self.handle_graphics_attribute_request(*item, *action);
+            }
             TerminalOutput::RequestDeviceNameAndVersion => {
                 self.handle_device_name_and_version();
             }

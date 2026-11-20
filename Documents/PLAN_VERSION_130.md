@@ -7944,6 +7944,17 @@ Stale stub text was corrected at the same time:
   the Option-composed character, so `both` sent `ESC ∫`) and removed; it is Task 152, with
   per-side `left`/`right`. `bench_to_payload` (vs `before_147_24`): `legacy_mix` −14.3%,
   `kkp_mix` −5.3% (baseline under load; no regression).
+- **147.9 (done).** New `TerminalOutput::GraphicsAttributeRequest { item, action }`
+  (`buffer_states/xtsmgraphics.rs`), parser `csi_commands/xtsmgraphics.rs`, reply in
+  `reports.rs` through `write_csi_response`. Forms read from xterm `charproc.c`
+  (`CASE_GRAPHICS_ATTRIBUTES`): value fields only on status 0, two values for geometry;
+  exactly three parameters or no reply; a non-numeric `Pi`/`Pa` gets no reply. Sixel read is
+  grid × cell pixels clamped to 4096, the maximum `min(MAX_SIXEL_DIMENSION,
+  isqrt(MAX_SIXEL_PIXELS))`. **Plan correction:** the subtask table said `Pi=3` answers status
+  3, but its own premise ("xterm with ReGIS absent") gives status 1: with
+  `OPT_REGIS_GRAPHICS` compiled out, `Pi=3` reaches xterm's `default:` arm. The orchestrator
+  changed it to 1. `CSI > Pm t` / `CSI > Pm T` are routed to a debug-logged ignore. The
+  dispatch matrix gains three routed keys (52). COVERAGE/GAPS are 147.17.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
