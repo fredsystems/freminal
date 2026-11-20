@@ -1482,7 +1482,7 @@ impl Buffer {
     /// stored with the same mechanism ED uses ([`Row::clear_with_tag`]): with a
     /// default background the rows stay sparse, otherwise every cell is an
     /// explicit blank. ED, EL and the other erases blank with the same
-    /// tag ([`Self::erase_tag`]).
+    /// tag (`Self::erase_tag`).
     pub fn clear_alternate_screen(&mut self) {
         if self.kind != BufferType::Alternate {
             return;

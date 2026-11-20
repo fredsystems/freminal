@@ -592,7 +592,7 @@ impl Buffer {
     /// the underlying store data for images no longer referenced anywhere.
     ///
     /// `scroll_offset` is always `0` from the PTY thread (see
-    /// [`Self::visible_window_start`]).
+    /// `Self::visible_window_start`).
     pub fn clear_image_placements_visible(&mut self, scroll_offset: usize) -> Vec<u64> {
         let start = self.visible_window_start(scroll_offset);
         let mut ids: Vec<u64> = Vec::new();
@@ -722,7 +722,7 @@ impl Buffer {
     /// subsequent output never overwrites the image's own cells (Task
     /// 100.15 — previously the cursor was parked on the image's own last
     /// row in this case, so the very next character write destroyed the
-    /// image via [`Self::clear_images_overwritten_by_text`]). The only
+    /// image via `Self::clear_images_overwritten_by_text`). The only
     /// exception is a primary-buffer image tall enough that appending
     /// this row and re-enforcing the scrollback limit drains the image
     /// itself off the top — an edge case limited to images taller than

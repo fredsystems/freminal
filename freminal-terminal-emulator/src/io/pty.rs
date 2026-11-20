@@ -395,7 +395,7 @@ const fn classify_reader_send_failure(shutdown_signalled: bool) -> ReaderSendFai
 /// `queued_bytes` is the number of reply bytes sent on the channel and not yet
 /// written to the PTY.  The handler adds to it when it queues a reply and drops
 /// replies past `MAX_QUEUED_REPLY_BYTES`; the writer thread subtracts when it
-/// has written one (see [`run_writer_loop`]).
+/// has written one (see `run_writer_loop`).
 pub struct ReplyQueue {
     /// Receives terminal-generated replies.
     pub rx: Receiver<PtyWrite>,
@@ -404,7 +404,7 @@ pub struct ReplyQueue {
     /// Latest-value slot for a pending DECCOLM resize, shared with the handler.
     /// The handler stores the requested size here and queues a
     /// `PtyWrite::ApplyPendingResize` marker only when the slot was empty; the
-    /// writer takes the slot when it applies a marker (see [`apply_and_release`]).
+    /// writer takes the slot when it applies a marker (see `apply_and_release`).
     pub pending_resize: Arc<ArcSwapOption<FreminalTerminalSize>>,
 }
 

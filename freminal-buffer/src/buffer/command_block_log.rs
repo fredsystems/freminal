@@ -38,7 +38,7 @@ use freminal_common::buffer_states::command_block::CommandBlock;
 /// a replacement log that happened to reach the same count.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Identifies one state of a [`CommandBlockLog`]'s contents.
+/// Identifies one state of a `CommandBlockLog`'s contents.
 ///
 /// Equal generations from the same log (or a clone of it) mean identical
 /// contents. Generations are otherwise opaque: they are not ordered and say

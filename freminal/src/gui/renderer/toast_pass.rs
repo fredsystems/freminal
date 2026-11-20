@@ -9,17 +9,17 @@
 //! VBOs — modeled directly on the image pass in [`super::gpu`] (see
 //! `init_image_pass` / `setup_img_attribs` / `upload_img_verts` /
 //! `draw_images`). It is driven by the toast overlay's `PaintCallback` in
-//! [`crate::gui::toast`] (see `ToastStack::show` / `paint_toasts`), which
+//! `crate::gui::toast` (see `ToastStack::show` / `paint_toasts`), which
 //! calls [`ToastRenderer::draw`] on the GL thread after building the pill
 //! quads on the main thread.
 //!
 //! Each toast is drawn as a single quad (2 triangles = 6 vertices), expanded
-//! beyond the crisp pill rect by [`SHADOW_MARGIN_PX`] on every side so the
+//! beyond the crisp pill rect by `SHADOW_MARGIN_PX` on every side so the
 //! fragment shader has room to render the drop shadow. See `toast.frag` for
 //! the SDF-based layering (shadow -> gradient fill + accent bar -> neutral
 //! border ring). Issue #433 redesign removed the outer glow.
 //!
-//! The CPU-side vertex builder ([`build_toast_verts`]) is a pure function,
+//! The CPU-side vertex builder (`build_toast_verts`) is a pure function,
 //! fully testable without a GL context; GL calls are confined to
 //! [`ToastRenderer::init`], [`ToastRenderer::draw`], and
 //! [`ToastRenderer::destroy`].
@@ -214,7 +214,7 @@ impl ToastRenderer {
 
     /// Draw every toast in `quads` this frame.
     ///
-    /// Builds the vertex buffer on the CPU via [`build_toast_verts`], uploads
+    /// Builds the vertex buffer on the CPU via `build_toast_verts`, uploads
     /// it into the next double-buffer slot (orphan-then-write), and issues a
     /// single `glDrawArrays(TRIANGLES, ...)` call covering all quads.
     ///

@@ -206,7 +206,7 @@ pub struct Pane {
 
     /// Counters for window commands sent by the PTY thread and not yet drained
     /// by the GUI (148.C9, 148.RC2).  The GUI releases one per command it drains
-    /// in [`crate::gui::rendering::handle_window_manipulation`]; the PTY thread
+    /// in `crate::gui::rendering::handle_window_manipulation`; the PTY thread
     /// stops queueing a class at its cap (`MAX_OUTSTANDING_REPORTS`,
     /// `MAX_OUTSTANDING_VIEWPORT_COMMANDS`).
     pub window_cmd_budget: WindowCommandBudget,
@@ -224,7 +224,7 @@ pub struct Pane {
 
     /// OS process ID of the PTY child shell for this pane.
     ///
-    /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
+    /// Used for CWD discovery via `crate::gui::platform::read_cwd` when
     /// saving layouts or building recording topology snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
@@ -373,7 +373,7 @@ impl Pane {
     /// Record the extracted command text for a [`CommandBlockId`].
     ///
     /// Caller is responsible for extracting the text from the snapshot
-    /// (typically via [`crate::gui::command_history::extract_command_text`])
+    /// (typically via `crate::gui::command_history::extract_command_text`)
     /// before calling this.  Storing an entry whose `id` is not in
     /// [`Self::recent_commands`] is harmless but wasteful; the typical
     /// pattern is to call this immediately after [`Self::push_recent_command`].
@@ -1194,7 +1194,7 @@ impl PaneTree {
 
     /// Split the pane identified by `target_id` using a pre-built `Pane`.
     ///
-    /// This is a lower-level variant of [`split`] for callers that need to
+    /// This is a lower-level variant of [`Self::split`] for callers that need to
     /// pre-allocate the `PaneId` before acquiring other borrows.  The caller is
     /// responsible for ensuring `new_pane.id` was obtained from the same
     /// [`PaneIdGenerator`] that manages this tree.
@@ -1331,7 +1331,7 @@ impl PaneTree {
     ///
     /// `cwd_fn` is called for each leaf pane id and should return the current
     /// working directory of that pane as a string (typically via
-    /// [`crate::gui::platform::read_cwd`]).  Returning `None` omits the
+    /// `crate::gui::platform::read_cwd`).  Returning `None` omits the
     /// `directory` field.
     #[must_use]
     pub fn to_layout_panes<F>(
@@ -1349,12 +1349,12 @@ impl PaneTree {
         out
     }
 
-    /// Serialise the pane tree as a [`PaneTreeSnapshot`] for inclusion in a
+    /// Serialise the pane tree as a `PaneTreeSnapshot` for inclusion in a
     /// FREC recording's initial topology.
     ///
     /// `cwd_fn` is called for each leaf pane id and should return the current
     /// working directory of that pane as a string (typically via
-    /// [`crate::gui::platform::read_cwd`]).  `None` omits the `cwd` field on
+    /// `crate::gui::platform::read_cwd`).  `None` omits the `cwd` field on
     /// the leaf.
     ///
     /// `shell_fn` is called for each leaf pane id and should return the

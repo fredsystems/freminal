@@ -752,7 +752,7 @@ impl TerminalHandler {
     /// Full terminal reset (RIS — Reset to Initial State).
     ///
     /// Restores the handler and buffer to initial startup state, following
-    /// the reset table (`terminal_handler/reset.rs`): [`ResetKind::Hard`].
+    /// the reset table (`terminal_handler/reset.rs`): `ResetKind::Hard`.
     /// Preserves the PTY write channel and terminal geometry/scrollback
     /// config.
     ///
@@ -788,7 +788,7 @@ impl TerminalHandler {
     /// Resets the subset of modes, margins, and attributes listed in
     /// Table 5-9 of the VT510 Programmer Reference
     /// (<https://vt100.net/docs/vt510-rm/DECSTR.html>) to their power-on
-    /// defaults ([`ResetKind::Soft`], see `terminal_handler/reset.rs`).
+    /// defaults (`ResetKind::Soft`, see `terminal_handler/reset.rs`).
     /// Unlike [`Self::full_reset`] (RIS), this does **not** clear screen
     /// content, scrollback, images, colour overrides, the window title,
     /// the working directory, command blocks, tab stops, or the

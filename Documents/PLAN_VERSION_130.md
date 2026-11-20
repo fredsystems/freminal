@@ -8059,6 +8059,15 @@ Stale stub text was corrected at the same time:
 - **147.30 (done).** The link directory is the first of `CARGO_MANIFEST_DIR` and `/var/tmp`
   that is not itself under `/tmp` or `/dev/shm`. From a `git archive` copy under
   `/tmp/opencode` the test failed before the fix and the eight sandbox tests pass after it.
+- **147.31 (done).** 168 rustdoc diagnostics across `freminal-common`, `freminal-buffer`,
+  `freminal-terminal-emulator` and `freminal` (the plan's 68 was `freminal` alone and had
+  grown), now 0 workspace-wide; doc comments only. Links to private items became plain
+  backticks (no visibility widened); unresolved ones got a correct public path or backticks.
+  Sixteen `freminal-common` modules had a `///` summary on `pub mod` as well as `//!` docs,
+  which rustdoc concatenates and resolves in the parent scope; the `///` lines were removed.
+  `cargo xtask check-docs` (alias `cdo`) sets `RUSTDOCFLAGS` for that one call, runs from
+  `cargo xtask ci`, and is a step in the CI `check` matrix on `stable` + `ubuntu-latest`
+  only (Windows- and macOS-only items are not documented there).
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

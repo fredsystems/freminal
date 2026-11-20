@@ -117,7 +117,7 @@ fn clamped_offset(base: usize, delta: i32, lo: usize, hi: usize) -> usize {
 /// field's doc).
 ///
 /// The type is `pub` only so it can appear in the (also `pub`)
-/// [`ParkedScreen::blocks`] field without a private-type-in-public-interface
+/// `ParkedScreen::blocks` field without a private-type-in-public-interface
 /// error; its field stays private, so nothing outside `crate::buffer` can
 /// construct, inspect, or match on one — it is an opaque handle everywhere else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -551,7 +551,7 @@ pub struct BufferHeapBreakdown {
     pub row_cache_bytes: usize,
 
     /// Heap bytes held by distinct `Arc<Url>` payloads reachable from any
-    /// cell's `FormatTag.url` (via [`Cell::tag`]), deduplicated by
+    /// cell's `FormatTag.url` (via [`Cell::tag`](crate::cell::Cell::tag)), deduplicated by
     /// `Arc::as_ptr` identity — a hyperlink shared across many cells (the
     /// common case for OSC 8 links spanning several columns) is counted
     /// exactly once. For each distinct URL this adds `url.url.len() +

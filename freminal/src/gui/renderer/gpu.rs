@@ -1658,7 +1658,7 @@ impl TerminalRenderer {
 
     /// Delete the current background image texture.
     ///
-    /// After this call, [`draw_background_image`](Self::draw_background_image)
+    /// After this call, `draw_background_image`
     /// is a no-op until a new image is loaded.
     pub fn clear_background_image(&mut self, gl: &Gl<'_>) {
         if let Some(tex) = self.bg_img_texture.take() {

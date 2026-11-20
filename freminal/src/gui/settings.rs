@@ -93,17 +93,17 @@ pub enum SettingsAction {
     /// The theme, background opacity, and/or chrome style profile should be
     /// reflected live in the running app right now.
     ///
-    /// Carries a **whole-state snapshot** ([`VisualPreview`]), not a
+    /// Carries a **whole-state snapshot** (`VisualPreview`), not a
     /// per-option event: the caller diffs it against whatever it last
     /// applied and only redoes the work for fields that actually changed.
     /// This single variant covers both preview (the draft changed) and
     /// revert (the modal closed without applying, so the caller re-previews
     /// the committed config) — there is no separate `Revert*` variant, which
     /// is what makes a forgotten revert for a newly-added previewable option
-    /// structurally impossible. See [`VisualPreview`]'s doc for the design
+    /// structurally impossible. See `VisualPreview`'s doc for the design
     /// rationale and the bug this replaced.
     ///
-    /// The accompanying [`PreviewTrigger`] (issue #452 phase C) is metadata
+    /// The accompanying `PreviewTrigger` (issue #452 phase C) is metadata
     /// about *timing*, not a second revert mechanism: it tells the caller
     /// whether this snapshot is an in-progress edit (debounce expensive
     /// fields normally) or a revert (apply expensive fields immediately and
@@ -285,7 +285,7 @@ pub struct SettingsModal {
     /// Snapshot of discovered layout files for the Startup tab.
     ///
     /// Updated by the caller before opening or each frame via
-    /// [`Self::set_discovered_layouts`].
+    /// `set_discovered_layouts`.
     pub discovered_layouts: Vec<freminal_common::layout::LayoutSummary>,
 
     /// Set by `show_startup_tab` when the user clicks a delete button next to
@@ -483,7 +483,7 @@ impl SettingsModal {
     ///
     /// `os_dark_mode` reflects the current OS light/dark preference and is used to
     /// resolve `ThemeMode::Auto` to the correct active slug for the committed
-    /// [`VisualPreview`] baseline.
+    /// `VisualPreview` baseline.
     pub fn open(
         &mut self,
         live_config: &Config,
@@ -552,10 +552,10 @@ impl SettingsModal {
     ///   2. Hot-reload any settings that can change at runtime.
     ///
     /// `os_dark_mode` is used to resolve `ThemeMode::Auto` for the
-    /// [`VisualPreview`] snapshot.
+    /// `VisualPreview` snapshot.
     /// Render the settings UI as a standalone window (fills the entire egui context).
     ///
-    /// Unlike [`show()`], which creates a floating `egui::Window` inside a parent
+    /// Unlike `show()`, which creates a floating `egui::Window` inside a parent
     /// terminal window, this method renders directly into a `CentralPanel`.
     /// Used when the settings dialog is its own OS window.
     pub fn show_standalone(&mut self, ctx: &egui::Context, os_dark_mode: bool) -> SettingsAction {

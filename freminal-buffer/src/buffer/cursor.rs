@@ -217,7 +217,7 @@ impl Buffer {
         self.cursor.pos.y = pos.y.min(self.rows.len().saturating_sub(1));
     }
 
-    /// Set the [`LineWidth`] attribute on the row under the cursor.
+    /// Set the [`LineWidth`](crate::row::LineWidth) attribute on the row under the cursor.
     ///
     /// This is the buffer-level primitive called by the terminal handler in
     /// response to `ESC # 3` (double-height top), `ESC # 4` (double-height
@@ -355,7 +355,7 @@ impl Buffer {
 
     /// Implements DECSC – Save Cursor.
     ///
-    /// Saves the cursor's **screen** position (see [`SavedCursor`]) together
+    /// Saves the cursor's **screen** position (see `SavedCursor`) together
     /// with its associated `CursorState`, the DECOM (origin mode) state and
     /// whether the cursor is in the pending-wrap position (`x == width`).
     pub fn save_cursor(&mut self) {
@@ -388,7 +388,7 @@ impl Buffer {
     /// The saved position is screen-relative, so the cursor returns to the
     /// same screen row and column however much output has scrolled or evicted
     /// the content in between (xterm `CursorRestore`). A resize in between
-    /// moves the slot with its cell (see [`SavedCursorPin`]), and the position
+    /// moves the slot with its cell (see `SavedCursorPin`), and the position
     /// is clamped to the current screen dimensions, so the cursor is never
     /// out of bounds nor placed in off-screen scrollback.
     ///

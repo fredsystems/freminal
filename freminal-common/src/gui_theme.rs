@@ -129,7 +129,7 @@ impl StyleProfile {
 ///
 /// This struct carries the *shape* of the UI — radii, weights, and spacing —
 /// without any dependency on egui or any other GUI crate.  It is consumed by
-/// subtask 112.3a to derive an egui [`Visuals`](egui::Visuals) combined with
+/// subtask 112.3a to derive an egui `egui::Visuals` combined with
 /// a [`ThemePalette`](crate::themes::ThemePalette) for colors.
 ///
 /// **No color values are stored here.**  Use [`ThemePalette`](crate::themes::ThemePalette)

@@ -178,7 +178,7 @@ The full architecture invariants and what-not-to-leak rules live in the
   the `freminal` binary implements its `App` trait to receive per-window
   update callbacks.
 - **`xtask`** -- build/CI orchestration. Subcommands: `ci`, `build`,
-  `check`, `check-windows`, `lint`, `test`, `coverage`, `deny`, `machete`,
+  `check`, `check-windows`, `check-docs`, `lint`, `test`, `coverage`, `deny`, `machete`,
   `terminfo`, `fuzz`, `fuzz-smoke`, `fuzz-replay`, `fuzz-cmin`, `fuzz-list`.
 
 ### Terminal mode representation
@@ -229,6 +229,7 @@ Hardcoded shortcuts outside `BindingMap` are forbidden.
 | `cargo xtask coverage`                                         | Generate coverage report (lcov)                               |
 | `cargo fmt --all -- --check`                                   | Check formatting                                              |
 | `cargo xtask check-windows`                                    | Clippy for windows-gnu (Windows cross-check; `default` shell) |
+| `cargo xtask check-docs`                                       | Rustdoc for the workspace with `-D warnings`                  |
 | `cargo xtask terminfo`                                         | Regenerate `res/terminfo/` + `.tar` from `res/freminal.ti`    |
 | `cargo deny check`                                             | Advisories, licences, bans, sources (also a required CI job)  |
 | `nix develop .#fuzz --command cargo xtask fuzz-replay`         | Replay fuzz seeds + regressions (required CI gate)            |

@@ -43,14 +43,14 @@ impl Buffer {
     /// Implements ECH – Erase Characters.
     ///
     /// Replaces `n` cells starting at the cursor column with blanks carrying only the
-    /// current background colour ([`Buffer::erase_tag`]).  Cells to the right of the
+    /// current background colour (`Buffer::erase_tag`).  Cells to the right of the
     /// erased range are **not** shifted.
     /// The cursor does not move.
     ///
     /// When DECLRMM is active, `n` is clamped so the erase never crosses the
     /// right margin.
     ///
-    /// Wide-glyph cleanup is delegated to [`Row::erase_cells_at`].
+    /// Wide-glyph cleanup is delegated to [`Row::erase_cells_at`](crate::row::Row::erase_cells_at).
     pub fn erase_chars(&mut self, n: usize) {
         let row = self.cursor.pos.y;
         let col = self.cursor.pos.x;

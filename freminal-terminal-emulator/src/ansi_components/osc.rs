@@ -55,7 +55,7 @@ const OSC_CLIPBOARD_HEADER_ALLOWANCE: usize = 256;
 /// [`MAX_OSC_BYTES`].
 ///
 /// This is the padded base64 size of [`MAX_OSC52_WRITE_BYTES`]
-/// (`4 * ceil(n / 3)`) plus [`OSC_CLIPBOARD_HEADER_ALLOWANCE`], so the largest
+/// (`4 * ceil(n / 3)`) plus `OSC_CLIPBOARD_HEADER_ALLOWANCE`, so the largest
 /// permitted clipboard write is still accumulated, but a hostile multi-megabyte
 /// sequence is discarded without being buffered (Task 148.16, GHSA-v2hw-gcg8-2rfr).
 /// A sequence over this cap is dropped whole, like any over-limit OSC. The

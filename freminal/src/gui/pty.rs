@@ -384,8 +384,8 @@ pub struct TabChannels {
     /// `window_cmd_rx` that the GUI has not drained yet (148.C9, 148.RC2).
     ///
     /// The PTY thread admits a command only while its class is below its cap
-    /// (see [`WindowCommandBudget::admit`]); the GUI releases one per command
-    /// it drains (see [`WindowCommandBudget::release`]).  It bounds the
+    /// (see `WindowCommandBudget::admit`); the GUI releases one per command
+    /// it drains (see `WindowCommandBudget::release`).  It bounds the
     /// `window_cmd_rx` backlog, and so the replies the GUI can send back on
     /// `input_tx`, while the GUI is not draining (for example a minimised
     /// window that is not redrawing).
@@ -393,7 +393,7 @@ pub struct TabChannels {
 
     /// OS process ID of the PTY child shell.
     ///
-    /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
+    /// Used for CWD discovery via `crate::gui::platform::read_cwd` when
     /// saving layouts or building recording topology snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
@@ -528,14 +528,14 @@ impl CommandClass {
 
 /// The per-pane counters bounding the `window_cmd_rx` backlog.
 ///
-/// One counter covers Report-class commands ([`MAX_OUTSTANDING_REPORTS`]), one
-/// Viewport-class commands ([`MAX_OUTSTANDING_VIEWPORT_COMMANDS`]) and one the
+/// One counter covers Report-class commands (`MAX_OUTSTANDING_REPORTS`), one
+/// Viewport-class commands (`MAX_OUTSTANDING_VIEWPORT_COMMANDS`) and one the
 /// payload bytes those commands hold, of either class
-/// ([`MAX_OUTSTANDING_VIEWPORT_BYTES`]; OSC 99 reports carry icons).
+/// (`MAX_OUTSTANDING_VIEWPORT_BYTES`; OSC 99 reports carry icons).
 ///
 /// Shared between the PTY consumer thread, the only caller of
-/// [`admit`](Self::admit) and the only incrementer, and the GUI, which only
-/// [`release`](Self::release)s.  Plain atomics: no lock is involved.  Cloning
+/// `admit` and the only incrementer, and the GUI, which only
+/// `release`s.  Plain atomics: no lock is involved.  Cloning
 /// shares the same counters.
 #[derive(Debug, Clone, Default)]
 pub struct WindowCommandBudget {

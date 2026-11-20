@@ -14,8 +14,8 @@
 //!
 //! The module is two layers:
 //!
-//! * **Layer B** — a small generic rasteriser ([`fill_rect`], [`stroke_hline`],
-//!   [`stroke_vline`], [`fill_subcells`], [`fill_uniform`]) that writes a
+//! * **Layer B** — a small generic rasteriser (`fill_rect`, `stroke_hline`,
+//!   `stroke_vline`, `fill_subcells`, `fill_uniform`) that writes a
 //!   white-plus-alpha RGBA bitmap. Written once; every glyph goes through it.
 //! * **Layer A** — [`generate_alpha`], which decodes a codepoint into calls
 //!   to Layer B. Block sub-cell patterns and eighths are **arithmetic** (a
@@ -45,7 +45,7 @@ const BPP: usize = 4;
 /// (which would return a fully-transparent bitmap, i.e. render nothing).
 ///
 /// The braille (`U+2800`–`U+28FF`), sextant (`U+1FB00`–) and octant
-/// (`U+1CD00`–) blocks are natural extensions using the same [`fill_subcells`]
+/// (`U+1CD00`–) blocks are natural extensions using the same `fill_subcells`
 /// primitive, but are out of the initial scope.
 #[must_use]
 pub fn is_procedural(c: char) -> bool {

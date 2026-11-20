@@ -85,7 +85,7 @@ pub struct Tab {
     /// "Clear Custom Name" context-menu entry).
     pub custom_name: Option<String>,
 
-    /// Set when an unfocused tab has received a [`CommandFinishedEvent`]
+    /// Set when an unfocused tab has received a `CommandFinishedEvent`
     /// (Task 72.9). The tab bar will surface this as a visual indicator
     /// (badge / dot) in Task 72.10.
     ///

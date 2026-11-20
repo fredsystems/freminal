@@ -109,7 +109,7 @@ pub struct SearchBarFrame {
     /// coordinate space as the `terminal_rect` passed in -- the
     /// `egui::Area`'s own response rect, expanded by the popup frame's
     /// drop-shadow margin ([`Shadow::margin`]), not a guessed constant. See
-    /// [`expand_by_shadow_margin`].
+    /// `expand_by_shadow_margin`.
     pub paint_rect: Rect,
     /// Whether this frame's chrome is safely bounded to `paint_rect`.
     pub safety: SearchOverlaySafety,

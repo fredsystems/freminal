@@ -103,8 +103,9 @@ pub struct ThemePalette {
     /// best-fits to the palette's blue (`ansi[4]`).
     pub chrome_accent: Option<(u8, u8, u8)>,
 
-    /// Text/foreground drawn on top of [`chrome_accent`]. `None` is derived to
-    /// clear WCAG AA against the accent (typically the dark base or white).
+    /// Text/foreground drawn on top of [`chrome_accent`](Self::chrome_accent).
+    /// `None` is derived to clear WCAG AA against the accent (typically the
+    /// dark base or white).
     pub chrome_on_accent: Option<(u8, u8, u8)>,
 }
 

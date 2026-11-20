@@ -1352,8 +1352,8 @@ impl ViewState {
     /// the multi-click sequence counter.
     ///
     /// Rules:
-    /// - If there is a previous click within [`DOUBLE_CLICK_TIMEOUT`] **and**
-    ///   within [`DOUBLE_CLICK_MAX_CELL_DISTANCE`] cells on each axis, the
+    /// - If there is a previous click within `DOUBLE_CLICK_TIMEOUT` **and**
+    ///   within `DOUBLE_CLICK_MAX_CELL_DISTANCE` cells on each axis, the
     ///   count is incremented (capped at 3).
     /// - Otherwise the count resets to 1.
     ///

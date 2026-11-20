@@ -68,7 +68,7 @@ impl Args {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Command {
-    /// Run CI checks (lint, deny, machete, build, test, bench compile)
+    /// Run CI checks (lint, rustdoc, deny, machete, build, test, bench compile)
     ///
     /// This is the **full** CI pipeline intended for GitHub Actions.  For
     /// pre-commit hooks, use `cargo xtask precommit` instead — it skips checks
@@ -90,6 +90,10 @@ enum Command {
     /// Run clippy for the x86_64-pc-windows-gnu target (Windows cross-check)
     #[command(visible_alias = "cw")]
     CheckWindows,
+
+    /// Build the workspace rustdoc with warnings denied (broken intra-doc links, etc.)
+    #[command(visible_alias = "cdo")]
+    CheckDocs,
 
     /// Check if README.md is up-to-date
     #[command(visible_alias = "cr")]
@@ -306,6 +310,7 @@ impl Command {
             Self::Check => check(),
             Self::CheckMsrv => check_msrv(),
             Self::CheckWindows => check_windows(),
+            Self::CheckDocs => check_docs(),
             Self::Deny => deny(),
             Self::Machete => machete(),
             Self::CheckReadme => check_readme(),
@@ -337,33 +342,60 @@ impl Command {
     }
 }
 
-/// Run CI checks (lint, deny, machete, build, test, bench compile)
+/// Run CI checks (lint, rustdoc, deny, machete, build, test, bench compile)
 ///
 /// ## Step ordering rationale
 ///
 /// 1. `lint` — fast feedback on style, typos, and clippy warnings before
 ///    spending time building or running tests.
-/// 2. `deny` — checks license compatibility and known-vulnerable dependencies;
+/// 2. `check_docs` — builds the workspace rustdoc with warnings denied, so a
+///    broken or private intra-doc link fails here rather than accumulating.
+/// 3. `deny` — checks license compatibility and known-vulnerable dependencies;
 ///    fails fast if a new dep violates policy.
-/// 3. `machete` — detects unused dependencies that would otherwise silently
+/// 4. `machete` — detects unused dependencies that would otherwise silently
 ///    inflate compile times and binary size.
-/// 4. `build` — validates that the workspace compiles cleanly with all targets
+/// 5. `build` — validates that the workspace compiles cleanly with all targets
 ///    and features; must pass before tests are meaningful.
-/// 5. `test` — runs lib + doc tests only after the build is confirmed clean.
-/// 6. `bench_compile` — compiles all benchmarks without running them;
+/// 6. `test` — runs lib + doc tests only after the build is confirmed clean.
+/// 7. `bench_compile` — compiles all benchmarks without running them;
 ///    catches benchmark compilation failures before the next manual bench run.
-/// 7. `test_default_features` — runs clippy and tests again with **no** optional
+/// 8. `test_default_features` — runs clippy and tests again with **no** optional
 ///    features enabled. This catches `#[cfg(feature = "…")]` gating errors
 ///    where code behind a feature flag accidentally leaks into the default
 ///    build. (The previous steps use `--all-features`.)
 fn ci() -> Result<()> {
     lint()?;
+    check_docs()?;
     deny()?;
     machete()?;
     build()?;
     test()?;
     bench_compile()?;
     test_default_features()?;
+    Ok(())
+}
+
+/// Append `-D warnings` to any rustdoc flags already in the environment.
+fn rustdoc_flags_denying_warnings(existing: Option<&str>) -> String {
+    match existing {
+        Some(flags) if !flags.trim().is_empty() => format!("{} -D warnings", flags.trim()),
+        _ => "-D warnings".to_owned(),
+    }
+}
+
+/// Build the workspace rustdoc with every rustdoc warning denied.
+///
+/// Catches broken intra-doc links and public docs linking to private items
+/// (`rustdoc::broken_intra_doc_links`, `rustdoc::private_intra_doc_links`),
+/// which neither clippy nor `cargo check` see. `RUSTDOCFLAGS` is set on this
+/// one `cargo doc` invocation only, so it cannot leak into the other gates.
+/// `--document-private-items` is deliberately not passed: the docs that ship
+/// are the public ones, and a public doc must not link to a private item.
+fn check_docs() -> Result<()> {
+    let flags = rustdoc_flags_denying_warnings(std::env::var("RUSTDOCFLAGS").ok().as_deref());
+    cmd("cargo", ["doc", "--workspace", "--no-deps"])
+        .env("RUSTDOCFLAGS", flags)
+        .run_with_trace()?;
     Ok(())
 }
 
@@ -1249,7 +1281,7 @@ impl ExpressionExt for duct::Expression {
 
 #[cfg(test)]
 mod tests {
-    use super::{rpm_version, Args, Command};
+    use super::{rpm_version, rustdoc_flags_denying_warnings, Args, Command};
     use crate::fuzz::{CrashPolicy, Sandbox};
     use clap::{CommandFactory, Parser};
 
@@ -1342,6 +1374,20 @@ mod tests {
 
         assert!(Args::try_parse_from(["cargo xtask", "fuzz-corpus"]).is_err());
         assert!(Args::try_parse_from(["cargo xtask", "fuzz-corpus", "sync"]).is_err());
+    }
+
+    #[test]
+    fn rustdoc_flags_default_to_denying_warnings() {
+        assert_eq!(rustdoc_flags_denying_warnings(None), "-D warnings");
+        assert_eq!(rustdoc_flags_denying_warnings(Some("  ")), "-D warnings");
+    }
+
+    #[test]
+    fn rustdoc_flags_preserve_existing_flags() {
+        assert_eq!(
+            rustdoc_flags_denying_warnings(Some("--cfg docsrs")),
+            "--cfg docsrs -D warnings"
+        );
     }
 
     #[test]

@@ -307,7 +307,7 @@ impl Row {
     /// space-saving compacted representation.
     ///
     /// A compacted row still answers every read accessor correctly — see
-    /// [`Row::cells_ref`] — so `is_compact()` reports the *storage
+    /// `Row::cells_ref` — so `is_compact()` reports the *storage
     /// representation*, not whether cell data has been read yet.
     #[must_use]
     pub const fn is_compact(&self) -> bool {
@@ -547,9 +547,9 @@ impl Row {
 
     /// Clip the physical cell storage to `new_width` columns.
     ///
-    /// Used by [`Buffer::set_size`] when shrinking the alternate screen (which
+    /// Used by [`Buffer::set_size`](crate::buffer::Buffer::set_size) when shrinking the alternate screen (which
     /// must not reflow).  Without this, rows retain cells beyond the new width
-    /// and [`Buffer::flatten_row`] emits them — the snapshot then contains
+    /// and `Buffer::flatten_row` emits them — the snapshot then contains
     /// rows wider than `term_width`, producing a stale strip of glyphs/
     /// backgrounds at the right edge of the viewport after a shrink.
     ///

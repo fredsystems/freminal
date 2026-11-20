@@ -11,7 +11,6 @@
 
 /// Which of the two terminal buffers is currently active.
 pub mod buffer_type;
-/// G0-G3 character sets, locking and single shifts, and the DEC Special Graphics table.
 pub mod charset;
 /// `CommandBlock` — a single shell command's full lifecycle from OSC 133 markers.
 pub mod command_block;
@@ -23,7 +22,6 @@ pub mod error;
 pub mod fonts;
 /// `FormatTag` — a half-open `[start, end)` range with its associated format.
 pub mod format_tag;
-/// OSC 133 (FTCS) shell integration state.
 pub mod ftcs;
 /// Kitty graphics protocol types and helpers.
 pub mod kitty_graphics;
@@ -35,17 +33,12 @@ pub mod mode;
 pub mod modes;
 /// OSC parameter types and inline-image data.
 pub mod osc;
-/// OSC 99 transport types handed from the PTY thread to the GUI.
 pub mod osc99_notification;
 /// OSC 4 / 104 / 10-19 / 110-119 colour-control request types.
 pub mod osc_color;
-/// OSC 99 (kitty desktop notifications) parser and typed command types.
 pub mod osc_notify_99;
-/// `PointerShape` — typed cursor shape set by OSC 22.
 pub mod pointer_shape;
-/// OSC 9;4 (ConEmu-style) progress-state types (issue #507).
 pub mod progress;
-/// `RowNumber` — a stable logical row identifier that survives scrollback eviction.
 pub mod row_number;
 /// Sixel graphics types.
 pub mod sixel;

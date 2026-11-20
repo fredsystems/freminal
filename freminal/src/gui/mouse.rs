@@ -169,7 +169,7 @@ pub const fn motion_track_wants_report(
 /// stream needs its own independent report history, since two panes'
 /// terminal content are entirely unrelated. The held pointer BUTTON is
 /// deliberately NOT here — see
-/// [`PerWindowState::held_pointer_button`](super::window::PerWindowState::held_pointer_button)'s
+/// `PerWindowState::held_pointer_button`'s
 /// doc for why that is window-owned instead: a physical button press and
 /// its matching release are events on the SAME OS pointer device,
 /// independent of which pane happens to be active at either moment, and

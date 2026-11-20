@@ -175,8 +175,8 @@ pub struct FgRenderOptions {
     /// Whether fast-blink (SGR 6) text is currently in its visible phase.
     pub text_blink_fast_visible: bool,
     /// Whether DECSCNM (whole-screen reverse video) is active for this
-    /// pane. Composed with per-cell SGR-7 by XOR via [`effective_fg`] /
-    /// [`effective_bg`] (Task 115.2).
+    /// pane. Composed with per-cell SGR-7 by XOR via `effective_fg` /
+    /// `effective_bg` (Task 115.2).
     pub screen_inversion: ScreenInversion,
 }
 
@@ -257,7 +257,7 @@ pub struct ImageDrawEntry {
 
 /// Which half of its blink cycle the cursor is currently in.
 ///
-/// Only blinking DECSCUSR styles consult it (see [`cursor_blink_is_visible`]);
+/// Only blinking DECSCUSR styles consult it (see `cursor_blink_is_visible`);
 /// steady styles and [`CursorAppearance::Hollow`] ignore it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorBlinkPhase {
@@ -479,8 +479,8 @@ pub struct BackgroundFrame<'a> {
     /// colour is carried separately in [`CursorDrawParams`].
     pub colors: &'a ResolvedColors,
     /// Whether DECSCNM (whole-screen reverse video) is active for this
-    /// pane. Composed with per-cell SGR-7 by XOR via [`effective_fg`] /
-    /// [`effective_bg`] (Task 115.2).
+    /// pane. Composed with per-cell SGR-7 by XOR via `effective_fg` /
+    /// `effective_bg` (Task 115.2).
     pub screen_inversion: ScreenInversion,
 }
 

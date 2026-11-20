@@ -65,7 +65,7 @@ pub struct AutoUrlRange {
     /// this range might be a DECAWM-wrapped URL continuing onto the next
     /// row. Used as the cheap, precise signal for whether a soft-wrapped
     /// group of rows needs the group-level URL redetection in
-    /// [`Buffer::refresh_row_cache_and_refine_wrapped_urls`].
+    /// `Buffer::refresh_row_cache_and_refine_wrapped_urls`.
     pub touches_row_end: bool,
 }
 
@@ -91,8 +91,8 @@ pub struct RowImageCell {
 
 /// Per-row flatten cache entry.
 ///
-/// Produced by [`Buffer::flatten_row`] and consumed by
-/// [`Buffer::rows_as_tchars_and_tags_cached`] at merge time. See the module
+/// Produced by `Buffer::flatten_row` and consumed by
+/// `Buffer::rows_as_tchars_and_tags_cached` at merge time. See the module
 /// docs for field semantics.
 #[derive(Debug, Clone)]
 pub struct RowCacheEntry {
@@ -118,7 +118,7 @@ pub struct RowCacheEntry {
     /// Computed once here (at the same time as `auto_urls`, only when the
     /// row is actually rebuilt) rather than on every merge call, so the
     /// group-signal check in
-    /// [`Buffer::refresh_row_cache_and_refine_wrapped_urls`] stays an O(1)
+    /// `Buffer::refresh_row_cache_and_refine_wrapped_urls` stays an O(1)
     /// cached lookup instead of re-scanning every row's byte tail on every
     /// flatten — the tail-scan itself is cheap per call, but paying it again
     /// on every already-cached (non-dirty) row on every single frame is not.
@@ -498,8 +498,8 @@ type FlattenVectors = (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>);
 
 /// `Arc`-wrapped `(chars, tags, row_offsets, url_tag_indices)`.
 ///
-/// The shape [`MergeCache`] stores and
-/// [`Buffer::rows_as_tchars_and_tags_incremental`] /
+/// The shape `MergeCache` stores and
+/// `Buffer::rows_as_tchars_and_tags_incremental` /
 /// [`Buffer::visible_as_tchars_and_tags_extended_arc`] return. Factored into
 /// a named alias purely to satisfy `clippy::type_complexity`; carries no
 /// additional semantics beyond the four-tuple it names. `pub` (not `pub(in
@@ -532,7 +532,7 @@ impl Buffer {
 
     /// Like [`Self::visible_as_tchars_and_tags`] but extends the flatten window
     /// upward by `extra_rows` (see
-    /// [`Buffer::visible_window_bounds`](super::Buffer::visible_window_bounds)).
+    /// `Buffer::visible_window_bounds`).
     ///
     /// The GUI passes a non-zero `extra_rows` when command-block folds collapse
     /// rows in the visible window: the extra rows above the normal window
@@ -545,16 +545,16 @@ impl Buffer {
     /// ## Task 121 Part C: incremental merge
     ///
     /// Unlike [`Self::scrollback_as_tchars_and_tags`] (which always does a
-    /// full [`Self::merge_row_caches_full`]), this is the hot per-frame path,
-    /// so it maintains [`Buffer::merge_cache`] and takes an incremental
+    /// full `Self::merge_row_caches_full`), this is the hot per-frame path,
+    /// so it maintains `Buffer::merge_cache` and takes an incremental
     /// shortcut whenever possible: reuse everything in the previous merge
     /// strictly before the first row that changed, and only re-merge from
-    /// there onward via [`Self::merge_rows_range`], instead of re-walking and
+    /// there onward via `Self::merge_rows_range`, instead of re-walking and
     /// re-rebasing every row's tags on every frame.
     ///
     /// The fast path requires ALL of:
-    /// - a previous [`MergeCache`] exists,
-    /// - its [`MergeWindowFp`] (first-row logical number + window length +
+    /// - a previous `MergeCache` exists,
+    /// - its `MergeWindowFp` (first-row logical number + window length +
     ///   auto-detect) matches this call's,
     /// - a `boundary` row index exists (`min` of the merge floor — the first
     ///   rebuilt row, pulled back across a wrapped-URL group whose
@@ -572,7 +572,7 @@ impl Buffer {
     /// call) the cached tuple is returned verbatim — no re-merge work at
     /// all, not even a partial one.
     ///
-    /// See [`MergeCache`]'s doc comment for why this is not a 100%
+    /// See `MergeCache`'s doc comment for why this is not a 100%
     /// airtight optimization in the face of `scroll.rs`'s confined
     /// scroll-region row rotations, and why every fast-path return is
     /// cross-checked against the full-merge oracle under `debug_assert_eq!`
@@ -595,13 +595,13 @@ impl Buffer {
 
     /// `Arc`-returning counterpart of [`Self::visible_as_tchars_and_tags_extended`].
     ///
-    /// Identical merge behaviour (same [`MergeCache`] fast path, same
+    /// Identical merge behaviour (same `MergeCache` fast path, same
     /// debug-only oracle cross-check) but returns the four result vectors
     /// wrapped in `Arc` instead of by value.
     ///
     /// ## Why this method exists (regression fix, Task 121 Part C follow-up)
     ///
-    /// [`MergeCache`] must retain its own strong reference to the merged
+    /// `MergeCache` must retain its own strong reference to the merged
     /// `(chars, tags, row_offsets, url_tag_indices)` across calls — that
     /// retained copy is the entire mechanism the incremental fast path
     /// reuses a prefix from. Given that, and given that
@@ -615,7 +615,7 @@ impl Buffer {
     ///
     /// This method sidesteps that wall entirely by handing the `Arc`s back
     /// directly — **zero** deep clone, only the refcount bumps
-    /// [`MergeCache`] population already costs. Any caller that can accept
+    /// `MergeCache` population already costs. Any caller that can accept
     /// `Arc<Vec<_>>` (i.e. anything that would otherwise immediately wrap
     /// the returned `Vec`s in `Arc::new`) should call this method instead
     /// of `visible_as_tchars_and_tags_extended` to realise the actual
@@ -657,12 +657,12 @@ impl Buffer {
     }
 
     /// Task 124.C6: flatten the **normal** visible window (`extra_rows ==
-    /// 0`, i.e. exactly the bounds [`Self::visible_window_bounds`] returns
+    /// 0`, i.e. exactly the bounds `Self::visible_window_bounds` returns
     /// for `extra_rows = 0`) using the same full per-row-cache merge
     /// machinery as
-    /// [`Self::rows_as_tchars_and_tags_cached`], but WITHOUT reading or
-    /// replacing [`Buffer::merge_cache`] and WITHOUT minting any
-    /// [`Buffer::row_epoch_counter`] stamps. That no-merge-cache,
+    /// `Self::rows_as_tchars_and_tags_cached`, but WITHOUT reading or
+    /// replacing `Buffer::merge_cache` and WITHOUT minting any
+    /// `Buffer::row_epoch_counter` stamps. That no-merge-cache,
     /// no-epoch contract is the entire reason this method exists, so it is
     /// load-bearing — do not "optimize" this into a call to
     /// [`Self::visible_as_tchars_and_tags_extended`] or
@@ -672,7 +672,7 @@ impl Buffer {
     ///
     /// [`Self::visible_as_tchars_and_tags_extended`] (via
     /// [`Self::visible_as_tchars_and_tags_extended_arc`]) is the hot
-    /// per-frame snapshot path, and it is keyed on a [`MergeWindowFp`] that
+    /// per-frame snapshot path, and it is keyed on a `MergeWindowFp` that
     /// includes `extra_rows`: the GUI's `build_snapshot` calls it with a
     /// non-zero `extra_rows` whenever a command-block fold is open, to pull
     /// extra real rows above the normal window. Every call to that method
@@ -744,7 +744,7 @@ impl Buffer {
     /// # Why this is `&mut self`
     ///
     /// The epochs are a property of the last **merge**, so they live in
-    /// [`MergeCache`]. When no cached merge covers the requested window — no
+    /// `MergeCache`. When no cached merge covers the requested window — no
     /// flatten has happened yet, or an explicit invalidation site cleared the
     /// cache — there is no per-row answer to give, and the only safe answer
     /// is "every row changed". That is expressed by issuing every row a
