@@ -11773,6 +11773,80 @@ N3, N4, N5 (a shared `tests/common` helper), N7, N8, N9.
   (`/homeless-shelter`; the flake already skips three echo-off PTY tests for this). The new
   real-child tests now pass an explicit working directory instead of joining the skip list.
 
+#### 151 PR review (PR #588, 2026-11-20)
+
+CI failed `Test macos-latest`, and Copilot and CodeRabbit left five comments. Dispositions:
+
+| ID  | Source          | Finding (short)                                                                 | Disposition |
+| --- | --------------- | ------------------------------------------------------------------------------- | ----------- |
+| P1  | Copilot         | the bash and zsh wrappers copy GPLv3 code into MIT freminal                     | 151.C5      |
+| P2  | CodeRabbit      | `sudo -u root -e file` is wrapped, and sudo rejects `--preserve-env` with `-e`  | 151.C5      |
+| P3  | Copilot, CR     | `build.rs` rewrites `res/` during a build; the embed can lag the tree           | 151.C6      |
+| P4  | Copilot, CR, CI | macOS `tic` writes `78/xterm-freminal`; the stale-entry setup accepts `x/` only | 151.C6      |
+| P5  | CodeRabbit      | the in-pane `infocmp` install command does not apply on Windows                 | 151.C6      |
+
+- **P1 (confirmed):** Ghostty's `ghostty.bash` and `ghostty-integration` (zsh) state that they
+  derive from kitty's integration and are distributed under GPLv3; its fish file has no such
+  notice (Ghostty is MIT). 151.12 asked for Ghostty's wrapper "exactly", which copied GPLv3
+  code. That was an orchestrator error and contradicts this plan's own rule (kitty is read for
+  behaviour only). **Decision:** all three wrappers are rewritten clean-room from a behaviour
+  specification written by the orchestrator, by an implementer that does not read Ghostty's or
+  kitty's shell scripts; the "reproduced from Ghostty" citations go. Decision 5's behaviour
+  (on by default, separate toggle, sudoedit unchanged) stands; "exactly as Ghostty" is
+  withdrawn.
+- **P2 (accepted):** the clean-room scan follows sudo's own option syntax, so option operands
+  (`-u root`, `--user=root`, `--user root`, grouped `-ku root`) are skipped and `-e` after them
+  is still recognised. This deliberately differs from Ghostty.
+- **P3 decision:** regenerating the compiled tree and tar becomes an explicit
+  `cargo xtask terminfo` step; `build.rs` no longer writes into `res/` (Cargo's rule that build
+  scripts write only to `OUT_DIR`). The committed tree and tar are the single generation
+  everything embeds and packages; the existing stdin-compile test fails when `res/freminal.ti`
+  changes without a regeneration, and says to run the xtask.
+
+##### 151.C5 — Clean-room `sudo` wrapper (P1, P2)
+
+Scope: the three shell-integration scripts' `sudo` blocks, `freminal/src/shell_integration/sudo_wrapper_tests.rs`,
+`shell-integration/README.md` and `DESIGN_DECISIONS.md` (the wrapper description).
+Behaviour specification (the implementer works only from this):
+
+- The wrapper is defined only when `FREMINAL_SHELL_FEATURES` contains the item `sudo` (a
+  comma-separated list; match whole items, not substrings) and `TERMINFO` is non-empty. In
+  fish it is not defined if a `sudo` function or alias already exists; bash and zsh define it
+  regardless (it replaces nothing a later alias cannot override).
+- It calls the real `sudo` (bypassing itself: `command sudo` in bash, zsh and fish) with
+  `--preserve-env=TERMINFO` inserted first, unless the invocation is an edit, in which case it
+  passes the arguments through unchanged.
+- An invocation is an edit when, scanning the arguments from the left, `-e` or `--edit`
+  appears before the first command word. The scan, following sudo(8):
+  - `--` ends the options (no edit found by then: not an edit);
+  - a long option with `=` (`--user=root`) is one word; a long option that takes a value
+    (`--chdir`, `--chroot`, `--close-from`, `--group`, `--host`, `--prompt`, `--role`,
+    `--type`, `--command-timeout`, `--other-user`, `--user`) given without `=` consumes the
+    next word too;
+  - a short-option word `-abc` is read letter by letter: `e` means edit; a letter that takes
+    a value (`C D g h p R r T t U u`) consumes the rest of the word, or the next word if it is
+    the last letter; other letters take none;
+  - a word of the form `NAME=value` (before the command) is skipped;
+  - any other word is the command: stop (not an edit).
+- Tests (all three shells, fake `sudo`): `sudo ls`, `sudo -u root ls`, `sudo VAR=1 cmd` and
+  `sudo -- ls` get the flag; `sudo -e f`, `sudo --edit f`, `sudo -u root -e f`,
+  `sudo --user=root -e f`, `sudo --user root -e f`, `sudo -ke f` and `sudo -n -e f` do not;
+  `sudo -ue root f` gets the flag (`e` is `u`'s value, a user named "e", and `root` is the
+  command: not an edit); feature off, `TERMINFO` empty, and a feature list such as `nosudo`
+  (no whole-item match) leave `sudo` alone; fish leaves an existing `sudo` function alone.
+
+##### 151.C6 — Build generation, macOS layout, Windows README (P3, P4, P5)
+
+Scope: `freminal-terminal-emulator/build.rs` (remove the terminfo generation and its
+`rerun-if-changed` lines), `xtask/` (a new `terminfo` subcommand that runs `tic -x` and writes
+the committed tree and tar exactly as `build.rs` did), `freminal-terminal-emulator/tests/terminfo_tree.rs`
+(the stdin-compile test's failure message names `cargo xtask terminfo`),
+`freminal-terminal-emulator/tests/terminfo_child.rs` (accept `x/` or `78/` wherever the setup
+or the child probe looks for a compiled entry), `README.md` (the in-pane command applies where
+freminal bundles the entry, not on Windows; Windows users use the source-file command),
+`DESIGN_DECISIONS.md` and `agents.md`'s xtask list (the new subcommand), and the `res/freminal.ti`
+header (how to regenerate).
+
 #### 151 Status notes
 
 - **151.1 (done).** See "151 Audit".
