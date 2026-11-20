@@ -8129,6 +8129,14 @@ Stale stub text was corrected at the same time:
   reversal, normal video and cursor-only frames; the harness's `SyntheticFrame` gained
   `screen_inversion` and `reversed_cell` (outside the listed files, as 132.11 did).
   `instanced_bg*`: no regression (the baseline was taken under load).
+- **147.17 (done).** COVERAGE, GAPS and `KITTY_PROTOCOL_REFERENCE.md` carry every 147
+  behaviour change, with dated 2026-11-20 headers. Spec corrections applied: the `?1036`/`?1039`
+  rows document macOS Option composing (Task 152); XTSMGRAPHICS `Pi=3` is status 1; the
+  XTGETTCAP `indn`/`rin`/`query-os-name` row came with Task 151 and was verified, not <!-- codespell:ignore rin -->
+  duplicated. The malformed `ESC \` row and a COVERAGE row that had lost its Notes cell are
+  rebuilt. The GAPS rows for pending wrap, the per-read paragraph, the saved cursor on resize
+  and sixel under DECSDM are closed; KAM, SRM, `?1001`, `?1034`, `?1035`, the 96-character
+  designators and HP `ESC F`/`l`/`m` are not planned with reasons. `SGR.md` needed no change.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
