@@ -25,7 +25,7 @@ and plan document maintenance rules.
 | v0.11.1 | Correctness Fixes                        | `PLAN_VERSION_111.md`                                                 | 115–117                   | Complete    |
 | v0.12.0 | Scrollback Memory & Performance          | `PLAN_VERSION_120.md`                                                 | 118–125                   | Complete    |
 | v0.13.0 | Kitty: Foundations & Safety              | `PLAN_VERSION_130.md`                                                 | 126–132, 138–140, 147–151 | In progress |
-| v0.13.1 | Kitty: Shipped-Protocol Conformance      | `PLAN_VERSION_130.md`                                                 | 134–137                   | Planned     |
+| v0.13.1 | Kitty: Shipped-Protocol Conformance      | `PLAN_VERSION_130.md`                                                 | 134–137, 152              | Planned     |
 | v0.13.2 | Kitty: Small & Medium New Protocols      | `PLAN_VERSION_130.md`                                                 | 103, 141–145              | Planned     |
 | v0.13.3 | Kitty: Text Sizing, Transfer & Clipboard | `PLAN_VERSION_130.md`                                                 | 102, 104, 133, 146        | Planned     |
 | v0.13.4 | Kitty: Drag & Drop                       | `PLAN_VERSION_130.md`                                                 | 105                       | Planned     |
@@ -252,6 +252,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | Complete      | Task 138                      |
 | 150 | Desktop Notification Backend Extraction     | `PLAN_VERSION_130.md` (Task 150)              | Complete      | Task 149                      |
 | 151 | Own TERM & Terminfo Distribution            | `PLAN_VERSION_130.md` (Task 151)              | Pending merge | Task 140                      |
+| 152 | macOS Option as Alt & Per-Side Alt          | `PLAN_VERSION_130.md` (Task 152)              | Planned       | Task 147; Task 137 coord.     |
 
 ---
 

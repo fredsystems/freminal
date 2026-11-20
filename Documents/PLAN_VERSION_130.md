@@ -23,7 +23,7 @@ one plan document, grouped into milestones that ship as point releases:
 | Milestone | Codename                                   | Tasks                        |
 | --------- | ------------------------------------------ | ---------------------------- |
 | v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147–151    |
-| v0.13.1   | Shipped-Protocol Conformance (heavy)       | 134, 135, 136, 137           |
+| v0.13.1   | Shipped-Protocol Conformance (heavy)       | 134, 135, 136, 137, 152      |
 | v0.13.2   | New Protocols: Small & Medium              | 103, 141, 142, 143, 144, 145 |
 | v0.13.3   | New Protocols: Text Sizing, Transfer, Clip | 133, 104, 102, 146           |
 | v0.13.4   | Drag & Drop                                | 105                          |
@@ -64,6 +64,7 @@ enriched stubs again and get re-decomposed at activation.
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
 | 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned       | 128, 131; architecture sign-off    |
+| 152 | macOS Option as Alt & Per-Side Alt          | v0.13.1   | M     | Planned       | 147; 137 coordination              |
 | 103 | Multiple Cursors                            | v0.13.2   | L     | Planned       | 127, 128, 131, 132, 141            |
 | 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned       | 128, 131                           |
 | 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned       | 128                                |
@@ -11376,6 +11377,52 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 - (a) vs (b) above.
 - Ctrl+`-` maps to 0x1F (xterm) or `-` (kitty spec).
 - Shipping CapsLock/NumLock/ScrollLock key events under flag 8 without the lock bits.
+
+### Task 152 — macOS Option as Alt & Per-Side Alt (stub, v0.13.1)
+
+**Goal.** On macOS, Option can act as Alt for terminal input, so Option+b sends `ESC b`
+under `?1036` instead of composing `∫`, with a per-side choice: a new
+`[keyboard] macos_option_as_alt = "none" | "left" | "right" | "both"` (default `none`), as kitty
+(`macos_option_as_alt`) and Ghostty (`macos-option-as-alt`) offer. Created 2026-11-19 by
+maintainer decision, when 147.24 shipped `?1036` without the macOS half.
+
+**Findings (147.24).**
+
+- On macOS, egui-winit fills `Event::Text` from winit's `text`, which is the character Option
+  has already composed. Sending the base key needs winit's macOS-only
+  `KeyEventExtModifierSupplement::text_with_all_modifiers` / `key_without_modifiers`, which
+  freminal does not read today; it would have to be carried from `freminal-windowing` to the
+  input encoder.
+- Per-side Option: `freminal-windowing`'s `RawKeyMods` carries one `alt` flag and the
+  raw-key path only covers egui-blocked keys, so it carries no text. egui delivers
+  `Event::Key { AltLeft / AltRight }`, so per-side state is available, but it needs a
+  cross-frame `AltKeyState` (like `SuperKeyState`) through `InputCarryState`,
+  `PaneRenderCache` and `widget.rs`.
+- 147.24 left the decision as a pure function (`gui/terminal/alt_text.rs`, parameterised over
+  `HostPlatform`), with macOS Option always composing, so this task extends that function
+  rather than adding a second path.
+
+**Approach (maintainer decision, 2026-11-19: carry the base key through the windowing
+layer).** A windowing-side channel delivers, for each text-producing key event on macOS, the
+key without modifiers and which Option key (left/right) is held; the GUI uses it in place of
+`Event::Text` when the configured side is held, so the base character gets the Alt prefix.
+Full `freminal-config-options` checklist for the new option. AltGr rules from 147.24 stay
+(Ctrl+Alt is never a prefix). Kitty keyboard encodings stay Task 137's.
+
+**Coordination with Task 137.** Task 137 needs key identity at the GUI boundary and is gated
+on an architecture choice between widening the Task 114 raw-winit intercept and an egui
+`physical_key` plus a windowing side channel. This task's channel is the same seam, so it is
+designed against that choice: either Task 137's decision is made first and this task uses it,
+or this task lands the side channel in a form Task 137 can extend. Decided at activation with
+the maintainer; `freminal-architecture` applies (windowing must not grow GUI policy).
+
+**Open questions.**
+
+- Whether `left`/`right` need the base key from the physical key (layout-independent) or the
+  logical key without modifiers (layout-aware); kitty and Ghostty both use the latter.
+- Dead keys and IME composition on macOS while Option is Alt (they must not be broken for the
+  side that is not Alt).
+- Whether other platforms get a per-side Alt choice too (today Alt is always the prefix there).
 
 ### Task 138 — Desktop Notifications (OSC 99) Conformance (activated)
 
