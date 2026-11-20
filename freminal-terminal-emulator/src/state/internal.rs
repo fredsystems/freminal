@@ -523,8 +523,9 @@ impl TerminalState {
     /// Any tmux DCS passthrough payload an output queued is processed right
     /// after that output, before the next one, so an inner sequence takes
     /// effect at the position its wrapper occupied on the wire.  The handler's
-    /// end-of-batch housekeeping runs once, after the last output (see
-    /// [`Self::process_outputs_at_depth`] for why not per nested batch).
+    /// end-of-batch housekeeping is not run here: a read is processed in
+    /// segments, and the caller runs it once per read (see
+    /// [`Self::process_outputs_at_depth`]).
     ///
     /// `entry_modes` is the parser's DECANM / S8C1T state from before it parsed
     /// `parsed`.  Folding each output into it, in event order, tracks the mode
@@ -535,7 +536,6 @@ impl TerminalState {
     fn process_parsed_outputs(&mut self, parsed: &[TerminalOutput], entry_modes: WireModes) {
         let mut wire_modes = entry_modes;
         self.process_outputs_at_depth(parsed, 0, &mut wire_modes);
-        self.handler.finish_output_batch();
         self.parser.vt52_mode = wire_modes.vt52_mode;
         self.parser.s8c1t_mode = wire_modes.s8c1t_mode;
     }
@@ -560,7 +560,8 @@ impl TerminalState {
     /// The end-of-batch housekeeping (`finish_output_batch`) is deliberately
     /// **not** run here: it is a per-PTY-read cost (see
     /// `prune_evicted_real_placements`), and nested payloads are part of the
-    /// same read.  [`Self::process_parsed_outputs`] runs it once at the top.
+    /// same read.  `handle_incoming_data` runs it once per PTY read, after every
+    /// segment.
     fn process_outputs_at_depth(
         &mut self,
         outputs: &[TerminalOutput],
@@ -786,6 +787,10 @@ impl TerminalState {
             };
             rest = remaining;
         }
+
+        // The end-of-batch housekeeping is a per-read cost, so it runs once
+        // after every segment of the read, not once per segment.
+        self.handler.finish_output_batch();
 
         // Drain window commands queued by the new handler into the shared vec
         // so that the GUI's existing drain loop in handle_window_manipulation

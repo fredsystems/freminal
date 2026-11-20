@@ -879,3 +879,43 @@ fn malformed_tmux_payloads_have_no_effect() {
         assert_eq!(replies(&rx), Vec::<Vec<u8>>::new());
     }
 }
+
+/// A `DCS tmux;` wrapper ended by a bare ESC (not ESC `\`) whose payload
+/// switches to VT52: the escape the bare ESC starts is read under VT52, so
+/// `ESC A` moves the cursor up (PR #589 review R28).
+fn bare_esc_vt52_wrapper() -> Vec<u8> {
+    let mut wire = tmux_wrap(b"\x1b[?2l");
+    // Replace the closing `ESC \` with a bare ESC that starts `ESC A`.
+    wire.truncate(wire.len() - 1);
+    wire.push(b'A');
+    wire
+}
+
+#[test]
+fn a_bare_esc_after_a_vt52_payload_starts_a_vt52_escape_in_the_same_read() {
+    let (mut state, _rx) = make_state();
+    feed_setup(&mut state);
+    let before = cursor(&state);
+    state.handle_incoming_data(&bare_esc_vt52_wrapper());
+    assert_eq!(
+        cursor(&state),
+        (before.0, before.1 - 1),
+        "VT52 ESC A is cursor up"
+    );
+}
+
+#[test]
+fn a_bare_esc_after_a_vt52_payload_starts_a_vt52_escape_across_a_split() {
+    let (mut state, _rx) = make_state();
+    feed_setup(&mut state);
+    let before = cursor(&state);
+    let wire = bare_esc_vt52_wrapper();
+    let (head, tail) = wire.split_at(wire.len() - 1);
+    state.handle_incoming_data(head);
+    state.handle_incoming_data(tail);
+    assert_eq!(
+        cursor(&state),
+        (before.0, before.1 - 1),
+        "VT52 ESC A is cursor up"
+    );
+}

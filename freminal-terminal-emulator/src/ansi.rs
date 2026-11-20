@@ -147,40 +147,67 @@ pub fn parse_param_as<T: std::str::FromStr>(
     )
 }
 
-/// Whether `b`, a byte of an open string (OSC, DCS or APC), is the 8-bit C1
-/// String Terminator: `0x9C` with 8-bit C1 controls in force and not
-/// completing a UTF-8 character.
-///
-/// Under S7C1T `0x9C` is not a control: inside a string it is an ordinary
-/// body byte. Under S8C1T it is still a continuation byte of many characters
-/// (`Ŝ` is `C5 9C`), so `utf8_pending`, the number of continuation bytes the
-/// character in progress still expects, must be zero for it to end the
-/// string. A `0x9C` that completes no character (a standalone one) ends it.
-///
-/// Tracks the character in progress, so it must see every byte of the
-/// string; under S7C1T it does nothing. This is the same gate
-/// `ansi_parser_inner_empty` applies to every other 8-bit C1 introducer.
-#[inline]
-fn string_byte_is_c1_st(b: u8, s8c1t: S8c1t, utf8_pending: &mut u8) -> bool {
-    if s8c1t != S8c1t::EightBit {
-        return false;
-    }
-    if b == 0x9C && *utf8_pending == 0 {
-        return true;
-    }
-    if b < 0x80 {
-        *utf8_pending = 0;
-    } else if b >= 0xC0 {
-        *utf8_pending = match b {
-            0xC2..=0xDF => 1,
-            0xE0..=0xEF => 2,
-            0xF0..=0xF4 => 3,
-            _ => 0,
+/// The UTF-8 character in progress, tracked under S8C1T so that a byte in
+/// `0x80`–`0x9F` that continues a well-formed character is text, not an 8-bit
+/// C1 control. xterm decodes UTF-8 before it looks a byte up, so `Ŏ`
+/// (`C5 8E`) is a letter there, not SS2; freminal applies the same rule in
+/// the ground state and inside OSC, DCS and APC strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Utf8Tracker {
+    /// Continuation bytes the character in progress still expects.
+    pending: u8,
+    /// The lowest byte the next continuation may take: the second byte of an
+    /// `E0`, `ED`, `F0` or `F4` sequence has a narrower range (Unicode
+    /// Table 3-7, well-formed UTF-8 byte sequences).
+    lo: u8,
+    /// The highest byte the next continuation may take.
+    hi: u8,
+}
+
+impl Utf8Tracker {
+    /// No character in progress.
+    const NONE: Self = Self {
+        pending: 0,
+        lo: 0,
+        hi: 0,
+    };
+
+    /// Feed `b`; `true` when it is a valid continuation of the character in
+    /// progress. Otherwise `b` starts afresh: a lead byte opens a character,
+    /// anything else leaves none in progress.
+    #[inline]
+    fn continues(&mut self, b: u8) -> bool {
+        if self.pending > 0 && (self.lo..=self.hi).contains(&b) {
+            self.pending -= 1;
+            self.lo = 0x80;
+            self.hi = 0xBF;
+            return true;
+        }
+        let (pending, lo, hi) = match b {
+            0xC2..=0xDF => (1, 0x80, 0xBF),
+            0xE0 => (2, 0xA0, 0xBF),
+            0xED => (2, 0x80, 0x9F),
+            0xE1..=0xEC | 0xEE..=0xEF => (2, 0x80, 0xBF),
+            0xF0 => (3, 0x90, 0xBF),
+            0xF1..=0xF3 => (3, 0x80, 0xBF),
+            0xF4 => (3, 0x80, 0x8F),
+            _ => (0, 0, 0),
         };
-    } else {
-        *utf8_pending = utf8_pending.saturating_sub(1);
+        *self = Self { pending, lo, hi };
+        false
     }
-    false
+
+    /// Whether `b`, the next byte of an open string, is the 8-bit C1 String
+    /// Terminator: `0x9C` with 8-bit C1 controls in force and not a valid
+    /// continuation of the character in progress (`C5 9C` is `Ŝ`; `E0 9C` is
+    /// ill-formed, so that `9C` is ST). Under S7C1T `0x9C` is an ordinary
+    /// body byte. This is the same S8C1T gate the ground state applies to
+    /// every other 8-bit C1 control. It must see every byte the string
+    /// consumes.
+    #[inline]
+    fn is_c1_st(&mut self, b: u8, s8c1t: S8c1t) -> bool {
+        s8c1t == S8c1t::EightBit && !self.continues(b) && b == 0x9C
+    }
 }
 
 fn push_data_if_non_empty(data: &mut Vec<u8>, output: &mut Vec<TerminalOutput>) {
@@ -331,13 +358,14 @@ pub struct FreminalAnsiParser {
     /// 8-bit C1 control introducers.  Toggled by `ESC SP G` (S8C1T) /
     /// `ESC SP F` (S7C1T).
     pub s8c1t_mode: S8c1t,
-    /// While a string (OSC, DCS, APC) is open under S8C1T: how many UTF-8
-    /// continuation bytes the character in progress still expects. `0x9C` is
-    /// a continuation byte of many characters (`Ŝ` is `C5 9C`), so it ends
-    /// the string only when this is zero. It is zero whenever no string is
-    /// open: every byte that ends one (BEL, ESC, CAN, SUB) is ASCII and
-    /// clears it, and a `0x9C` ends a string only when it is already zero.
-    string_utf8_pending: u8,
+    /// While a string (OSC, DCS, APC) is open under S8C1T: the UTF-8
+    /// character in progress, so that a `0x9C` continuation byte is not taken
+    /// for ST. Reset whenever the parser is not in a string state after a
+    /// byte, so a new string never inherits a character from an old one.
+    string_utf8: Utf8Tracker,
+    /// The UTF-8 character in progress in ground-state text under S8C1T, so
+    /// that a continuation byte in `0x80`–`0x9F` is text, not a C1 control.
+    ground_utf8: Utf8Tracker,
 }
 
 impl SequenceTraceable for FreminalAnsiParser {
@@ -367,7 +395,8 @@ impl FreminalAnsiParser {
             seq_trace: SequenceTracer::new(),
             vt52_mode: Decanm::Ansi,
             s8c1t_mode: S8c1t::SevenBit,
-            string_utf8_pending: 0,
+            string_utf8: Utf8Tracker::NONE,
+            ground_utf8: Utf8Tracker::NONE,
         }
     }
 
@@ -395,6 +424,12 @@ impl FreminalAnsiParser {
         data_output: &mut Vec<u8>,
         output: &mut Vec<TerminalOutput>,
     ) -> Result<(), ()> {
+        // Under S8C1T every byte is fed to the UTF-8 tracker first, so a C0
+        // control or ESC between a lead byte and a `0x80`–`0x9F` byte breaks
+        // the character and the later byte is a C1 control again.
+        let continues_character =
+            self.s8c1t_mode == S8c1t::EightBit && self.ground_utf8.continues(b);
+
         if b == b'\x1b' {
             if self.vt52_mode == Decanm::Vt52 {
                 self.inner = ParserInner::Vt52Escape;
@@ -463,10 +498,13 @@ impl FreminalAnsiParser {
             return Err(());
         }
 
-        // 8-bit C1 controls (0x80–0x9F) — recognized only when S8C1T is active
-        // and we are in ANSI mode (VT52 mode does not support 8-bit C1).
+        // 8-bit C1 controls (0x80–0x9F) — recognized only when S8C1T is active,
+        // in ANSI mode (VT52 mode does not support 8-bit C1), and at a UTF-8
+        // character boundary: a byte that continues a well-formed character is
+        // text, as in xterm, which decodes UTF-8 first (`Ŏ` is `C5 8E`).
         if self.s8c1t_mode == S8c1t::EightBit
             && self.vt52_mode == Decanm::Ansi
+            && !continues_character
             && (0x80..=0x9F).contains(&b)
         {
             push_data_if_non_empty(data_output, output);
@@ -599,6 +637,21 @@ impl FreminalAnsiParser {
     /// The string itself has already been dispatched by its sub-parser. This
     /// re-enters the escape state (the ESC the sub-parser consumed) and feeds
     /// `b` to it, so `b` is parsed exactly as it would be after any ESC.
+    /// Put a pending ESC under the escape table of the parser's current mode.
+    ///
+    /// An ESC is pending between two pushes when a read ends after it, or when
+    /// a bare ESC ended a `DCS tmux;` wrapper and the push stopped there
+    /// ([`PushLimit::ThroughTmuxPassthrough`]). The wrapper's payload, applied
+    /// between the pushes, may have switched DECANM, so the ESC's second byte
+    /// must be read under the mode now in force.
+    fn resume_pending_escape(&mut self) {
+        match (&self.inner, self.vt52_mode) {
+            (ParserInner::Escape, Decanm::Vt52) => self.inner = ParserInner::Vt52Escape,
+            (ParserInner::Vt52Escape, Decanm::Ansi) => self.inner = ParserInner::Escape,
+            _ => {}
+        }
+    }
+
     fn restart_escape_with(
         &mut self,
         b: u8,
@@ -689,6 +742,7 @@ impl FreminalAnsiParser {
     // the parser state. Splitting would fragment the state machine without reducing complexity.
     #[allow(clippy::too_many_lines)]
     fn push_to_limit(&mut self, incoming: &[u8], limit: PushLimit) -> (Vec<TerminalOutput>, usize) {
+        self.resume_pending_escape();
         // Take the pending buffer out temporarily
         let mut data_output = std::mem::take(&mut self.pending_data);
         let mut output = Vec::new();
@@ -745,14 +799,34 @@ impl FreminalAnsiParser {
                     }
                 }
                 ParserInner::Dcs(parser) => {
-                    match if string_byte_is_c1_st(b, self.s8c1t_mode, &mut self.string_utf8_pending)
-                    {
+                    match if self.string_utf8.is_c1_st(b, self.s8c1t_mode) {
                         parser.terminate_c1_st(&mut output)
                     } else {
                         parser.dcs_parser_inner(b, &mut output)
                     } {
                         ParserOutcome::Finished => {
                             self.inner = ParserInner::Empty;
+                        }
+                        ParserOutcome::FinishedAtEsc
+                            if limit == PushLimit::ThroughTmuxPassthrough
+                                && output[emitted_from..].iter().any(is_tmux_passthrough) =>
+                        {
+                            // A bare ESC ended a `DCS tmux;` wrapper. Its payload
+                            // may change the parser's mode, so the ESC stays
+                            // pending and `b`, its second byte, is left for the
+                            // caller to feed again once the payload is applied
+                            // (`resume_pending_escape` picks the escape table).
+                            self.inner = ParserInner::Escape;
+                            self.string_utf8 = Utf8Tracker::NONE;
+                            consumed = index;
+                            for emitted in &output[emitted_from..] {
+                                apply_parser_mode_change(
+                                    emitted,
+                                    &mut self.vt52_mode,
+                                    &mut self.s8c1t_mode,
+                                );
+                            }
+                            break;
                         }
                         ParserOutcome::FinishedAtEsc => {
                             self.restart_escape_with(b, &mut data_output, &mut output);
@@ -765,8 +839,7 @@ impl FreminalAnsiParser {
                     }
                 }
                 ParserInner::Apc(parser) => {
-                    match if string_byte_is_c1_st(b, self.s8c1t_mode, &mut self.string_utf8_pending)
-                    {
+                    match if self.string_utf8.is_c1_st(b, self.s8c1t_mode) {
                         parser.terminate_c1_st(&mut output)
                     } else {
                         parser.apc_parser_inner(b, &mut output)
@@ -842,8 +915,7 @@ impl FreminalAnsiParser {
                     }
                 }
                 ParserInner::Osc(parser) => {
-                    match if string_byte_is_c1_st(b, self.s8c1t_mode, &mut self.string_utf8_pending)
-                    {
+                    match if self.string_utf8.is_c1_st(b, self.s8c1t_mode) {
                         parser.terminate_c1_st(&mut output)
                     } else {
                         parser.ansiparser_inner_osc(b, &mut output)
@@ -906,6 +978,13 @@ impl FreminalAnsiParser {
                     let (table, prefix) = (*table, *prefix);
                     self.vt52_non_ascii_byte(table, prefix, b, &mut data_output, &mut output);
                 }
+            }
+
+            if !matches!(
+                self.inner,
+                ParserInner::Osc(_) | ParserInner::Dcs(_) | ParserInner::Apc(_)
+            ) {
+                self.string_utf8 = Utf8Tracker::NONE;
             }
 
             // A mode change (S8C1T/S7C1T, DECANM, RIS) must govern the next
@@ -3336,6 +3415,74 @@ mod tests {
     }
 
     #[test]
+    fn c1_st_after_an_ill_formed_utf8_prefix_ends_the_string() {
+        // `E0` allows only `A0`-`BF` next, so this `9C` cannot continue it: it
+        // is ST, and the text after it is ground-state data (review R26).
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let out = p.push(b"\x9d0;\xe0\x9cX");
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert_eq!(out.last(), Some(&data("X")));
+    }
+
+    #[test]
+    fn a_new_string_does_not_inherit_a_character_from_a_byte_it_never_took() {
+        // A bare ESC ends the DCS; `C5` is then rejected by the escape parser.
+        // The next OSC must still end at a standalone `9C` (review R27).
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        p.push(b"\x90abc\x1b\xc5");
+        // An immediately terminated OSC: its first byte is the ST.
+        p.push(b"\x9d\x9c");
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn under_s8c1t_a_utf8_continuation_in_text_is_not_a_c1_control() {
+        // `Ŏ` is `C5 8E`: the `8E` is text, not SS2 (review R32).
+        for split in [None, Some(1)] {
+            let mut p = FreminalAnsiParser::new();
+            p.s8c1t_mode = S8c1t::EightBit;
+            let input = "Ŏab".as_bytes();
+            let out = match split {
+                None => p.push(input),
+                Some(at) => {
+                    let mut out = p.push(&input[..at]);
+                    out.extend(p.push(&input[at..]));
+                    out
+                }
+            };
+            assert!(
+                !out.iter()
+                    .any(|o| matches!(o, TerminalOutput::SingleShift(_))),
+                "{split:?}: {out:?}"
+            );
+            let text: Vec<u8> = out
+                .iter()
+                .filter_map(|o| match o {
+                    TerminalOutput::Data(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert_eq!(text, input, "{split:?}");
+        }
+    }
+
+    #[test]
+    fn under_s8c1t_a_standalone_ss2_or_one_after_a_broken_character_shifts() {
+        for input in [&b"\x8ea"[..], b"\xc5\r\x8ea", b"\xc5\x1b[m\x8ea"] {
+            let mut p = FreminalAnsiParser::new();
+            p.s8c1t_mode = S8c1t::EightBit;
+            let out = p.push(input);
+            assert!(
+                out.contains(&TerminalOutput::SingleShift(CharsetSlot::G2)),
+                "{input:?}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_csi_exactly_at_the_cap_is_still_dispatched() {
         let mut p = FreminalAnsiParser::new();
         // Body: digits then the final `m`: MAX_CSI_BYTES bytes in all.
@@ -3343,7 +3490,11 @@ mod tests {
         input.extend(std::iter::repeat_n(b'0', MAX_CSI_BYTES - 1));
         input.push(b'm');
         let out = p.push(&input);
-        assert!(!out.is_empty(), "an at-cap SGR is dispatched");
+        assert!(
+            !out.contains(&TerminalOutput::Invalid),
+            "an at-cap SGR is not rejected: {out:?}"
+        );
+        assert_eq!(out, FreminalAnsiParser::new().push(b"\x1b[0m"));
         assert_eq!(p.inner, ParserInner::Empty);
     }
 
