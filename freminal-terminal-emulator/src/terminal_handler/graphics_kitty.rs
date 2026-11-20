@@ -30,7 +30,7 @@ use freminal_common::buffer_states::kitty_graphics::{
 };
 use freminal_common::buffer_states::row_number::RowNumber;
 
-use freminal_buffer::buffer::ImagePlacementMode;
+use freminal_buffer::buffer::{ImagePlacementMode, PlaceImageRequest};
 use freminal_buffer::image_store::{
     AnimationControl, AnimationRunMode, ImageProtocol, ImageSizeMode, InlineImage, SourceCrop,
     SubCellOffset, next_image_id, next_placement_instance_id,
@@ -1645,14 +1645,16 @@ impl TerminalHandler {
         let place_result = self.buffer.place_image(
             image_to_place,
             0,
-            ImageProtocol::Kitty,
-            cmd.control.image_number,
-            cmd.control.placement_id,
-            cmd.control.z_index.unwrap_or(0),
-            source_crop,
-            placement_instance,
-            subcell_offset,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: cmd.control.image_number,
+                placement_id: cmd.control.placement_id,
+                z_index: cmd.control.z_index.unwrap_or(0),
+                source_crop,
+                placement_instance,
+                subcell_offset,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // `C=1` (no cursor movement): put the cursor back on the image origin,
@@ -2442,14 +2444,16 @@ impl TerminalHandler {
         let place_result = self.buffer.place_image(
             inline_image,
             0,
-            ImageProtocol::Kitty,
-            control.image_number,
-            control.placement_id,
-            control.z_index.unwrap_or(0),
-            source_crop,
-            placement_instance,
-            subcell_offset,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: control.image_number,
+                placement_id: control.placement_id,
+                z_index: control.z_index.unwrap_or(0),
+                source_crop,
+                placement_instance,
+                subcell_offset,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // `C=1` (no cursor movement) — mirrors `stamp_kitty_put`'s handling of

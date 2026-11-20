@@ -17,7 +17,7 @@ use freminal_common::buffer_states::{
     modes::decsdm::Decsdm, modes::private_color_registers::PrivateColorRegisters,
 };
 
-use freminal_buffer::buffer::ImagePlacementMode;
+use freminal_buffer::buffer::{ImagePlacementMode, PlaceImageRequest};
 use freminal_buffer::image_store::{
     ImageProtocol, InlineImage, next_image_id, next_placement_instance_id,
 };
@@ -126,14 +126,16 @@ impl TerminalHandler {
         self.buffer.place_image(
             inline_image,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            placement_instance,
-            None,
-            mode,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance,
+                subcell_offset: None,
+                mode,
+            },
         );
     }
 }

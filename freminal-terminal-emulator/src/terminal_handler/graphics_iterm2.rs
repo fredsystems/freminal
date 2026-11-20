@@ -17,7 +17,7 @@
 use conv2::ValueFrom;
 use freminal_common::buffer_states::osc::{ITerm2InlineImageData, ImageDimension};
 
-use freminal_buffer::buffer::ImagePlacementMode;
+use freminal_buffer::buffer::{ImagePlacementMode, PlaceImageRequest};
 use freminal_buffer::image_store::{
     ImageProtocol, ImageSizeMode, InlineImage, next_image_id, next_placement_instance_id,
 };
@@ -150,14 +150,16 @@ impl TerminalHandler {
         let place_result = self.buffer.place_image(
             inline_image,
             0,
-            ImageProtocol::ITerm2,
-            None,
-            None,
-            0,
-            None,
-            placement_instance,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::ITerm2,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // doNotMoveCursor: the iTerm2 protocol keeps the cursor at its

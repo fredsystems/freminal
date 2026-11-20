@@ -130,13 +130,33 @@ impl FreminalGui {
     /// `self.windows` for the frame, so every per-window change below visits it
     /// in addition to the map. Pass `None` when no window is out of the map
     /// (the Settings window's Apply).
-    #[allow(clippy::too_many_lines)] // Broadcasts 7 distinct config dimensions.
     pub(super) fn apply_new_config(
         &mut self,
         new_cfg: Config,
         handle: &freminal_windowing::WindowHandle<'_>,
-        mut current: Option<&mut PerWindowState>,
+        current: Option<&mut PerWindowState>,
     ) {
+        self.apply_config_state(new_cfg, current);
+
+        // Request repaint on all terminal windows so changes are visible.
+        // The theme reaches the terminal chrome via the PTY round-trip
+        // (snap.theme), so an immediate repaint may re-read a stale snapshot;
+        // a short follow-up repaint guarantees the restyle lands even on an
+        // idle terminal.
+        for &wid in self.windows.keys() {
+            handle.request_repaint(wid);
+            handle.request_repaint_after(wid, std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// [`Self::apply_new_config`] without the repaint requests: replace
+    /// `self.config` with `new_cfg` and broadcast every derived state change.
+    ///
+    /// Split out because the repaint half needs a live event loop
+    /// (`WindowHandle`) and nothing else here does, which is what lets a test
+    /// drive the whole broadcast against real panes.
+    #[allow(clippy::too_many_lines)] // Broadcasts 7 distinct config dimensions.
+    fn apply_config_state(&mut self, new_cfg: Config, mut current: Option<&mut PerWindowState>) {
         // The theme is being committed: drop the live preview override so
         // chrome styling returns to the snapshot's theme (which now carries the
         // committed theme via the broadcast below). Keeping the override pinned
@@ -403,16 +423,6 @@ impl FreminalGui {
                     }
                 }
             }
-        }
-
-        // Request repaint on all terminal windows so changes are visible.
-        // The theme reaches the terminal chrome via the PTY round-trip
-        // (snap.theme), so an immediate repaint may re-read a stale snapshot;
-        // a short follow-up repaint guarantees the restyle lands even on an
-        // idle terminal.
-        for &wid in self.windows.keys() {
-            handle.request_repaint(wid);
-            handle.request_repaint_after(wid, std::time::Duration::from_millis(50));
         }
     }
 
@@ -1489,5 +1499,102 @@ mod tests {
             .collect();
 
         assert_eq!(visited, [7], "the only window is the in-flight one");
+    }
+
+    // ── Host-capability glue of `apply_config_state` (Task 147.11) ──────
+
+    use crate::gui::host_capabilities::host_capabilities;
+    use crate::gui::test_support::gui_with_windows;
+    use freminal_common::config::Config;
+    use freminal_common::host_capabilities::HostCapabilities;
+    use freminal_terminal_emulator::io::InputEvent;
+    use freminal_windowing::WindowId;
+
+    /// A config differing from `Config::default()` in a switch
+    /// `host_capabilities` reads, and not in any notification routing (so the
+    /// notification service is never wanted, and never started, here).
+    fn file_transfer_allowed() -> Config {
+        let mut config = Config::default();
+        config.security.allow_kitty_file_transfer = true;
+        config
+    }
+
+    /// The `HostCapabilitiesChange` payloads waiting on `rx`; every other
+    /// event `apply_config_state` sends (theme mode, cursor) is skipped.
+    fn capability_changes(rx: &crossbeam_channel::Receiver<InputEvent>) -> Vec<HostCapabilities> {
+        rx.try_iter()
+            .filter_map(|event| match event {
+                InputEvent::HostCapabilitiesChange(caps) => Some(caps),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn applying_a_capability_change_sends_the_new_capabilities_to_every_pane() {
+        let (mut gui, windows) = gui_with_windows(&Config::default(), &[2, 1]);
+        let new = file_transfer_allowed();
+        let expected = host_capabilities(&new, gui.osc99_daemon.get());
+        assert_ne!(
+            expected,
+            host_capabilities(&Config::default(), gui.osc99_daemon.get()),
+            "setup: the change must alter the capabilities"
+        );
+
+        gui.apply_config_state(new, None);
+
+        assert!(
+            gui.config.security.allow_kitty_file_transfer,
+            "the new config is the one in effect"
+        );
+        for (pane, rx) in windows.iter().flatten() {
+            assert_eq!(capability_changes(rx), vec![expected], "pane {pane:?}");
+        }
+    }
+
+    #[test]
+    fn applying_a_capability_change_reaches_the_in_flight_window_too() {
+        let (mut gui, windows) = gui_with_windows(&Config::default(), &[1, 2]);
+        let mut in_flight = gui
+            .windows
+            .remove(&WindowId::for_test(2))
+            .expect("window 2 exists");
+        let new = file_transfer_allowed();
+        let expected = host_capabilities(&new, gui.osc99_daemon.get());
+
+        gui.apply_config_state(new, Some(&mut in_flight));
+
+        for (pane, rx) in windows.iter().flatten() {
+            assert_eq!(capability_changes(rx), vec![expected], "pane {pane:?}");
+        }
+    }
+
+    #[test]
+    fn applying_a_config_that_changes_no_capability_sends_none() {
+        let (mut gui, windows) = gui_with_windows(&Config::default(), &[1]);
+        let mut new = Config::default();
+        new.cursor.blink = !new.cursor.blink;
+        assert_eq!(
+            host_capabilities(&new, gui.osc99_daemon.get()),
+            host_capabilities(&Config::default(), gui.osc99_daemon.get()),
+            "setup: the change must not alter the capabilities"
+        );
+
+        gui.apply_config_state(new, None);
+
+        for (_, rx) in windows.iter().flatten() {
+            assert_eq!(capability_changes(rx), Vec::<HostCapabilities>::new());
+        }
+    }
+
+    #[test]
+    fn applying_the_config_already_in_effect_sends_no_capability_change() {
+        let (mut gui, windows) = gui_with_windows(&file_transfer_allowed(), &[1]);
+
+        gui.apply_config_state(file_transfer_allowed(), None);
+
+        for (_, rx) in windows.iter().flatten() {
+            assert_eq!(capability_changes(rx), Vec::<HostCapabilities>::new());
+        }
     }
 }

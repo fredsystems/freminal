@@ -616,19 +616,11 @@ mod tests {
         }
     }
 
-    use crate::gui::panes::{Pane, PaneId};
-    use crate::gui::pty::WindowCommandBudget;
-    use crate::gui::tabs::{Tab, TabId};
-    use crate::gui::title_stack::TitleStack;
-    use crate::gui::view_state::ViewState;
-    use arc_swap::ArcSwap;
+    use crate::gui::test_support::window_of;
     use crossbeam_channel::Receiver;
     use freminal_common::pty_write::PtyWrite;
     use freminal_notify::DaemonCapabilities;
-    use freminal_terminal_emulator::io::SearchCorpus;
-    use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_terminal_emulator::state::internal::TerminalState;
-    use std::sync::{Arc, atomic::AtomicBool};
 
     const ALL_ROUTINGS: [NotificationRouting; 5] = [
         NotificationRouting::Toast,
@@ -1637,64 +1629,6 @@ mod tests {
     }
 
     // ── Broadcast to every pane, in-flight window included ──────────────
-
-    /// A tab with one pane whose input receiver is returned.
-    fn tab_with_input_rx(id: TabId, pane_id: PaneId) -> (Tab, Receiver<InputEvent>) {
-        let arc_swap = Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
-        let (input_tx, input_rx) = crossbeam_channel::unbounded();
-        let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
-        let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
-        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
-        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
-        let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
-
-        let pane = Pane {
-            id: pane_id,
-            arc_swap,
-            reply_tx: Arc::new(input_tx.clone()),
-            input_tx,
-            window_cmd_rx,
-            clipboard_rx,
-            search_buffer_rx,
-            pty_dead_rx,
-            command_event_rx,
-            recent_commands: std::collections::VecDeque::new(),
-            history_seed: crate::gui::shell_history::new_seeded_history(),
-            shell_program: None,
-            shell_histfile_last_seen: None,
-            command_texts: std::collections::HashMap::new(),
-            title: format!("pane-{pane_id}"),
-            bell_active: false,
-            pending_copy: false,
-            title_stack: TitleStack::new(),
-            view_state: ViewState::new(),
-            echo_off: Arc::new(AtomicBool::new(false)),
-            window_cmd_budget: WindowCommandBudget::default(),
-            child_pid: None,
-            render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
-                crate::gui::renderer::WindowPostRenderer::new(),
-            ))),
-            render_cache: crate::gui::terminal::PaneRenderCache::new(),
-        };
-
-        (Tab::new(id, pane), input_rx)
-    }
-
-    /// A window of `count` tabs (one pane each) and the panes' receivers.
-    fn window_of(
-        ids: &mut crate::gui::panes::PaneIdGenerator,
-        count: u64,
-    ) -> (TabManager, Vec<Receiver<InputEvent>>) {
-        let (first, rx) = tab_with_input_rx(TabId::first(), ids.next_id());
-        let mut receivers = vec![rx];
-        let mut tabs = TabManager::new(first);
-        for n in 1..count {
-            let (tab, rx) = tab_with_input_rx(TabId::offset(n), ids.next_id());
-            tabs.add_tab(tab);
-            receivers.push(rx);
-        }
-        (tabs, receivers)
-    }
 
     /// The `HostCapabilitiesChange` payloads waiting on `rx`.
     fn received(rx: &Receiver<InputEvent>) -> Vec<HostCapabilities> {

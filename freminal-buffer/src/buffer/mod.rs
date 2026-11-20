@@ -28,7 +28,7 @@ pub use command_block_log::CommandBlocksGeneration;
 use compression::BlockSlot;
 pub(in crate::buffer) use flatten::MergeCache;
 pub use flatten::{ArcFlattenResult, AutoUrlRange, RowCacheEntry};
-pub use images::{ImagePlacementMode, PlaceImageResult};
+pub use images::{ImagePlacementMode, PlaceImageRequest, PlaceImageResult};
 pub use reflow_remap::ReflowRemap;
 use row_store::RowStore;
 
@@ -4138,14 +4138,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Rows 0 and 1 should have image cells at columns 0, 1, 2.
@@ -4189,14 +4191,16 @@ mod image_tests {
         buf.place_image(
             img_a,
             0,
-            ImageProtocol::Kitty,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Placement instance 2 at row 2, z=5.
@@ -4205,14 +4209,16 @@ mod image_tests {
         buf.place_image(
             img_b,
             0,
-            ImageProtocol::Kitty,
-            None,
-            None,
-            5,
-            None,
-            2,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 5,
+                source_crop: None,
+                placement_instance: 2,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Both placements exist: 3 cells each.
@@ -4249,14 +4255,16 @@ mod image_tests {
         buf.place_image(
             sixel,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         buf.cursor.pos.x = 0;
         buf.cursor.pos.y = 3;
@@ -4265,14 +4273,16 @@ mod image_tests {
         buf.place_image(
             kitty,
             0,
-            ImageProtocol::Kitty,
-            None,
-            None,
-            0,
-            None,
-            2,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 2,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert!(buf.image_store().contains(sixel_id));
         assert!(buf.image_store().contains(kitty_id));
@@ -4307,14 +4317,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            7,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 7,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         assert_eq!(buf.clear_image_placements_at_cell_with_z(0, 0, 0), None);
@@ -4332,14 +4344,16 @@ mod image_tests {
         buf.place_image(
             sixel,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         buf.cursor.pos.x = 0;
         buf.cursor.pos.y = 3;
@@ -4348,14 +4362,16 @@ mod image_tests {
         buf.place_image(
             kitty,
             0,
-            ImageProtocol::Kitty,
-            None,
-            None,
-            0,
-            None,
-            2,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 2,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         let mut ids = buf.clear_image_placements_visible(0);
@@ -4385,14 +4401,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Cursor should be at row 2 (below the 2-row image), column 0.
@@ -4425,14 +4443,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Kitty,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         let image_last_row = 1; // image occupies rows 0 and 1.
@@ -4490,14 +4510,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         let image_last_row = 2 + 4 - 1; // rows 2..=5.
@@ -4529,14 +4551,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Only columns 0..5 should have image cells.
@@ -4563,14 +4587,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Image cells should be at columns 5, 6, 7.
@@ -4603,14 +4629,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // The image should exist in the store.
@@ -4646,14 +4674,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // The image should be in the store.
@@ -4688,14 +4718,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Kitty,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert!(buf.image_store().contains(img_id));
 
@@ -4721,14 +4753,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Push a few lines, but not enough to evict the image row.
@@ -4755,14 +4789,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert!(buf.image_store().contains(img_id));
 
@@ -4791,14 +4827,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Verify cell has image before alternate screen.
@@ -4828,14 +4866,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert!(buf.image_store().contains(img_id));
 
@@ -4857,14 +4897,16 @@ mod image_tests {
         buf.place_image(
             img1,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         let img2 = make_image(3, 1);
@@ -4872,14 +4914,16 @@ mod image_tests {
         buf.place_image(
             img2,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         assert!(buf.image_store().contains(id1));
@@ -4898,14 +4942,16 @@ mod image_tests {
         buf.place_image(
             img1,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Move cursor down and place image 2.
@@ -4917,14 +4963,16 @@ mod image_tests {
         buf.place_image(
             img2,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Push many more lines to evict the first image's row.
@@ -5078,14 +5126,16 @@ mod image_tests {
         buf.place_image(
             big_img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Cursor is now below the image (row 5). Move back to (0,0).
@@ -5098,14 +5148,16 @@ mod image_tests {
         buf.place_image(
             small_img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Rows 0-1 should have the new image's cells.
@@ -5157,14 +5209,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Verify image cells are present (5 cols × 3 rows = 15).
@@ -5193,14 +5247,16 @@ mod image_tests {
         buf.place_image(
             img_a,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert_eq!(count_image_cells(&buf, id_a), 6);
 
@@ -5213,14 +5269,16 @@ mod image_tests {
         buf.place_image(
             img_b,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert_eq!(count_image_cells(&buf, id_b), 6);
 
@@ -5256,14 +5314,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
@@ -5291,14 +5351,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
@@ -5324,14 +5386,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
@@ -5356,14 +5420,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
@@ -5390,14 +5456,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
@@ -5424,14 +5492,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
@@ -5501,14 +5571,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // Sanity: before reflow, the image occupies a contiguous rectangle —
@@ -5563,14 +5635,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         buf.reflow_to_width(20);
@@ -5612,14 +5686,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         let rows_before = buf.rows.len();
@@ -5692,14 +5768,16 @@ mod image_tests {
         buf.place_image(
             img,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         assert_eq!(buf.image_cell_count, 30);
 
@@ -10014,14 +10092,16 @@ mod coverage_gap_tests {
         buf.place_image(
             image,
             0,
-            ImageProtocol::Kitty,
-            None,
-            None,
-            0,
-            None,
-            1,
-            None,
-            ImagePlacementMode::Inline,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
         );
         // Should have placed at most 1 cell (col 4; cols 5+ out of bounds)
         assert!(buf.image_cell_count <= 1);

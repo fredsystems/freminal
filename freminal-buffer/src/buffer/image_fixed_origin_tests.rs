@@ -12,7 +12,7 @@ use std::sync::Arc;
 use freminal_common::buffer_states::tchar::TChar;
 
 use crate::{
-    buffer::{Buffer, ImagePlacementMode},
+    buffer::{Buffer, ImagePlacementMode, PlaceImageRequest},
     image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
 };
 
@@ -41,14 +41,16 @@ fn place_fixed(
     let result = buf.place_image(
         img,
         0,
-        ImageProtocol::Sixel,
-        None,
-        None,
-        0,
-        None,
-        1,
-        None,
-        ImagePlacementMode::FixedOrigin,
+        PlaceImageRequest {
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
+            mode: ImagePlacementMode::FixedOrigin,
+        },
     );
     (id, result)
 }
@@ -173,18 +175,77 @@ fn fixed_origin_on_the_alternate_screen_stays_height_rows() {
 }
 
 #[test]
-fn fixed_origin_replacing_a_taller_image_of_the_same_width_clears_its_stale_cells() {
+fn fixed_origin_replacing_an_image_of_the_same_size_releases_the_old_one() {
     let mut buf = Buffer::new(10, 6);
     fill_with_scrollback(&mut buf, 10);
 
     let (first, _) = place_fixed(&mut buf, 5, 4);
-    let (_, _) = place_fixed(&mut buf, 5, 1);
+    let (second, _) = place_fixed(&mut buf, 5, 4);
 
-    assert_eq!(image_cell_total(&buf), 5, "only the new image remains");
+    assert_eq!(image_cell_total(&buf), 5 * 4, "only the new image remains");
     assert!(
         !buf.image_store().contains(first),
         "the replaced cell-owned image is released"
     );
+    assert!(buf.image_store().contains(second));
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn fixed_origin_clears_only_the_cells_under_the_rows_it_covers() {
+    let mut buf = Buffer::new(10, 6);
+    fill_with_scrollback(&mut buf, 10);
+
+    let (first, _) = place_fixed(&mut buf, 5, 4);
+    let (second, _) = place_fixed(&mut buf, 5, 1);
+
+    // The new image overwrites row 0 of the old one; rows 1..4 of the old
+    // image are not under it and stay on screen with their image alive.
+    assert_eq!(image_cell_total(&buf), 5 + 5 * 3);
+    assert!(buf.image_store().contains(first));
+    assert!(buf.image_store().contains(second));
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn fixed_origin_leaves_an_inline_image_lower_on_the_screen_alone() {
+    let mut buf = Buffer::new(20, 8);
+    fill_with_scrollback(&mut buf, 20);
+    buf.set_cursor_pos(Some(0), Some(5));
+    let lower = image(3, 2);
+    let lower_id = lower.id;
+    let _ = buf.place_image(
+        lower,
+        0,
+        PlaceImageRequest {
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
+            mode: ImagePlacementMode::Inline,
+        },
+    );
+    assert_eq!(image_cell_total(&buf), 3 * 2, "setup: the inline image");
+    let top = first_visible_row(&buf);
+    for row in &mut buf.rows {
+        row.dirty = false;
+    }
+
+    let (fixed_id, _) = place_fixed(&mut buf, 3, 2);
+
+    assert_eq!(image_cell_total(&buf), 3 * 2 + 3 * 2, "both images' cells");
+    assert!(
+        buf.image_store().contains(lower_id),
+        "the lower image is not under the fixed-origin one and must survive"
+    );
+    assert!(buf.image_store().contains(fixed_id));
+    for (idx, row) in buf.rows().iter().enumerate() {
+        let in_image = (top..top + 2).contains(&idx);
+        assert_eq!(row.dirty, in_image, "row {idx} dirty flag");
+    }
     buf.debug_assert_invariants();
 }
 
@@ -216,14 +277,16 @@ fn inline_mode_still_scrolls_and_moves_the_cursor() {
     let _ = buf.place_image(
         img,
         0,
-        ImageProtocol::Sixel,
-        None,
-        None,
-        0,
-        None,
-        1,
-        None,
-        ImagePlacementMode::Inline,
+        PlaceImageRequest {
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
+            mode: ImagePlacementMode::Inline,
+        },
     );
 
     assert!(

@@ -422,9 +422,10 @@ pub const fn raw_mods_to_key_modifiers(
 /// encoding. When KKP is off, that encoding is empty; for keypad
 /// digits/operators/Enter this function then falls back to their plain
 /// legacy encoding (see [`legacy_keypad_bytes`], which honours DECKPAM) so
-/// keypad input still reaches the PTY (the windowing intercept already removed them from egui, so
-/// without this they would be dropped entirely). Media/print/pause/menu keys
-/// have no legacy encoding and correctly stay no-ops without KKP.
+/// keypad input still reaches the PTY (the windowing intercept already
+/// removed them from egui, so without this they would be dropped entirely).
+/// Media/print/pause/menu keys have no legacy encoding and correctly stay
+/// no-ops without KKP.
 ///
 /// ## Input suppression
 ///
@@ -1767,6 +1768,13 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
 
     let mouse_encoding = &snap.mouse_encoding;
 
+    // Set when the binding pre-check consumes a key press made with Alt held.
+    // egui-winit delivers such a press as `Event::Key` *and* an `Event::Text`
+    // for the same keystroke, so the text of a bound Alt+<letter> must not
+    // fall through to the PTY (as `ESC <letter>`). Cleared by the next key
+    // press, which starts a new keystroke.
+    let mut bound_alt_key_text_pending = false;
+
     for event in &input.raw.events {
         // `trace`, not `info`: `Event::Text` / `Event::Paste` carry typed
         // text and clipboard contents, and this runs before active-pane
@@ -1819,6 +1827,9 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
 
         if let Event::Key { pressed: false, .. } = event {
             previous_key = None;
+        }
+        if let Event::Key { pressed: true, .. } = event {
+            bound_alt_key_text_pending = false;
         }
 
         // ── KKP flag 2: forward key release events ───────────────────────
@@ -1885,8 +1896,13 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     &mut deferred_actions,
                 );
                 state_changed = true;
+                bound_alt_key_text_pending = modifiers.alt;
                 continue;
             }
+        }
+        if bound_alt_key_text_pending && matches!(event, Event::Text(_)) {
+            bound_alt_key_text_pending = false;
+            continue;
         }
         // Event::Copy is the synthetic event fired by egui-winit for
         // Ctrl+C (and Ctrl+Shift+C).  Reconstruct the key combo so the
@@ -4536,12 +4552,20 @@ mod alt_text_tests {
 
     /// Feed `events` with `mods` held and return each message sent to the PTY.
     fn drive(snap: &TerminalSnapshot, mods: Modifiers, events: Vec<Event>) -> Vec<Vec<u8>> {
+        drive_with(&BindingMap::default(), snap, mods, events)
+    }
+
+    fn drive_with(
+        binding_map: &BindingMap,
+        snap: &TerminalSnapshot,
+        mods: Modifiers,
+        events: Vec<Event>,
+    ) -> Vec<Vec<u8>> {
         let (input_tx, input_rx) = crossbeam_channel::unbounded();
         let mut view_state = ViewState::new();
         let mut input_state = InputState::default();
         input_state.raw.events.extend(events);
         input_state.modifiers = mods;
-        let binding_map = BindingMap::default();
         let _ = write_input_to_terminal(WriteInputParams {
             input: &input_state,
             snap,
@@ -4552,7 +4576,7 @@ mod alt_text_tests {
             pixels_per_point: 1.0,
             terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
             repeat_characters: Decarm::default(),
-            binding_map: &binding_map,
+            binding_map,
             pane_focus: PaneFocus::Active,
             recording_ctx: None,
             placeholder_rects: &[],
@@ -4613,6 +4637,57 @@ mod alt_text_tests {
         assert_eq!(
             drive(&snapshot_after(b""), ALT, events),
             vec![b"\x1bb".to_vec()]
+        );
+    }
+
+    fn alt_b_bound_to_next_tab() -> BindingMap {
+        let mut map = BindingMap::default();
+        let _ = map.bind(
+            KeyCombo::new(
+                BindingKey::B,
+                BindingModifiers {
+                    alt: true,
+                    ..BindingModifiers::NONE
+                },
+            ),
+            KeyAction::NextTab,
+        );
+        map
+    }
+
+    #[test]
+    fn a_bound_alt_letter_does_not_leak_its_text_to_the_pty() {
+        let map = alt_b_bound_to_next_tab();
+        let events = vec![key_press(Key::B, ALT), text("b")];
+        assert_eq!(
+            drive_with(&map, &snapshot_after(b""), ALT, events),
+            Vec::<Vec<u8>>::new()
+        );
+    }
+
+    #[test]
+    fn a_bound_alt_letter_suppresses_only_its_own_text() {
+        let map = alt_b_bound_to_next_tab();
+        // The bound press's text is dropped; the next keystroke is typed as usual.
+        let events = vec![
+            key_press(Key::B, ALT),
+            text("b"),
+            key_press(Key::C, ALT),
+            text("c"),
+        ];
+        assert_eq!(
+            drive_with(&map, &snapshot_after(b""), ALT, events),
+            vec![b"\x1bc".to_vec()]
+        );
+    }
+
+    #[test]
+    fn an_unbound_alt_letter_still_sends_esc_letter() {
+        let map = alt_b_bound_to_next_tab();
+        let events = vec![key_press(Key::C, ALT), text("c")];
+        assert_eq!(
+            drive_with(&map, &snapshot_after(b""), ALT, events),
+            vec![b"\x1bc".to_vec()]
         );
     }
 

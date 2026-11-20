@@ -162,6 +162,17 @@ fn setup_capture(
         let gl = Gl::real(off.gl());
         driver.init(&gl)?;
     }
+    // Production draws into egui's blend state (premultiplied alpha); the
+    // offscreen context enables none, so quads overwrite. That is identical
+    // while everything is opaque, so only a translucent frame, whose pixels
+    // depend on the blend, opts in.
+    if frame.opacity_percent < 100 {
+        // SAFETY: plain state calls on the context this function owns.
+        unsafe {
+            off.gl().enable(glow::BLEND);
+            off.gl().blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+        }
+    }
 
     Ok((driver, off, width, height))
 }
@@ -1725,5 +1736,202 @@ mod decscnm_pixel_tests {
         let (x, y) = corner(&after, REVERSED_CELL);
         assert_eq!(after.pixel(x, y), Some(bg()));
         assert_remainder_is(&after, fg(), "after cursor-only frames");
+    }
+}
+
+/// Task 147 review B9, **characterisation**: with `background_opacity < 1`
+/// a cell with an explicit background is composited over the pane's base fill
+/// (the foreground under DECSCNM, the OSC 11 override otherwise), and that
+/// fill is itself translucent over the window behind it. The cell therefore
+/// reads back as `colour over (fill over nothing)` instead of
+/// `colour over nothing`, exactly as it does in normal video: its alpha is
+/// `a + (1 - a) * a` and its colour is tinted by `(1 - a) * a * fill`.
+///
+/// These tests pin that measured behaviour so the defect is visible and a
+/// fix cannot land silently. They are expected to be rewritten, to assert the
+/// untinted `translucent(colour)` the first test below establishes for
+/// normal video, when the defect is fixed. The fix needs either blend-state
+/// control (`gl_facade`) or a per-cell base fill that is rebuilt whenever the
+/// opacity or the fill changes; see the 147 review B9 report.
+#[cfg(test)]
+mod translucent_base_fill_pixel_tests {
+    use super::super::headless::{CursorPresence, EXPLICIT_BACKGROUND, SyntheticFrame};
+    use super::PixelFrame;
+    use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
+    use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColors};
+    use freminal_common::themes::CATPPUCCIN_MOCHA;
+
+    const COLS: usize = 20;
+    const ROWS: usize = 6;
+    const CELL: (usize, usize) = (3, 2);
+    const OPACITY_PERCENT: u8 = 50;
+
+    fn frame() -> SyntheticFrame {
+        SyntheticFrame::new(COLS, ROWS)
+            .with_cursor(CursorPresence::Hidden)
+            .with_opacity_percent(OPACITY_PERCENT)
+    }
+
+    fn corner(captured: &PixelFrame, (col, row): (usize, usize)) -> (u32, u32) {
+        (
+            u32::try_from(col).unwrap() * (captured.width / u32::try_from(COLS).unwrap()),
+            u32::try_from(row).unwrap() * (captured.height / u32::try_from(ROWS).unwrap()),
+        )
+    }
+
+    fn pixel_at(captured: &PixelFrame, cell: (usize, usize)) -> [u8; 4] {
+        let (x, y) = corner(captured, cell);
+        captured.pixel(x, y).expect("pixel inside the frame")
+    }
+
+    /// The premultiplied RGBA8 a colour drawn at `OPACITY_PERCENT` over a
+    /// transparent framebuffer reads back as.
+    fn translucent((r, g, b): (u8, u8, u8)) -> [u8; 4] {
+        let scale =
+            |c: u8| u8::try_from((u32::from(c) * u32::from(OPACITY_PERCENT) + 50) / 100).unwrap();
+        [
+            scale(r),
+            scale(g),
+            scale(b),
+            u8::try_from((255 * u32::from(OPACITY_PERCENT) + 50) / 100).unwrap(),
+        ]
+    }
+
+    /// `src` composited over `dst` (premultiplied alpha), as the GL blend
+    /// does.
+    fn over(src: [u8; 4], dst: [u8; 4]) -> [u8; 4] {
+        let keep = 255 - u32::from(src[3]);
+        let mix = |s: u8, d: u8| {
+            u8::try_from((u32::from(s) * 255 + u32::from(d) * keep + 127) / 255).unwrap()
+        };
+        [
+            mix(src[0], dst[0]),
+            mix(src[1], dst[1]),
+            mix(src[2], dst[2]),
+            mix(src[3], dst[3]),
+        ]
+    }
+
+    fn explicit_rgb() -> (u8, u8, u8) {
+        ResolvedColors::resolve(
+            &CATPPUCCIN_MOCHA,
+            &ColorPalette::default(),
+            &DynamicColorOverrides::default(),
+        )
+        .rgb(EXPLICIT_BACKGROUND)
+    }
+
+    fn assert_close(actual: [u8; 4], expected: [u8; 4], what: &str) {
+        let close = actual
+            .iter()
+            .zip(expected)
+            .all(|(&a, e)| a.abs_diff(e) <= 1);
+        assert!(close, "{what}: expected {expected:?} (+-1), got {actual:?}");
+    }
+
+    /// The reference: in normal video there is no base fill, the explicit
+    /// cell is the colour at the pane's opacity, and a default cell is
+    /// untouched.
+    #[test]
+    fn an_explicit_background_in_normal_video_is_the_colour_at_the_panes_opacity() {
+        let f = frame().with_explicit_background_cell(CELL.0, CELL.1);
+        let Some(captured) = super::tests::capture_or_skip(&f, "translucent-normal") else {
+            return;
+        };
+
+        assert_close(
+            pixel_at(&captured, CELL),
+            translucent(explicit_rgb()),
+            "explicit cell",
+        );
+        assert_eq!(pixel_at(&captured, (0, 0)), [0, 0, 0, 0], "default cell");
+    }
+
+    /// Under DECSCNM every cell swaps its colours, so an SGR 7 cell over an
+    /// explicit background shows that background (the double reversal).
+    #[test]
+    fn an_explicit_background_under_decscnm_is_composited_over_the_base_fill() {
+        let f = frame()
+            .with_screen_inversion(ScreenInversion::Reversed)
+            .with_reversed_cell(CELL.0, CELL.1)
+            .with_explicit_background_cell(CELL.0, CELL.1);
+        let Some(captured) = super::tests::capture_or_skip(&f, "translucent-decscnm") else {
+            return;
+        };
+
+        let fill = translucent(CATPPUCCIN_MOCHA.foreground);
+        assert_close(
+            pixel_at(&captured, (0, 0)),
+            fill,
+            "a default cell shows the reversed default background at the opacity",
+        );
+        assert_close(
+            pixel_at(&captured, CELL),
+            over(translucent(explicit_rgb()), fill),
+            "B9: today the explicit background also blends with the base fill",
+        );
+    }
+
+    /// SGR 7 under DECSCNM draws the default background: an ordinary
+    /// translucent quad, over the base fill.
+    #[test]
+    fn a_double_reversed_cell_is_composited_over_the_base_fill() {
+        let f = frame()
+            .with_screen_inversion(ScreenInversion::Reversed)
+            .with_reversed_cell(CELL.0, CELL.1);
+        let Some(captured) = super::tests::capture_or_skip(&f, "translucent-double-reversal")
+        else {
+            return;
+        };
+
+        assert_close(
+            pixel_at(&captured, CELL),
+            over(
+                translucent(CATPPUCCIN_MOCHA.background),
+                translucent(CATPPUCCIN_MOCHA.foreground),
+            ),
+            "B9: today the double-reversed cell also blends with the base fill",
+        );
+    }
+
+    /// The same through the OSC 11 override: an explicit background over an
+    /// overridden default background.
+    #[test]
+    fn an_explicit_background_over_an_osc_11_override_is_composited_over_it() {
+        let f = frame()
+            .with_base_fill(Some([10, 200, 30]))
+            .with_explicit_background_cell(CELL.0, CELL.1);
+        let Some(captured) = super::tests::capture_or_skip(&f, "translucent-osc11") else {
+            return;
+        };
+
+        let fill = translucent((10, 200, 30));
+        assert_close(
+            pixel_at(&captured, (0, 0)),
+            fill,
+            "a default cell shows the override at the opacity",
+        );
+        assert_close(
+            pixel_at(&captured, CELL),
+            over(translucent(explicit_rgb()), fill),
+            "B9: today the explicit background also blends with the OSC 11 fill",
+        );
+    }
+
+    /// Opaque panes are unaffected: with opacity 1 an explicit cell covers
+    /// the base fill completely, so the defect needs `opacity < 1`.
+    #[test]
+    fn an_opaque_pane_shows_the_explicit_background_exactly() {
+        let f = SyntheticFrame::new(COLS, ROWS)
+            .with_cursor(CursorPresence::Hidden)
+            .with_screen_inversion(ScreenInversion::Reversed)
+            .with_reversed_cell(CELL.0, CELL.1)
+            .with_explicit_background_cell(CELL.0, CELL.1);
+        let Some(captured) = super::tests::capture_or_skip(&f, "opaque-decscnm") else {
+            return;
+        };
+
+        let (r, g, b) = explicit_rgb();
+        assert_eq!(pixel_at(&captured, CELL), [r, g, b, 255]);
     }
 }

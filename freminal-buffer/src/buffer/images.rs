@@ -9,6 +9,8 @@
 //! cells within the buffer, including support for the Kitty graphics protocol
 //! and iTerm2 inline images.
 
+use std::ops::Range;
+
 use freminal_common::buffer_states::{
     buffer_type::BufferType, cursor::CursorPos, format_tag::FormatTag, row_number::RowNumber,
 };
@@ -34,6 +36,25 @@ pub enum ImagePlacementMode {
     /// width, the buffer is never grown or scrolled, and the cursor does not
     /// move.
     FixedOrigin,
+}
+
+/// Everything [`Buffer::place_image`] needs to know about an image besides the
+/// image itself and the caller's scroll offset: how it is identified on the
+/// wire, how it is drawn, and where it is anchored.
+///
+/// The fields other than `mode` are stamped onto every cell the placement
+/// covers (see [`ImagePlacement`]); `mode` only steers placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaceImageRequest {
+    pub protocol: ImageProtocol,
+    pub image_number: Option<u32>,
+    pub placement_id: Option<u32>,
+    pub z_index: i32,
+    pub source_crop: Option<SourceCrop>,
+    /// The per-display placement-instance id minted for this put.
+    pub placement_instance: u64,
+    pub subcell_offset: Option<SubCellOffset>,
+    pub mode: ImagePlacementMode,
 }
 
 /// Result of [`Buffer::place_image`]: the scroll offset adjustment made by
@@ -227,12 +248,12 @@ impl Buffer {
     }
 
     /// Clear every image cell in columns `[start_col, end_col)` of the rows
-    /// from `first_row` down, ahead of stamping the new image
-    /// `new_image_id` there, and free the cell-owned images this left without
-    /// any cell.
+    /// in `row_range` (clamped to the rows that exist), ahead of stamping the
+    /// new image `new_image_id` there, and free the cell-owned images this
+    /// left without any cell.
     fn clear_image_cells_under(
         &mut self,
-        first_row: usize,
+        row_range: Range<usize>,
         start_col: usize,
         end_col: usize,
         new_image_id: u64,
@@ -240,7 +261,7 @@ impl Buffer {
         // Ids of the images this pre-clear took cells from: some may now have
         // no cell left at all (see `release_unreferenced_cell_owned_images`).
         let mut touched: Vec<u64> = Vec::new();
-        for row_idx in first_row..self.rows.len() {
+        for row_idx in row_range.start..row_range.end.min(self.rows.len()) {
             let row = &mut self.rows[row_idx];
             let mut changed = false;
             for col in start_col..end_col.min(row.max_width()) {
@@ -709,8 +730,9 @@ impl Buffer {
     /// [cursor_x .. cursor_x + display_cols)` are filled with
     /// `ImagePlacement` references.
     ///
-    /// `mode` selects where the image is anchored. [`ImagePlacementMode::Inline`]
-    /// is the behaviour described below. [`ImagePlacementMode::FixedOrigin`]
+    /// `request` carries the per-cell placement fields and `request.mode`,
+    /// which selects where the image is anchored.
+    /// [`ImagePlacementMode::Inline`] is the behaviour described below. [`ImagePlacementMode::FixedOrigin`]
     /// instead anchors the image at row 0, column 0 of the visible screen,
     /// clips it to the visible rows and width, and neither scrolls the buffer
     /// nor moves the cursor; `scroll_offset` is returned unchanged.
@@ -748,35 +770,24 @@ impl Buffer {
     /// occurred during placement, so callers must use it (not a
     /// pre-call cursor read) when recording where the image actually
     /// landed (Task 100.14).
-    #[allow(clippy::too_many_arguments)]
-    // All parameters are required image placement inputs; grouping into a
-    // struct would obscure the data flow without reducing coupling, matching
-    // the established convention for `place_image`-adjacent methods.
     pub fn place_image(
         &mut self,
         image: InlineImage,
         scroll_offset: usize,
-        protocol: ImageProtocol,
-        image_number: Option<u32>,
-        placement_id: Option<u32>,
-        z_index: i32,
-        source_crop: Option<SourceCrop>,
-        placement_instance: u64,
-        subcell_offset: Option<SubCellOffset>,
-        mode: ImagePlacementMode,
+        request: PlaceImageRequest,
     ) -> PlaceImageResult {
+        let PlaceImageRequest {
+            protocol,
+            image_number,
+            placement_id,
+            z_index,
+            source_crop,
+            placement_instance,
+            subcell_offset,
+            mode,
+        } = request;
         if mode == ImagePlacementMode::FixedOrigin {
-            return self.place_image_fixed_origin(
-                image,
-                scroll_offset,
-                protocol,
-                image_number,
-                placement_id,
-                z_index,
-                source_crop,
-                placement_instance,
-                subcell_offset,
-            );
+            return self.place_image_fixed_origin(image, scroll_offset, request);
         }
 
         let image_id = image.id;
@@ -803,7 +814,7 @@ impl Buffer {
         // (possibly larger) one at the same position — without this, stale
         // cells from the old image persist below the new one.
         self.clear_image_cells_under(
-            self.cursor.pos.y,
+            self.cursor.pos.y..self.rows.len(),
             start_col,
             start_col + effective_cols,
             image_id,
@@ -941,20 +952,22 @@ impl Buffer {
     /// only the cells that fit on it. No row is pushed, nothing scrolls, and
     /// the cursor is untouched, so only the image's own rows are dirtied. The
     /// returned `scroll_offset` is the caller's, unchanged.
-    #[allow(clippy::too_many_arguments)]
-    // Forwards `place_image`'s inputs one for one; see the note there.
     fn place_image_fixed_origin(
         &mut self,
         image: InlineImage,
         scroll_offset: usize,
-        protocol: ImageProtocol,
-        image_number: Option<u32>,
-        placement_id: Option<u32>,
-        z_index: i32,
-        source_crop: Option<SourceCrop>,
-        placement_instance: u64,
-        subcell_offset: Option<SubCellOffset>,
+        request: PlaceImageRequest,
     ) -> PlaceImageResult {
+        let PlaceImageRequest {
+            protocol,
+            image_number,
+            placement_id,
+            z_index,
+            source_crop,
+            placement_instance,
+            subcell_offset,
+            mode: _,
+        } = request;
         let image_id = image.id;
         let display_cols = image.display_cols.min(self.width);
         let display_rows = image.display_rows.min(self.height);
@@ -972,7 +985,14 @@ impl Buffer {
             self.image_store.insert(image);
         }
 
-        self.clear_image_cells_under(first_row, 0, display_cols, image_id);
+        // Only the rows the image covers: an image lower on the screen is not
+        // under it and must survive.
+        self.clear_image_cells_under(
+            first_row..first_row + display_rows,
+            0,
+            display_cols,
+            image_id,
+        );
 
         if display_cols > 0 && display_rows > 0 {
             self.place_image_at(

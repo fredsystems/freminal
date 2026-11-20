@@ -4723,7 +4723,7 @@ impl FreminalGui {
     /// Construct a `PerWindowState` with default field values for all
     /// transient UI state.  Extracted to keep
     /// `create_first_window_with_default_pty` under the line limit.
-    fn new_per_window_state(
+    pub(super) fn new_per_window_state(
         tab: Tab,
         terminal_widget: FreminalTerminalWidget,
         os_dark_mode: bool,

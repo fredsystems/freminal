@@ -12,7 +12,7 @@ use criterion::{
 };
 
 use conv2::{ApproxFrom, RoundToZero};
-use freminal_buffer::buffer::{Buffer, ImagePlacementMode};
+use freminal_buffer::buffer::{Buffer, ImagePlacementMode, PlaceImageRequest};
 use freminal_buffer::compact_row::CompactRow;
 use freminal_buffer::compressed_block::CompressedBlock;
 use freminal_buffer::image_store::{
@@ -313,14 +313,16 @@ fn build_eviction_buffer(scenario: EvictionScenario, limit: usize) -> Buffer {
             let _ = buf.place_image(
                 make_bench_image(1),
                 0,
-                ImageProtocol::Kitty,
-                None,
-                None,
-                0,
-                None,
-                1,
-                None,
-                ImagePlacementMode::Inline,
+                PlaceImageRequest {
+                    protocol: ImageProtocol::Kitty,
+                    image_number: None,
+                    placement_id: None,
+                    z_index: 0,
+                    source_crop: None,
+                    placement_instance: 1,
+                    subcell_offset: None,
+                    mode: ImagePlacementMode::Inline,
+                },
             );
         }
         let text: Vec<TChar> = format!("line{i:06}")

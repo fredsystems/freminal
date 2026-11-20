@@ -70,6 +70,8 @@ mod run;
 mod session;
 mod settings_dispatch;
 mod tab_spawning;
+#[cfg(test)]
+mod test_support;
 mod toast;
 mod visual_preview;
 mod welcome;
