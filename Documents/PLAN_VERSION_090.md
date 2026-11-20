@@ -972,7 +972,7 @@ match detect_shell(&cmd) {
     }
     Some(Shell::Zsh) => {
         // Preserve user's existing $ZDOTDIR via a sentinel env var
-        // (Ghostty's +X-style approach: if the user had any $ZDOTDIR
+        // (zsh's `${+name}` set-vs-unset test: if the user had any $ZDOTDIR
         // set, including empty, we save it. Otherwise we don't set
         // our sentinel at all.).
         if let Ok(z) = std::env::var("ZDOTDIR") {

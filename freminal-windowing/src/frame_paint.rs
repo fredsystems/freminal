@@ -551,13 +551,18 @@ pub struct PaintFrameOutput {
     ///
     /// 124.19b's offscreen pixel harness (`frame_paint_harness.rs`) is that
     /// second consumer, which is why this `cfg` is
-    /// `any(feature = "frame-profiling", feature = "gl-offscreen")` rather
-    /// than `frame-profiling` alone. Assert on this rather than on
+    /// `any(feature = "frame-profiling", all(target_os = "linux", feature =
+    /// "gl-offscreen"))` rather than `frame-profiling` alone: the harness
+    /// module itself is Linux-only, so on other platforms `gl-offscreen`
+    /// alone leaves the field unread. Assert on this rather than on
     /// `presentation` directly -- a failure reporting
     /// `BlockedByBufferAge { age: 0 }` names the cause, where
     /// `FramePresentation::Full` only says "the full path was taken", not
     /// why.
-    #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
+    #[cfg(any(
+        feature = "frame-profiling",
+        all(target_os = "linux", feature = "gl-offscreen")
+    ))]
     pub decision: PartialPresentDecision,
     /// The delay the app itself requested via `ctx.request_repaint_after`
     /// during this frame's `update()`, if any.
@@ -611,7 +616,10 @@ struct ResolvedPartialPresent {
     /// Only read by [`Self::reported_decision`], which is `cfg`-gated
     /// identically -- so this field is too, rather than existing unread
     /// (and warning as dead code) in a default build.
-    #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
+    #[cfg(any(
+        feature = "frame-profiling",
+        all(target_os = "linux", feature = "gl-offscreen")
+    ))]
     decision: PartialPresentDecision,
     presentation: FramePresentation,
     redraw_clip: Option<egui::Rect>,
@@ -661,7 +669,10 @@ impl ResolvedPartialPresent {
         };
 
         Self {
-            #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
+            #[cfg(any(
+                feature = "frame-profiling",
+                all(target_os = "linux", feature = "gl-offscreen")
+            ))]
             decision,
             presentation,
             redraw_clip,
@@ -676,7 +687,10 @@ impl ResolvedPartialPresent {
     /// the full-clear path exactly as if `redraw_region` itself had
     /// returned `None`. [`FramePresentation::None`] is never downgraded --
     /// [`PartialPresentDecision::NoPresentation`] is always accurate.
-    #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
+    #[cfg(any(
+        feature = "frame-profiling",
+        all(target_os = "linux", feature = "gl-offscreen")
+    ))]
     const fn reported_decision(&self) -> PartialPresentDecision {
         if matches!(self.presentation, FramePresentation::Partial(_)) {
             self.decision
@@ -928,6 +942,21 @@ macro_rules! mark_phase {
     };
 }
 
+/// Apply every texture upload in `textures_delta` to `painter`, draining the
+/// `set` half (see the drop-bomb note at the call site in
+/// [`paint_frame_impl`]). Extracted solely to keep that function under
+/// clippy's `too_many_lines` threshold.
+fn upload_texture_deltas(
+    painter: &mut egui_glow::Painter,
+    textures_delta: &mut egui::TexturesDelta,
+) {
+    for (id, image_deltas) in textures_delta.set.drain() {
+        for image_delta in image_deltas {
+            painter.set_texture(id, &image_delta);
+        }
+    }
+}
+
 /// The body of [`paint_frame`], with an optional GPU-timing phase marker.
 ///
 /// Under `gpu-profiling`, `phase_marker` is called with each of the eight
@@ -1136,11 +1165,7 @@ where
     // per-texture order within a `SmallVec` is significant (a whole upload
     // followed by partial patches of it), and `SmallVec`'s iteration
     // preserves it.
-    for (id, image_deltas) in full_output.textures_delta.set.drain() {
-        for image_delta in image_deltas {
-            painter.set_texture(id, &image_delta);
-        }
-    }
+    upload_texture_deltas(painter, &mut full_output.textures_delta);
     // Task 121 frame-profiling harness: time the three `paint_primitives`
     // calls, summed (a contiguous span across all three, since nothing
     // else runs between them, is equal to summing each individually).
@@ -1178,7 +1203,10 @@ where
         platform_output: full_output.platform_output,
         viewport_output: full_output.viewport_output,
         presentation,
-        #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
+        #[cfg(any(
+            feature = "frame-profiling",
+            all(target_os = "linux", feature = "gl-offscreen")
+        ))]
         decision: resolved.reported_decision(),
         terminal_requested_delay: signals.terminal_requested_delay,
         #[cfg(feature = "frame-profiling")]

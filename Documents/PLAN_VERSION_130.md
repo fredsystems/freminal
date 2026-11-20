@@ -32,7 +32,8 @@ one plan document, grouped into milestones that ship as point releases:
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
 (activated 2026-10-10), **147** (created 2026-10-11), **132** (activated 2026-10-11), and
 **138** (activated 2026-10-12), **148** (created 2026-10-18), and **149** (created
-2026-10-22), **150** (activated 2026-10-22), and **139** and **140** (activated 2026-11-19).
+2026-10-22), **150** (activated 2026-10-22), **139** and **140** (activated 2026-11-19), and
+**151** (activated 2026-11-19).
 Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
@@ -7194,7 +7195,8 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
     - Pa=4 answers status 0 with the maximum geometry;
     - Pa=2 and Pa=3 answer status 3, as in xterm;
     - any other Pa answers status 2.
-  - **Pi=3 (ReGIS)** answers status 3; any other Pi answers status 1.
+  - **Pi=3 (ReGIS)** answers status 1, like any other unknown Pi (corrected 2026-11-20: xterm
+    built without ReGIS reaches its `default:` arm; this line said 3).
 - **`CSI > Pm t` and `CSI > Pm T`** are routed to recognised-and-ignored outputs with no
   `warn!`.
 - **Scope:** `ansi_components/csi_dispatch.rs` (the `question` and `greater` groups), a new
@@ -7497,7 +7499,11 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
   checks there is no state change. VT52 `ESC F` (graphics mode) stays a separate, working
   path.
 
-#### 147.24 — Alt sends ESC (`?1036` / `?1039`) and macOS Option as Alt
+#### 147.24 — Alt sends ESC (`?1036` / `?1039`) (macOS half moved to Task 152)
+
+**Amended 2026-11-20:** by maintainer decision (2026-11-19, option 1) the macOS Option-as-Alt
+half of this subtask (the `[keyboard] macos_option_as_alt` option and its per-side choices)
+moved to Task 152; macOS Option keeps composing. The rest stands as written.
 
 - **Source:** maintainer decision 2026-10-11. This takes the legacy text half of Task 137 B1
   ("Alt and Super never apply to text keys").
@@ -7785,7 +7791,7 @@ Stale stub text was corrected at the same time:
 - **Verification:** a test with kitty flag 8 set that a click produces the SGR report bytes
   unchanged; existing mouse tests green.
 - **Scheduling:** within Task 147, after 147.5 (same `input.rs`).
-- **Status: Resolved (2026-11-19).** `handle_pointer_button`/`_moved`/`_scroll` return the
+- **Status: done (2026-11-19).** `handle_pointer_button`/`_moved`/`_scroll` return the
   framed report bytes; `send_mouse_report` sends them as `InputEvent::Key` (the button path
   keeps its broadcast and recording tail, minus the encoding). The alternate-screen
   wheel-to-arrow path stays on the key encoder. Flag 2 had the same effect as flag 8 on
@@ -7939,6 +7945,32 @@ finding is fixed on this branch or routed to the task that owns the code.
   for that (`freminal-notify`, `freminal-windowing`), and no non-test build enables it.
 - **Routed to Task 137:** A12, B5, B10 (keypad modifier parameter, VT52 `ESC ? x` keypad,
   `modifyOtherKeys` Alt+letter). **Routed to Task 135:** A13.
+- **Fix outcomes (2026-11-20).** Every finding marked "fix" is fixed with a test that fails
+  without it (mutations run). Notes:
+  - A1: 0x9C terminates OSC/DCS/APC only while S8C1T is active, the gate freminal already
+    uses for every C1 control (xterm's `sos_table` treats it as ST unconditionally). A5: a
+    new `TerminalInput::NonAscii(char)`; plain text and `AltText` both encode per character
+    under kitty flag 8 (`é` → `CSI 233 u`). A6: the RIS `vt52_mode` reset was unreachable
+    (`ESC c` is not a VT52 command) and is removed. String-state byte checks cost +1.5%
+    (OSC) and +4.4% (kitty APC) in user-space instructions; plain text, CSI and SGR are
+    unchanged (`perf stat`, because Criterion was unusable under load).
+  - B1's sibling (the `Inline` path also clears same-column images below the new image's
+    rows when the cursor is mid-screen) is pre-existing and routed to Task 136. B3 introduced
+    `PlaceImageRequest`; `place_image_at` keeps its own pre-existing allowance. B7/B8 added
+    a shared GUI test fixture (`gui/test_support.rs`) and split `apply_config_state` out of
+    `apply_new_config`.
+  - **B9 routed to Task 136:** at `background_opacity < 1`, explicit-background cells are
+    composited over the translucent base fill under DECSCNM and under an OSC 11 override
+    (the latter since Task 132.11). A correct fix needs blend/stencil control in `gl_facade`
+    or a per-cell base fill; three characterisation pixel tests pin today's values.
+  - C2 found 30 more rustdoc warnings behind features; `check-docs` now uses
+    `--all-features` and is clean. C1/C14: the `decision` field's `cfg` is narrowed to its
+    readers, and the gl-pixel-only clippy runs from `cargo xtask check-gl-pixel` (one Linux
+    CI step), `lint` and `check-windows`, not from `check`. C6: `ui.auto_detect_urls` and
+    `security.password_indicator` were added; `logging.write_to_file` is deprecated and
+    ignored at runtime, so it is deliberately not exposed in the module or the example.
+  - New, routed to Task 137: under kitty flags 1/8, Alt+text sends `CSI 98 u` with no Alt
+    modifier (147.24 left Alt to Task 137; the kitty spec gives `CSI 98;3u`).
 
 ### 147 Status notes
 
@@ -8079,7 +8111,8 @@ finding is fixed on this branch or routed to the task that owns the code.
   alternate placements (`scroll_ops.rs`, outside the listed file, approved). A first version
   that kept the store by inferring "untouched" from row shape was rejected in review as a
   heuristic. `bench_alternate_screen_switch` vs `before_147_12`: `enter_alternate` −12.2%,
-  `leave_alternate` −5.4% (noise), `alternate_reenter` −15.2% (its setup uses the new entry).
+  `leave_alternate` −5.4% (noise). `alternate_reenter` times plain `switch_to_alternate`, which
+  this change only restructured; its −15.2% is not attributable to the change (review B4).
 - **147.18 (done).** `set_size` pins the DECSC slot to its cell (`pin_saved_cursor`: row number
   plus column), carries it through reflow with the new `ReflowRemap::map_cell` (the stage
   remap that carries marks and blocks, now cell-granular; `offset_to_new_row` delegates to
@@ -11596,6 +11629,13 @@ size themselves per placement.
 - Whether sixel and iTerm2 images move onto the same placement model or stay cell tiles.
 - Reflow behaviour of placements.
 
+**Routed from the Task 147 review (2026-11-20).** B9: at `background_opacity < 1`,
+explicit-background cells are composited over the translucent pane base fill (under DECSCNM
+since 147.27, under an OSC 11 override since 132.11), so they are tinted and their alpha is
+too high; characterisation tests in `pixel_harness.rs` (`translucent_base_fill_pixel_tests`)
+pin today's values. Also: an `Inline` image placement clears same-column image cells below
+the new image's own rows when the cursor is mid-screen.
+
 ### Task 137 — Keyboard Protocol Conformance (stub, v0.13.1)
 
 **Goal.** The bytes emitted for every key event match kitty's `key_encoding.c` for every flag
@@ -11665,6 +11705,9 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 `SS3 <final>` with no modifier parameter (xterm adds one, `input.c:1394-1396`), and VT52
 keypad keys need `ESC ? <final>` (`input.c:855-859`). B10: under `modifyOtherKeys`, xterm sends
 some Alt+letter combinations as `CSI 27 ; mod ; code ~`; freminal always uses the ESC prefix.
+
+**Also routed (2026-11-20):** under kitty flags 1 and 8, Alt+text is sent as `CSI <cp> u`
+without the Alt modifier (`;3`).
 
 ### Task 152 — macOS Option as Alt & Per-Side Alt (stub, v0.13.1)
 
@@ -12494,6 +12537,8 @@ the command); `-hfoo -e f` stays an edit; `-h /a=b -e f` is an edit (`/a=b` is a
   "superseded by Task 151" line). The GAPS "XTGETTCAP capability expansion" row is closed by
   151.2. The `kbs` comments in `decbkm.rs` and `input.rs` stay accurate (`\177` in both
   entries).
+
+**Merged** 2026-11-20 via PR #588 (`2ee931b8`).
 
 ---
 

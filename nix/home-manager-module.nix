@@ -96,6 +96,7 @@ let
           background_image
           background_image_mode
           background_image_opacity
+          auto_detect_urls
           ;
       };
 
@@ -122,6 +123,7 @@ let
           allow_clipboard_write
           allow_kitty_file_transfer
           allow_window_ops
+          password_indicator
           ;
       };
 
@@ -558,6 +560,17 @@ in
             Null uses the default (0.5).
           '';
         };
+
+        auto_detect_urls = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Detect plain URLs (http, https, file, ftp, mailto) in terminal
+            output and make them clickable, in addition to OSC 8 hyperlinks.
+            An OSC 8 link wins where it overlaps a detected URL.
+            Null uses the default (true).
+          '';
+        };
       };
 
       chrome = {
@@ -726,6 +739,17 @@ in
             queries (window size, position, state, title) and title push/pop
             are unaffected.
             Null uses the default (false).
+          '';
+        };
+
+        password_indicator = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Show a lock icon in the tab bar when the foreground process
+            disables terminal echo (for example a password prompt from sudo,
+            ssh or passwd).
+            Null uses the default (true).
           '';
         };
       };

@@ -178,8 +178,9 @@ The full architecture invariants and what-not-to-leak rules live in the
   the `freminal` binary implements its `App` trait to receive per-window
   update callbacks.
 - **`xtask`** -- build/CI orchestration. Subcommands: `ci`, `build`,
-  `check`, `check-windows`, `check-docs`, `lint`, `test`, `coverage`, `deny`, `machete`,
-  `terminfo`, `fuzz`, `fuzz-smoke`, `fuzz-replay`, `fuzz-cmin`, `fuzz-list`.
+  `check`, `check-windows`, `check-gl-pixel`, `check-docs`, `lint`,
+  `lint-markdown`, `test`, `coverage`, `deny`, `machete`, `terminfo`,
+  `fuzz`, `fuzz-smoke`, `fuzz-replay`, `fuzz-cmin`, `fuzz-list`.
 
 ### Terminal mode representation
 
@@ -217,27 +218,33 @@ Hardcoded shortcuts outside `BindingMap` are forbidden.
 
 ### Build & test commands
 
-| Command                                                        | Purpose                                                       |
-| -------------------------------------------------------------- | ------------------------------------------------------------- |
-| `cargo xtask ci`                                               | Full CI: lint + deny + machete + build + test + bench compile |
-| `cargo xtask test`                                             | Full test suite: nextest (lib/bin/integration) + doctests     |
-| `cargo nextest run --all`                                      | Quick test run while iterating (does NOT run doctests)        |
-| `cargo clippy --all-targets --all-features -- -D warnings`     | Lint with strict warnings                                     |
-| `cargo machete`                                                | Detect unused dependencies                                    |
-| `cargo bench --all`                                            | Run all benchmarks (Criterion)                                |
-| `cargo bench --no-run --all`                                   | Compile benchmarks without running                            |
-| `cargo xtask coverage`                                         | Generate coverage report (lcov)                               |
-| `cargo fmt --all -- --check`                                   | Check formatting                                              |
-| `cargo xtask check-windows`                                    | Clippy for windows-gnu (Windows cross-check; `default` shell) |
-| `cargo xtask check-docs`                                       | Rustdoc for the workspace with `-D warnings`                  |
-| `cargo xtask terminfo`                                         | Regenerate `res/terminfo/` + `.tar` from `res/freminal.ti`    |
-| `cargo deny check`                                             | Advisories, licences, bans, sources (also a required CI job)  |
-| `nix develop .#fuzz --command cargo xtask fuzz-replay`         | Replay fuzz seeds + regressions (required CI gate)            |
-| `nix develop .#fuzz --command cargo xtask fuzz <t> --time 300` | Fuzz one target for 5 minutes (see `fuzz-list`)               |
-| `nix develop .#fuzz --command cargo xtask fuzz-corpus pull`    | Fetch the persistent fuzz corpus (`push` publishes it)        |
+| Command                                                        | Purpose                                                                                |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `cargo xtask ci`                                               | Full CI: lint + rustdoc (`check-docs`) + deny + machete + build + test + bench compile |
+| `cargo xtask test`                                             | Full test suite: nextest (lib/bin/integration) + doctests                              |
+| `cargo nextest run --all`                                      | Quick test run while iterating (does NOT run doctests)                                 |
+| `cargo clippy --all-targets --all-features -- -D warnings`     | Lint with strict warnings                                                              |
+| `cargo machete`                                                | Detect unused dependencies                                                             |
+| `cargo bench --all`                                            | Run all benchmarks (Criterion)                                                         |
+| `cargo bench --no-run --all`                                   | Compile benchmarks without running                                                     |
+| `cargo xtask coverage`                                         | Generate coverage report (lcov)                                                        |
+| `cargo fmt --all -- --check`                                   | Check formatting                                                                       |
+| `cargo xtask check-windows`                                    | Clippy for windows-gnu (Windows cross-check; `default` shell)                          |
+| `cargo xtask check-gl-pixel`                                   | Clippy on `freminal` with only the `gl-pixel` feature                                  |
+| `cargo xtask check-docs`                                       | Rustdoc for the workspace with `-D warnings`                                           |
+| `cargo xtask terminfo`                                         | Regenerate `res/terminfo/` + `.tar` from `res/freminal.ti`                             |
+| `cargo deny check`                                             | Advisories, licences, bans, sources (also a required CI job)                           |
+| `nix develop .#fuzz --command cargo xtask fuzz-replay`         | Replay fuzz seeds + regressions (required CI gate)                                     |
+| `nix develop .#fuzz --command cargo xtask fuzz <t> --time 300` | Fuzz one target for 5 minutes (see `fuzz-list`)                                        |
+| `nix develop .#fuzz --command cargo xtask fuzz-corpus pull`    | Fetch the persistent fuzz corpus (`push` publishes it)                                 |
 
 Fuzzing procedures (targets, corpus policy, sandbox, triage) are in
 `fuzz/README.md`.
+
+The repo's `.markdownlint-cli2.yaml` (run by `cargo xtask lint-markdown`) is
+stricter than the markdownlint config the pre-commit hook uses: it leaves
+MD033 and MD060 enabled, and the hook disables both. A markdown change must
+pass both.
 
 ### Verification suite (mandatory before "done")
 

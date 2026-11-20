@@ -116,7 +116,7 @@ pub struct RecordingState {
     /// [`Self::mark_query_available`]. Absent from this map means "not yet
     /// available", the correct default for a query that was just issued.
     query_results: RefCell<HashMap<glow::Query, u64>>,
-    /// Task 125.8: the string [`super::facade::Gl::get_parameter_string`]'s
+    /// Task 125.8: the string `super::facade::Gl::get_parameter_string`'s
     /// `Recording` arm reports for `glow::VERSION`. Defaults to empty,
     /// which `freminal_windowing::gpu_profiling::parse_gl_version_string`
     /// cannot parse, so
@@ -385,13 +385,13 @@ impl RecordingState {
         glow::NativeQuery(Self::bump(&self.next_query))
     }
 
-    /// Override the string [`super::facade::Gl::get_parameter_string`]'s
+    /// Override the string `super::facade::Gl::get_parameter_string`'s
     /// `Recording` arm reports for `glow::VERSION` (Task 125.8). Test/
     /// adapter-support API, mirroring [`Self::mark_query_available`]: a
     /// test that wants `gui::renderer::gpu_profiling::PaneGpuTimingProfile::detect_capability`
     /// to resolve `Available` against a recording session calls this with
     /// a parseable desktop version string (e.g. `"4.6.0 Recording"`)
-    /// before calling `detect_capability`. See [`Self::gl_version_string`]'s
+    /// before calling `detect_capability`. See `Self::gl_version_string`'s
     /// doc on the field for why the default is deliberately empty
     /// (unparsable) instead.
     pub fn set_gl_version_string(&self, version: impl Into<String>) {
@@ -415,10 +415,10 @@ impl RecordingState {
     /// "delayed availability" scenario
     /// `freminal_windowing::gpu_profiling::GpuQueryRing` is built to
     /// handle. Before this is called for a given `query`, both
-    /// [`super::facade::Gl::get_query_parameter_u32`] (with
+    /// `super::facade::Gl::get_query_parameter_u32` (with
     /// `GL_QUERY_RESULT_AVAILABLE`, via the `Recording` arm) reports
     /// unavailable (`0`) and
-    /// [`super::facade::Gl::get_query_parameter_u64`] reports `0` for it.
+    /// `super::facade::Gl::get_query_parameter_u64` reports `0` for it.
     pub fn mark_query_available(&self, query: glow::Query, result_ns: u64) {
         self.query_results.borrow_mut().insert(query, result_ns);
     }

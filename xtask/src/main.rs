@@ -91,6 +91,13 @@ enum Command {
     #[command(visible_alias = "cw")]
     CheckWindows,
 
+    /// Run clippy on `freminal` with only the `gl-pixel` feature enabled
+    ///
+    /// Also run by `lint` and `check-windows`; this is the entry point for the
+    /// single Linux CI leg.
+    #[command(visible_alias = "cgp")]
+    CheckGlPixel,
+
     /// Build the workspace rustdoc with warnings denied (broken intra-doc links, etc.)
     #[command(visible_alias = "cdo")]
     CheckDocs,
@@ -310,6 +317,7 @@ impl Command {
             Self::Check => check(),
             Self::CheckMsrv => check_msrv(),
             Self::CheckWindows => check_windows(),
+            Self::CheckGlPixel => clippy_gl_pixel_only(),
             Self::CheckDocs => check_docs(),
             Self::Deny => deny(),
             Self::Machete => machete(),
@@ -391,11 +399,16 @@ fn rustdoc_flags_denying_warnings(existing: Option<&str>) -> String {
 /// one `cargo doc` invocation only, so it cannot leak into the other gates.
 /// `--document-private-items` is deliberately not passed: the docs that ship
 /// are the public ones, and a public doc must not link to a private item.
+/// `--all-features` documents the feature-gated modules too (`gl-pixel`,
+/// `frame-profiling`, ...), which otherwise skip the gate entirely.
 fn check_docs() -> Result<()> {
     let flags = rustdoc_flags_denying_warnings(std::env::var("RUSTDOCFLAGS").ok().as_deref());
-    cmd("cargo", ["doc", "--workspace", "--no-deps"])
-        .env("RUSTDOCFLAGS", flags)
-        .run_with_trace()?;
+    cmd(
+        "cargo",
+        ["doc", "--workspace", "--no-deps", "--all-features"],
+    )
+    .env("RUSTDOCFLAGS", flags)
+    .run_with_trace()?;
     Ok(())
 }
 
@@ -427,12 +440,16 @@ fn build() -> Result<()> {
 /// Lints [`LINT_PACKAGE_SCOPE`], the same packages as [`lint_clippy`], so the
 /// per-OS matrix also covers `freminal-windowing` (the crate with the most
 /// platform-specific code) and `xtask`, neither of which is a default member.
+///
+/// Deliberately does **not** run [`clippy_gl_pixel_only`]: that combination
+/// is a Linux-harness concern and would be recompiled on every matrix leg for
+/// no extra platform coverage. It runs from [`lint_clippy`], from
+/// [`check_windows`] (for the Windows target) and from one Linux CI leg.
 fn check() -> Result<()> {
     let mut args = vec!["clippy"];
     args.extend(LINT_PACKAGE_SCOPE);
     args.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
-    run_cargo(args)?;
-    clippy_gl_pixel_only()
+    run_cargo(args)
 }
 
 /// Run clippy on `freminal` with only the `gl-pixel` feature enabled.
@@ -445,17 +462,18 @@ fn check() -> Result<()> {
 /// package that defines the feature: a `--workspace` run would unify the
 /// features of the other members back in.
 fn clippy_gl_pixel_only() -> Result<()> {
-    run_cargo(vec![
-        "clippy",
-        "-p",
-        "freminal",
-        "--features",
-        "gl-pixel",
-        "--all-targets",
-        "--",
-        "-D",
-        "warnings",
-    ])
+    run_cargo(gl_pixel_only_clippy_args(None))
+}
+
+/// The `cargo` arguments of the `gl-pixel`-only clippy run, optionally for an
+/// explicit `--target` (see [`check_windows`]).
+fn gl_pixel_only_clippy_args(target: Option<&'static str>) -> Vec<&'static str> {
+    let mut args = vec!["clippy", "-p", "freminal", "--features", "gl-pixel"];
+    if let Some(target) = target {
+        args.extend(["--target", target]);
+    }
+    args.extend(["--all-targets", "--", "-D", "warnings"]);
+    args
 }
 
 /// Verify the workspace compiles on the MSRV toolchain.
@@ -515,18 +533,28 @@ const LINT_PACKAGE_SCOPE: [&str; 3] = ["--workspace", "--exclude", "portable-pty
 /// (which points at the *outer* `cargo xtask` binary) so the chosen cargo
 /// dispatches its own matching `rustc`.
 fn check_windows() -> Result<()> {
+    const TARGET: &str = "x86_64-pc-windows-gnu";
+
     let mut args = vec!["clippy"];
     args.extend(LINT_PACKAGE_SCOPE);
     args.extend([
         "--target",
-        "x86_64-pc-windows-gnu",
+        TARGET,
         "--all-targets",
         "--all-features",
         "--",
         "-D",
         "warnings",
     ]);
+    run_windows_cargo(args)?;
+    // The `gl-pixel`-only combination hides items that `--all-features`
+    // keeps alive, on this target as on Linux (Task 147.C1).
+    run_windows_cargo(gl_pixel_only_clippy_args(Some(TARGET)))
+}
 
+/// Run `cargo` with `args` on the windows-capable toolchain (see
+/// [`check_windows`] for the toolchain selection).
+fn run_windows_cargo(args: Vec<&str>) -> Result<()> {
     match std::env::var("FREMINAL_WINDOWS_CARGO") {
         Ok(cargo) if !cargo.is_empty() => {
             // cargo resolves `rustc` via `RUSTC`/PATH, not its own sibling, and
