@@ -20,7 +20,6 @@ use freminal_terminal_emulator::io::{InputEvent, SearchCorpus};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_windowing::WindowId;
 
-use super::FreminalGui;
 use super::panes::{Pane, PaneId, PaneIdGenerator};
 use super::pty::WindowCommandBudget;
 use super::renderer::WindowPostRenderer;
@@ -28,6 +27,7 @@ use super::tabs::{Tab, TabId, TabManager};
 use super::terminal::FreminalTerminalWidget;
 use super::title_stack::TitleStack;
 use super::view_state::ViewState;
+use super::{FreminalGui, StartupState};
 
 /// A tab with one pane whose input receiver is returned.
 pub(super) fn tab_with_input_rx(id: TabId, pane_id: PaneId) -> (Tab, Receiver<InputEvent>) {
@@ -102,13 +102,16 @@ pub(super) fn gui_with_windows(
 ) -> (FreminalGui, Vec<WindowPanes>) {
     let window_post = Arc::new(Mutex::new(WindowPostRenderer::new()));
     let repaint_handle = Arc::new(OnceLock::new());
-    let mut gui = FreminalGui::new(
+    // Empty injected state: the fixture must not read the developer's
+    // persisted state or layout library.
+    let mut gui = FreminalGui::with_startup_state(
         config.clone(),
         Args::parse_from(["freminal"]),
         Arc::clone(&repaint_handle),
         None,
         Arc::clone(&window_post),
         Arc::new(arc_swap::ArcSwapOption::empty()),
+        StartupState::default(),
     );
     let ctx = egui::Context::default();
     let mut ids = PaneIdGenerator::new(0);

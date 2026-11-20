@@ -100,15 +100,19 @@ pub struct PaneBackground {
 impl PaneBackground {
     /// The base fill a pane needs, given the configured theme's background,
     /// the pane's resolved colours (theme values or OSC 10/11 overrides) and
-    /// whether DECSCNM is reversing the screen.
+    /// whether DECSCNM is reversing the screen, at the pane's background
+    /// `opacity`.
     ///
     /// The fill is the pane's *effective default background*: the resolved
-    /// background in normal video, the resolved foreground under DECSCNM
-    /// (Task 147.27). It covers the whole `terminal_rect`, so the sub-cell
-    /// remainder strip is inverted along with the cells. It must agree with
-    /// the cell-background skip rule in `vertex.rs`, which skips exactly the
-    /// cells whose effective background is this colour; both therefore read
-    /// `pane_base_color`.
+    /// background in normal video, the resolved foreground under DECSCNM at
+    /// full opacity (Task 147.27). It covers the whole `terminal_rect`, so
+    /// the sub-cell remainder strip is inverted along with the cells. Below
+    /// full opacity DECSCNM has no foreground fill (it would double-composite
+    /// with every translucent cell background, 147 PR review R16): the base
+    /// is the resolved background, as in normal video, and the remainder is
+    /// not reversed. It must agree with the cell-background skip rule in
+    /// `vertex.rs`, which skips exactly the cells whose effective background
+    /// is this colour; both therefore read `pane_base_color`.
     ///
     /// `Some` exactly when that colour differs from the theme background: an
     /// effective default that happens to equal it draws nothing, because the
@@ -119,8 +123,9 @@ impl PaneBackground {
         theme_background: (u8, u8, u8),
         resolved: &ResolvedColors,
         screen_inversion: ScreenInversion,
+        opacity: f32,
     ) -> Option<[f32; 3]> {
-        let effective_background = resolved.rgb(pane_base_color(screen_inversion));
+        let effective_background = resolved.rgb(pane_base_color(screen_inversion, opacity));
         if theme_background == effective_background {
             return None;
         }
@@ -3003,7 +3008,7 @@ mod tests {
     fn base_fill_is_none_when_the_resolved_background_is_the_themes() {
         let colors = colors_with((1, 2, 3), (30, 30, 46));
         assert_eq!(
-            PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Normal),
+            PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Normal, 1.0),
             None,
             "no override means nothing is drawn underneath the cells"
         );
@@ -3012,8 +3017,9 @@ mod tests {
     #[test]
     fn base_fill_is_some_when_the_resolved_background_differs() {
         let colors = colors_with((1, 2, 3), (255, 0, 51));
-        let fill = PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Normal)
-            .expect("a differing background needs a fill");
+        let fill =
+            PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Normal, 1.0)
+                .expect("a differing background needs a fill");
         assert!(approx_eq(fill[0], 1.0), "red channel, got {}", fill[0]);
         assert!(approx_eq(fill[1], 0.0), "green channel, got {}", fill[1]);
         assert!(approx_eq(fill[2], 0.2), "blue channel, got {}", fill[2]);
@@ -3027,12 +3033,14 @@ mod tests {
             (0, 0, 0),
             &colors_with((0, 0, 0), (255, 255, 255)),
             ScreenInversion::Normal,
+            1.0,
         )
         .unwrap();
         let b = PaneBackground::base_fill_for(
             (255, 255, 255),
             &colors_with((255, 255, 255), (0, 0, 0)),
             ScreenInversion::Normal,
+            1.0,
         )
         .unwrap();
         assert!(approx_eq(a[0], 1.0));
@@ -3044,8 +3052,9 @@ mod tests {
         // Task 147.27: reversed, the pane's default background is the
         // foreground, so the fill (and thus the sub-cell remainder) is it.
         let colors = colors_with((255, 0, 51), (30, 30, 46));
-        let fill = PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Reversed)
-            .expect("a reversed screen needs a fill of the foreground");
+        let fill =
+            PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Reversed, 1.0)
+                .expect("a reversed screen needs a fill of the foreground");
         assert!(approx_eq(fill[0], 1.0), "red channel, got {}", fill[0]);
         assert!(approx_eq(fill[1], 0.0), "green channel, got {}", fill[1]);
         assert!(approx_eq(fill[2], 0.2), "blue channel, got {}", fill[2]);
@@ -3058,9 +3067,35 @@ mod tests {
         // not leak into the fill.
         let colors = colors_with((30, 30, 46), (255, 0, 51));
         assert_eq!(
-            PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Reversed),
+            PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Reversed, 1.0),
             None,
             "reversed fill equals the theme background, so nothing is drawn"
+        );
+    }
+
+    #[test]
+    fn base_fill_under_decscnm_below_full_opacity_is_the_normal_base() {
+        // 147 PR review R16: a foreground fill under translucent cell
+        // backgrounds would composite twice, so below full opacity the base
+        // is the resolved background, as in normal video.
+        let colors = colors_with((255, 0, 51), (30, 30, 46));
+        assert_eq!(
+            PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Reversed, 0.5),
+            None,
+            "the resolved background equals the theme's, so nothing is drawn"
+        );
+        let overridden = colors_with((255, 0, 51), (1, 2, 3));
+        let fill = PaneBackground::base_fill_for(
+            (30, 30, 46),
+            &overridden,
+            ScreenInversion::Reversed,
+            0.5,
+        )
+        .expect("an OSC 11 override still needs its fill");
+        assert!(
+            approx_eq(fill[2], 3.0 / 255.0),
+            "blue channel, got {}",
+            fill[2]
         );
     }
 

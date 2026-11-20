@@ -494,41 +494,26 @@ struct FreminalGui {
     session_save_due: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl FreminalGui {
-    #[allow(clippy::too_many_arguments)] // Constructor naturally needs all initialization params.
-    #[allow(clippy::too_many_lines)] // Constructor: sequential field init + legacy state migration.
-    fn new(
-        config: Config,
-        args: Args,
-        repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
-        config_path: Option<std::path::PathBuf>,
-        window_post: Arc<Mutex<WindowPostRenderer>>,
-        recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
-    ) -> Self {
-        // Push pending shader to the shared WindowPostRenderer.  The first
-        // window's tab is spawned lazily in `on_window_created`, so any
-        // per-tab initial state (ThemeModeUpdate, background image) is
-        // applied there rather than here.
-        let initial_shader_src: Option<String> = config.shader.path.as_ref().and_then(|p| {
-            std::fs::read_to_string(p)
-                .map_err(|e| {
-                    error!("Failed to read initial shader file '{}': {e}", p.display());
-                })
-                .ok()
-        });
-        if let Some(src) = initial_shader_src
-            && let Ok(mut wpr) = window_post.lock()
-        {
-            wpr.pending_shader = Some(Some(src));
-        }
+/// What [`FreminalGui`] starts from that production reads off the filesystem:
+/// the persisted app and window state and the layout library.
+///
+/// [`StartupState::load`] is the production source; tests inject
+/// [`StartupState::default`] (empty) through
+/// [`FreminalGui::with_startup_state`] so construction touches no files.
+#[derive(Default)]
+struct StartupState {
+    app_state: freminal_common::app_state::AppState,
+    /// Where `app_state` is saved; `None` means it is never written.
+    app_state_path: Option<std::path::PathBuf>,
+    window_state: freminal_common::window_state::WindowState,
+    discovered_layouts: Vec<freminal_common::layout::LayoutSummary>,
+    /// Layout files that failed to parse, as `(path, error)`.
+    layout_errors: Vec<(std::path::PathBuf, String)>,
+}
 
-        let binding_map = config.build_binding_map().unwrap_or_else(|e| {
-            error!("Failed to build binding map from config: {e}. Using defaults.");
-            freminal_common::keybindings::BindingMap::default()
-        });
-
-        let paste_guard = paste_guard::PasteGuard::new(&config.paste_guard);
-
+impl StartupState {
+    /// Read the persisted state and discover the layout library.
+    fn load(config: &Config) -> Self {
         // Load persisted app state (currently just the first-run flag).
         // Lives in `$XDG_STATE_HOME/freminal/state.toml` so NixOS
         // home-manager users with a read-only `config.toml` can still
@@ -562,16 +547,8 @@ impl FreminalGui {
             }
         }
 
-        // Open the welcome overlay automatically on first launch (before
-        // the user has seen — or dismissed — it).  The flag is persisted
-        // to `state.toml` on dismissal so subsequent launches skip it.
-        let mut welcome_overlay = welcome::WelcomeOverlay::new();
-        if !app_state.first_run_complete {
-            welcome_overlay.open();
-        }
-
         // Discover layouts once at startup. Any parse errors are
-        // surfaced as a single aggregated toast after `self` is built so
+        // surfaced as a single aggregated toast after the app is built so
         // the user notices broken layout files (otherwise they silently
         // disappear from the Layouts menu).
         let (discovered_layouts, layout_errors) = freminal_common::config::layout_library_dir()
@@ -579,6 +556,91 @@ impl FreminalGui {
                 || (Vec::new(), Vec::new()),
                 |dir| freminal_common::layout::discover_layouts_with_errors(&dir),
             );
+
+        Self {
+            app_state,
+            app_state_path,
+            window_state: freminal_common::window_state::window_state_path()
+                .as_deref()
+                .map(freminal_common::window_state::WindowState::load_or_default)
+                .unwrap_or_default(),
+            discovered_layouts,
+            layout_errors,
+        }
+    }
+}
+
+impl FreminalGui {
+    fn new(
+        config: Config,
+        args: Args,
+        repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
+        config_path: Option<std::path::PathBuf>,
+        window_post: Arc<Mutex<WindowPostRenderer>>,
+        recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
+    ) -> Self {
+        let startup = StartupState::load(&config);
+        Self::with_startup_state(
+            config,
+            args,
+            repaint_handle,
+            config_path,
+            window_post,
+            recording_swap,
+            startup,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Constructor naturally needs all initialization params.
+    #[allow(clippy::too_many_lines)] // Constructor: sequential field init.
+    fn with_startup_state(
+        config: Config,
+        args: Args,
+        repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
+        config_path: Option<std::path::PathBuf>,
+        window_post: Arc<Mutex<WindowPostRenderer>>,
+        recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
+        startup: StartupState,
+    ) -> Self {
+        let StartupState {
+            app_state,
+            app_state_path,
+            window_state,
+            discovered_layouts,
+            layout_errors,
+        } = startup;
+
+        // Push pending shader to the shared WindowPostRenderer.  The first
+        // window's tab is spawned lazily in `on_window_created`, so any
+        // per-tab initial state (ThemeModeUpdate, background image) is
+        // applied there rather than here.
+        let initial_shader_src: Option<String> = config.shader.path.as_ref().and_then(|p| {
+            std::fs::read_to_string(p)
+                .map_err(|e| {
+                    error!("Failed to read initial shader file '{}': {e}", p.display());
+                })
+                .ok()
+        });
+        if let Some(src) = initial_shader_src
+            && let Ok(mut wpr) = window_post.lock()
+        {
+            wpr.pending_shader = Some(Some(src));
+        }
+
+        let binding_map = config.build_binding_map().unwrap_or_else(|e| {
+            error!("Failed to build binding map from config: {e}. Using defaults.");
+            freminal_common::keybindings::BindingMap::default()
+        });
+
+        let paste_guard = paste_guard::PasteGuard::new(&config.paste_guard);
+
+        // Open the welcome overlay automatically on first launch (before
+        // the user has seen — or dismissed — it).  The flag is persisted
+        // to `state.toml` on dismissal so subsequent launches skip it.
+        let mut welcome_overlay = welcome::WelcomeOverlay::new();
+        if !app_state.first_run_complete {
+            welcome_overlay.open();
+        }
 
         // Initialize the chrome style profile from the persisted config
         // ([chrome] profile = "modern"|"retro", Task 112.13). Captured before
@@ -633,10 +695,7 @@ impl FreminalGui {
             pending_focus_settings: false,
             quit_all_pending: std::collections::HashSet::new(),
             closing_window_gl: HashMap::new(),
-            window_state: freminal_common::window_state::window_state_path()
-                .as_deref()
-                .map(freminal_common::window_state::WindowState::load_or_default)
-                .unwrap_or_default(),
+            window_state,
             app_state,
             app_state_path,
             recording_swap,

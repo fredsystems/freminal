@@ -162,19 +162,29 @@ fn setup_capture(
         let gl = Gl::real(off.gl());
         driver.init(&gl)?;
     }
-    // Production draws into egui's blend state (premultiplied alpha); the
-    // offscreen context enables none, so quads overwrite. That is identical
-    // while everything is opaque, so only a translucent frame, whose pixels
-    // depend on the blend, opts in.
-    if frame.opacity_percent < 100 {
-        // SAFETY: plain state calls on the context this function owns.
-        unsafe {
-            off.gl().enable(glow::BLEND);
-            off.gl().blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
-        }
-    }
+    set_blend_for(&off, frame);
 
     Ok((driver, off, width, height))
+}
+
+/// Set the blend state `frame` is drawn with.
+///
+/// Production draws into egui's blend state (premultiplied alpha); the
+/// offscreen context enables none, so quads overwrite. That is identical while
+/// everything is opaque, so only a translucent frame, whose pixels depend on
+/// the blend, opts in. Called before **every** drawn frame, not once per
+/// context: a capture that draws frames of different opacities on one context
+/// would otherwise draw the later ones with the first one's state.
+fn set_blend_for(off: &OffscreenGl, frame: &SyntheticFrame) {
+    // SAFETY: plain state calls on the context `off` owns.
+    unsafe {
+        if frame.opacity_percent < 100 {
+            off.gl().enable(glow::BLEND);
+            off.gl().blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+        } else {
+            off.gl().disable(glow::BLEND);
+        }
+    }
 }
 
 /// Render `frame` into a fresh offscreen context and capture the result.
@@ -284,6 +294,7 @@ pub fn capture_scissored_overdraw(
     let (mut driver, off, width, height) = setup_capture(first)?;
     let gl = Gl::real(off.gl());
 
+    set_blend_for(&off, first);
     driver.draw_frame(&gl, first);
     let before = read_back(off.gl(), width, height);
 
@@ -292,6 +303,7 @@ pub fn capture_scissored_overdraw(
         off.gl().enable(glow::SCISSOR_TEST);
         off.gl().scissor(x, y, w, h);
     }
+    set_blend_for(&off, second);
     driver.draw_frame(&gl, second);
     unsafe {
         off.gl().disable(glow::SCISSOR_TEST);
@@ -377,10 +389,12 @@ pub fn capture_side_by_side(
     unsafe {
         off.gl().viewport(0, 0, pane_w, pane_h);
     }
+    set_blend_for(&off, left);
     driver.draw_frame(&gl, left);
     unsafe {
         off.gl().viewport(pane_w, 0, pane_w, pane_h);
     }
+    set_blend_for(&off, right);
     driver.draw_frame(&gl, right);
 
     Ok(read_back(off.gl(), total_w, fb_height))
@@ -1739,24 +1753,25 @@ mod decscnm_pixel_tests {
     }
 }
 
-/// Task 147 review B9, **characterisation**: with `background_opacity < 1`
-/// a cell with an explicit background is composited over the pane's base fill
-/// (the foreground under DECSCNM, the OSC 11 override otherwise), and that
-/// fill is itself translucent over the window behind it. The cell therefore
-/// reads back as `colour over (fill over nothing)` instead of
-/// `colour over nothing`, exactly as it does in normal video: its alpha is
-/// `a + (1 - a) * a` and its colour is tinted by `(1 - a) * a * fill`.
+/// Task 147 review B9 and PR review R16: with `background_opacity < 1` a cell
+/// background must blend with the window behind the pane exactly once.
 ///
-/// These tests pin that measured behaviour so the defect is visible and a
-/// fix cannot land silently. They are expected to be rewritten, to assert the
-/// untinted `translucent(colour)` the first test below establishes for
-/// normal video, when the defect is fixed. The fix needs either blend-state
-/// control (`gl_facade`) or a per-cell base fill that is rebuilt whenever the
-/// opacity or the fill changes; see the 147 review B9 report.
+/// * Normal video draws no base fill, so explicit backgrounds are the colour at
+///   the pane's opacity.
+/// * DECSCNM below full opacity draws no foreground base fill either (it would
+///   sit under every translucent cell and composite with it twice): the cells
+///   draw their own backgrounds over the panel, and the sub-cell remainder is
+///   not reversed. At full opacity the fill is kept (Task 147.27).
+/// * **Characterisation:** an OSC 11 override still draws its base fill, so an
+///   explicit background over it is composited twice. That is routed to Task 136
+///   (it needs blend/stencil control in `gl_facade` or a per-cell base fill);
+///   its test pins today's values so a fix cannot land silently.
 #[cfg(test)]
 mod translucent_base_fill_pixel_tests {
     use super::super::headless::{CursorPresence, EXPLICIT_BACKGROUND, SyntheticFrame};
-    use super::PixelFrame;
+    use super::{
+        PixelFrame, capture_cursor_only_over_cleared_framebuffer, capture_scissored_overdraw,
+    };
     use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
     use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColors};
     use freminal_common::themes::CATPPUCCIN_MOCHA;
@@ -1765,6 +1780,8 @@ mod translucent_base_fill_pixel_tests {
     const ROWS: usize = 6;
     const CELL: (usize, usize) = (3, 2);
     const OPACITY_PERCENT: u8 = 50;
+    /// Sub-cell remainder, right and below the grid, in pixels.
+    const REMAINDER: (u32, u32) = (7, 5);
 
     fn frame() -> SyntheticFrame {
         SyntheticFrame::new(COLS, ROWS)
@@ -1848,34 +1865,69 @@ mod translucent_base_fill_pixel_tests {
     }
 
     /// Under DECSCNM every cell swaps its colours, so an SGR 7 cell over an
-    /// explicit background shows that background (the double reversal).
+    /// explicit background shows that background (the double reversal). Below
+    /// full opacity each cell blends with the panel alone.
     #[test]
-    fn an_explicit_background_under_decscnm_is_composited_over_the_base_fill() {
-        let f = frame()
-            .with_screen_inversion(ScreenInversion::Reversed)
+    fn an_explicit_background_under_decscnm_blends_with_the_panel_only() {
+        let f = decscnm_frame()
             .with_reversed_cell(CELL.0, CELL.1)
             .with_explicit_background_cell(CELL.0, CELL.1);
         let Some(captured) = super::tests::capture_or_skip(&f, "translucent-decscnm") else {
             return;
         };
 
-        let fill = translucent(CATPPUCCIN_MOCHA.foreground);
+        assert_decscnm_cells(&captured);
+    }
+
+    /// The same frame as a cursor-only redraw over a cleared framebuffer: the
+    /// cursor-only arm must produce the cells and the (absent) base fill
+    /// exactly as the full draw does.
+    #[test]
+    fn a_decscnm_cursor_only_redraw_blends_with_the_panel_only() {
+        let f = decscnm_frame()
+            .with_reversed_cell(CELL.0, CELL.1)
+            .with_explicit_background_cell(CELL.0, CELL.1);
+        if super::tests::capture_or_skip(&f, "translucent-decscnm-cursor-only").is_none() {
+            return;
+        }
+        let captured =
+            capture_cursor_only_over_cleared_framebuffer(&f).expect("cursor-only capture");
+
+        assert_decscnm_cells(&captured);
+    }
+
+    /// A DECSCNM frame at the test opacity with a sub-cell remainder strip.
+    fn decscnm_frame() -> SyntheticFrame {
+        frame()
+            .with_screen_inversion(ScreenInversion::Reversed)
+            .with_remainder(REMAINDER)
+    }
+
+    /// The pixels of [`decscnm_frame`] with an SGR 7 cell and an explicit
+    /// background cell at [`CELL`]: every cell is the translucent colour it
+    /// draws, nothing is composited twice, and the remainder is not reversed.
+    fn assert_decscnm_cells(captured: &PixelFrame) {
         assert_close(
-            pixel_at(&captured, (0, 0)),
-            fill,
-            "a default cell shows the reversed default background at the opacity",
+            pixel_at(captured, (0, 0)),
+            translucent(CATPPUCCIN_MOCHA.foreground),
+            "a default cell is the reversed default background at the opacity",
         );
         assert_close(
-            pixel_at(&captured, CELL),
-            over(translucent(explicit_rgb()), fill),
-            "B9: today the explicit background also blends with the base fill",
+            pixel_at(captured, CELL),
+            translucent(explicit_rgb()),
+            "the explicit background blends with the panel only",
+        );
+        assert_eq!(
+            captured.pixel(captured.width - 1, captured.height - 1),
+            Some([0, 0, 0, 0]),
+            "the sub-cell remainder is not reversed below full opacity"
         );
     }
 
-    /// SGR 7 under DECSCNM draws the default background: an ordinary
-    /// translucent quad, over the base fill.
+    /// SGR 7 under DECSCNM draws the default background, which is what lies
+    /// beneath the pane below full opacity, so the cell shows the panel.
     #[test]
-    fn a_double_reversed_cell_is_composited_over_the_base_fill() {
+    fn a_double_reversed_cell_shows_the_panel_below_full_opacity() {
         let f = frame()
             .with_screen_inversion(ScreenInversion::Reversed)
             .with_reversed_cell(CELL.0, CELL.1);
@@ -1884,14 +1936,73 @@ mod translucent_base_fill_pixel_tests {
             return;
         };
 
+        assert_eq!(pixel_at(&captured, CELL), [0, 0, 0, 0]);
         assert_close(
-            pixel_at(&captured, CELL),
-            over(
-                translucent(CATPPUCCIN_MOCHA.background),
-                translucent(CATPPUCCIN_MOCHA.foreground),
-            ),
-            "B9: today the double-reversed cell also blends with the base fill",
+            pixel_at(&captured, (0, 0)),
+            translucent(CATPPUCCIN_MOCHA.foreground),
+            "a default cell is the reversed default background at the opacity",
         );
+    }
+
+    /// At full opacity DECSCNM keeps its foreground base fill, the remainder
+    /// included (Task 147.27).
+    #[test]
+    fn an_opaque_decscnm_pane_keeps_the_base_fill_in_the_remainder() {
+        let f = SyntheticFrame::new(COLS, ROWS)
+            .with_cursor(CursorPresence::Hidden)
+            .with_remainder(REMAINDER)
+            .with_screen_inversion(ScreenInversion::Reversed);
+        let Some(captured) = super::tests::capture_or_skip(&f, "opaque-decscnm-remainder") else {
+            return;
+        };
+
+        let (r, g, b) = CATPPUCCIN_MOCHA.foreground;
+        assert_eq!(
+            captured.pixel(captured.width - 1, captured.height - 1),
+            Some([r, g, b, 255])
+        );
+    }
+
+    /// R17: the blend state follows each drawn frame. An opaque first frame
+    /// (an OSC 11 fill) and a translucent second frame inside a scissor: the
+    /// second frame's cell composites over the first frame's pixels, and
+    /// nothing outside the scissor changes.
+    #[test]
+    fn a_translucent_second_frame_blends_over_an_opaque_first_frame() {
+        const SCISSOR_CELL: (usize, usize) = (14, 2);
+        const FILL: [u8; 3] = [10, 200, 30];
+        let first = SyntheticFrame::new(COLS, ROWS)
+            .with_cursor(CursorPresence::Hidden)
+            .with_base_fill(Some(FILL));
+        let second = frame().with_explicit_background_cell(SCISSOR_CELL.0, SCISSOR_CELL.1);
+        let Some(probe) = super::tests::capture_or_skip(&first, "translucent-second-frame") else {
+            return;
+        };
+        let (w, h) = (probe.width, probe.height);
+        let (vp_w, vp_h) = (i32::try_from(w).unwrap(), i32::try_from(h).unwrap());
+        // The right half, full height (the scissor box is bottom-left origin).
+        let (sx, sw) = (vp_w / 2, vp_w - vp_w / 2);
+
+        let (before, after) = capture_scissored_overdraw(&first, &second, (sx, 0, sw, vp_h))
+            .expect("scissored overdraw capture");
+
+        let fill = [FILL[0], FILL[1], FILL[2], 255];
+        assert_eq!(pixel_at(&before, SCISSOR_CELL), fill, "premise");
+        assert_close(
+            pixel_at(&after, SCISSOR_CELL),
+            over(translucent(explicit_rgb()), fill),
+            "inside the scissor the translucent cell blends with the first frame",
+        );
+        let ix0 = u32::try_from(sx).unwrap();
+        for y in 0..h {
+            for x in 0..ix0 {
+                assert_eq!(
+                    before.pixel(x, y),
+                    after.pixel(x, y),
+                    "pixel ({x}, {y}) is outside the scissor and must be unchanged"
+                );
+            }
+        }
     }
 
     /// The same through the OSC 11 override: an explicit background over an

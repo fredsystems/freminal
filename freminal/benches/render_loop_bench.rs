@@ -1043,6 +1043,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                 b.iter(|| {
                     let _cursor_range = build_background_instances(
                         &BackgroundFrame {
+                            opacity: 1.0,
                             shaped_lines: &lines,
                             cell_width,
                             cell_height,
@@ -1158,6 +1159,7 @@ fn bench_bg_instances_decorated_group(
                 b.iter(|| {
                     let _cursor_range = build_background_instances(
                         &BackgroundFrame {
+                            opacity: 1.0,
                             shaped_lines: &lines,
                             cell_width,
                             cell_height,
@@ -1274,6 +1276,7 @@ fn bench_bg_instances_indexed(c: &mut Criterion) {
                 b.iter(|| {
                     let _cursor_range = build_background_instances(
                         &BackgroundFrame {
+                            opacity: 1.0,
                             shaped_lines: &lines,
                             cell_width,
                             cell_height,
@@ -1399,6 +1402,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                 b.iter(|| {
                     let _cursor_range = build_background_instances(
                         &BackgroundFrame {
+                            opacity: 1.0,
                             shaped_lines: &lines,
                             cell_width,
                             cell_height,
@@ -1434,6 +1438,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                 b.iter(|| {
                     let _cursor_range = build_background_instances(
                         &BackgroundFrame {
+                            opacity: 1.0,
                             shaped_lines: single_row,
                             cell_width,
                             cell_height,

@@ -118,14 +118,22 @@ pub(super) const fn effective_fg(
 }
 
 /// The cell-background colour that is the pane's own default background
-/// under `screen_inversion`, and therefore already lies beneath the cell.
+/// under `screen_inversion` at `opacity`, and therefore already lies beneath
+/// the cell.
 ///
 /// A cell whose effective background is this colour emits no instance: the
 /// pane's base fill (or, when no fill is needed, the panel the pane sits on)
 /// already shows that colour, and drawing it again would only add overdraw
 /// (and double-blend at `background_opacity < 1.0`). Normal video: the
-/// default *background*. DECSCNM: the default *foreground*, because the
-/// pane's base fill is the reversed default background (Task 147.27).
+/// default *background*. DECSCNM at full opacity: the default *foreground*,
+/// because the pane's base fill is the reversed default background (Task
+/// 147.27).
+///
+/// DECSCNM below full opacity keeps the normal-video base. A foreground fill
+/// would sit under every translucent cell background and composite with it
+/// twice, so the cells draw their own backgrounds over the panel instead (a
+/// default cell is then drawn as the foreground colour) and the sub-cell
+/// remainder is not reversed (147 PR review R16).
 ///
 /// A cell whose effective background is anything else, including the colour
 /// that is the base under the *other* inversion state (SGR 7 under DECSCNM
@@ -134,27 +142,33 @@ pub(super) const fn effective_fg(
 #[inline]
 pub(super) const fn pane_base_color(
     screen_inversion: ScreenInversion,
+    opacity: f32,
 ) -> freminal_common::colors::TerminalColor {
     match screen_inversion {
-        ScreenInversion::Normal => freminal_common::colors::TerminalColor::DefaultBackground,
-        ScreenInversion::Reversed => freminal_common::colors::TerminalColor::Default,
+        ScreenInversion::Reversed if opacity >= 1.0 => {
+            freminal_common::colors::TerminalColor::Default
+        }
+        ScreenInversion::Reversed | ScreenInversion::Normal => {
+            freminal_common::colors::TerminalColor::DefaultBackground
+        }
     }
 }
 
-/// Whether `color` is [`pane_base_color`] under `screen_inversion`: the
-/// cell-background skip test, written as a pattern match rather than `==` so
-/// it stays a discriminant test in the per-run hot loop of
-/// [`build_background_instances`].
+/// Whether `color` is `base` (a [`pane_base_color`]): the cell-background
+/// skip test, written as a pattern match rather than `==` so it stays a
+/// discriminant test in the per-run hot loop of [`build_background_instances`].
 #[inline]
 const fn is_pane_base_color(
     color: freminal_common::colors::TerminalColor,
-    screen_inversion: ScreenInversion,
+    base: freminal_common::colors::TerminalColor,
 ) -> bool {
     use freminal_common::colors::TerminalColor;
     matches!(
-        (screen_inversion, color),
-        (ScreenInversion::Normal, TerminalColor::DefaultBackground)
-            | (ScreenInversion::Reversed, TerminalColor::Default)
+        (base, color),
+        (
+            TerminalColor::DefaultBackground,
+            TerminalColor::DefaultBackground
+        ) | (TerminalColor::Default, TerminalColor::Default)
     )
 }
 
@@ -523,6 +537,10 @@ pub struct BackgroundFrame<'a> {
     /// pane. Composed with per-cell SGR-7 by XOR via `effective_fg` /
     /// `effective_bg` (Task 115.2).
     pub screen_inversion: ScreenInversion,
+    /// The pane's background opacity in `0.0..=1.0`. Selects the pane base
+    /// (see `pane_base_color`), which decides which cell backgrounds are
+    /// skipped; it is not applied to colours here.
+    pub opacity: f32,
 }
 
 /// Build the two-pass background data: instanced cell BGs + decoration quads.
@@ -573,6 +591,7 @@ pub fn build_background_instances(
     let term_width_cols = frame.term_width_cols;
     let colors = frame.colors;
     let screen_inversion = frame.screen_inversion;
+    let base_color = pane_base_color(screen_inversion, frame.opacity);
     // Reuse existing heap allocations — clear but keep capacity.
     instances.clear();
     deco.clear();
@@ -593,9 +612,10 @@ pub fn build_background_instances(
             // Skip a background equal to what lies beneath (Task 147.27): the
             // pane's base fill, or the panel clear when no fill is drawn,
             // already shows it. That is the default background in normal
-            // video and the default foreground under DECSCNM; the other one
-            // (SGR 7 under DECSCNM) differs from the base and is drawn.
-            if is_pane_base_color(bg_color_raw, screen_inversion) {
+            // video and the default foreground under opaque DECSCNM; the
+            // other one (SGR 7 under DECSCNM) differs from the base and is
+            // drawn.
+            if is_pane_base_color(bg_color_raw, base_color) {
                 continue;
             }
 
@@ -1954,6 +1974,7 @@ mod tests {
         let mut deco = Vec::new();
         let _cursor_range = build_background_instances(
             &BackgroundFrame {
+                opacity: 1.0,
                 shaped_lines: lines,
                 cell_width,
                 cell_height,
@@ -1991,6 +2012,7 @@ mod tests {
         let mut deco = Vec::new();
         let _cursor_range = build_background_instances(
             &BackgroundFrame {
+                opacity: 1.0,
                 shaped_lines: lines,
                 cell_width: 8,
                 cell_height: 16,
@@ -2807,17 +2829,30 @@ mod tests {
     }
 
     /// Run `build_background_instances` for `lines` with explicit resolved
-    /// colours, an optional selection, and `screen_inversion`.
+    /// colours, an optional selection, and `screen_inversion`, at full
+    /// opacity.
     fn bg_with_colors(
         lines: &[Arc<ShapedLine>],
         colors: &ResolvedColors,
         selection: Option<(usize, usize, usize, usize)>,
         screen_inversion: ScreenInversion,
     ) -> (Vec<f32>, Vec<f32>) {
+        bg_with_colors_at(lines, colors, selection, screen_inversion, 1.0)
+    }
+
+    /// [`bg_with_colors`] at an explicit background `opacity`.
+    fn bg_with_colors_at(
+        lines: &[Arc<ShapedLine>],
+        colors: &ResolvedColors,
+        selection: Option<(usize, usize, usize, usize)>,
+        screen_inversion: ScreenInversion,
+        opacity: f32,
+    ) -> (Vec<f32>, Vec<f32>) {
         let mut instances = Vec::new();
         let mut deco = Vec::new();
         let _cursor_range = build_background_instances(
             &BackgroundFrame {
+                opacity,
                 shaped_lines: lines,
                 cell_width: 8,
                 cell_height: 16,
@@ -2971,6 +3006,43 @@ mod tests {
     }
 
     #[test]
+    fn bg_decscnm_below_full_opacity_draws_the_default_cell_over_the_panel() {
+        // Below full opacity there is no foreground base fill, so a default
+        // cell under DECSCNM draws its own (foreground-coloured) background
+        // and blends with the panel once (147 PR review R16).
+        let line = make_line(1, 8.0, default_colors(), FontDecorationFlags::empty());
+        let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (7, 8, 9))]);
+        let (bg, _) = bg_with_colors_at(&[line], &colors, None, ScreenInversion::Reversed, 0.5);
+        assert_eq!(bg.len(), BG_INSTANCE_FLOATS);
+        assert_eq!(&bg[2..6], rgba((7, 8, 9)).as_slice());
+    }
+
+    #[test]
+    fn bg_decscnm_below_full_opacity_skips_the_double_reversed_cell() {
+        // SGR 7 under DECSCNM resolves to the default background, which is
+        // what lies beneath the pane when no foreground fill is drawn.
+        let reversed = default_colors().with_reverse_video(ReverseVideo::On);
+        let line = make_line(1, 8.0, reversed, FontDecorationFlags::empty());
+        let colors = overridden_colors(&[], &[]);
+        let (bg, _) = bg_with_colors_at(&[line], &colors, None, ScreenInversion::Reversed, 0.5);
+        assert!(bg.is_empty(), "the panel already shows this colour");
+    }
+
+    #[test]
+    fn bg_decscnm_below_full_opacity_still_draws_an_explicit_background() {
+        let line = make_line(
+            1,
+            8.0,
+            default_colors().with_color(TerminalColor::Red),
+            FontDecorationFlags::empty(),
+        );
+        let colors = overridden_colors(&[(1, (11, 22, 33))], &[]);
+        let (bg, _) = bg_with_colors_at(&[line], &colors, None, ScreenInversion::Reversed, 0.5);
+        assert_eq!(bg.len(), BG_INSTANCE_FLOATS);
+        assert_eq!(&bg[2..6], rgba((11, 22, 33)).as_slice());
+    }
+
+    #[test]
     fn the_skip_test_agrees_with_pane_base_color_for_every_colour() {
         let colors = [
             TerminalColor::Default,
@@ -2984,26 +3056,39 @@ mod tests {
             TerminalColor::Custom(0, 0, 0),
         ];
         for inversion in [ScreenInversion::Normal, ScreenInversion::Reversed] {
-            for color in colors {
-                assert_eq!(
-                    is_pane_base_color(color, inversion),
-                    color == pane_base_color(inversion),
-                    "{color:?} under {inversion:?}"
-                );
+            for opacity in [0.0, 0.5, 1.0] {
+                let base = pane_base_color(inversion, opacity);
+                for color in colors {
+                    assert_eq!(
+                        is_pane_base_color(color, base),
+                        color == base,
+                        "{color:?} under {inversion:?} at {opacity}"
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn pane_base_color_is_the_default_background_in_normal_video_and_foreground_reversed() {
+    fn pane_base_color_is_the_default_background_except_for_opaque_decscnm() {
+        for opacity in [0.0, 0.5, 0.99, 1.0] {
+            assert_eq!(
+                pane_base_color(ScreenInversion::Normal, opacity),
+                TerminalColor::DefaultBackground,
+                "normal video at {opacity}"
+            );
+        }
         assert_eq!(
-            pane_base_color(ScreenInversion::Normal),
-            TerminalColor::DefaultBackground
-        );
-        assert_eq!(
-            pane_base_color(ScreenInversion::Reversed),
+            pane_base_color(ScreenInversion::Reversed, 1.0),
             TerminalColor::Default
         );
+        for opacity in [0.0, 0.5, 0.99] {
+            assert_eq!(
+                pane_base_color(ScreenInversion::Reversed, opacity),
+                TerminalColor::DefaultBackground,
+                "DECSCNM at {opacity}"
+            );
+        }
     }
 
     #[test]
@@ -3294,6 +3379,7 @@ mod tests {
         let mut deco = Vec::new();
         let _ = build_background_instances(
             &BackgroundFrame {
+                opacity: 1.0,
                 shaped_lines: &[line],
                 cell_width: 8,
                 cell_height: 16,
@@ -3625,6 +3711,7 @@ mod tests {
         );
         let cursor_range = build_background_instances(
             &BackgroundFrame {
+                opacity: 1.0,
                 shaped_lines: std::slice::from_ref(&line),
                 cell_width: 8,
                 cell_height: 16,
@@ -3987,6 +4074,7 @@ mod tests {
                     let mut deco = Vec::new();
                     let range = build_background_instances(
                         &BackgroundFrame {
+                            opacity: 1.0,
                             shaped_lines: &[],
                             cell_width: 8,
                             cell_height: 16,
@@ -4033,6 +4121,7 @@ mod tests {
             let mut deco = Vec::new();
             let range = build_background_instances(
                 &BackgroundFrame {
+                    opacity: 1.0,
                     shaped_lines: std::slice::from_ref(&line),
                     cell_width: 8,
                     cell_height: 16,
@@ -4412,6 +4501,7 @@ mod tests {
         let mut deco = Vec::new();
         let cursor_range = build_background_instances(
             &BackgroundFrame {
+                opacity: 1.0,
                 shaped_lines: &[line],
                 cell_width: cell_width_px,
                 cell_height: cell_height_px,
@@ -4471,6 +4561,7 @@ mod tests {
         let mut deco = Vec::new();
         let cursor_range = build_background_instances(
             &BackgroundFrame {
+                opacity: 1.0,
                 shaped_lines: &[line],
                 cell_width: cell_width_px,
                 cell_height: cell_height_px,

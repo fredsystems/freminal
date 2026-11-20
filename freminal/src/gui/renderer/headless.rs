@@ -310,18 +310,22 @@ impl SyntheticFrame {
     /// ([`PaneBackground::base_fill_for`]); otherwise it is the frame's
     /// explicit override (if any) normalised to `0.0..=1.0`.
     fn pane_background(&self) -> PaneBackground {
+        let opacity = self.opacity();
         let base_fill = match self.screen_inversion {
             ScreenInversion::Reversed => PaneBackground::base_fill_for(
                 CATPPUCCIN_MOCHA.background,
                 &synthetic_colors(),
                 self.screen_inversion,
+                opacity,
             ),
             ScreenInversion::Normal => self.base_fill.map(PaneBackground::fill_channels),
         };
-        PaneBackground {
-            opacity: f32::from(self.opacity_percent) / 100.0,
-            base_fill,
-        }
+        PaneBackground { opacity, base_fill }
+    }
+
+    /// The background opacity in `0.0..=1.0`.
+    fn opacity(&self) -> f32 {
+        f32::from(self.opacity_percent) / 100.0
     }
 }
 
@@ -476,6 +480,7 @@ impl HeadlessRenderer {
         let mut deco = Vec::new();
         let _cursor_range = build_background_instances(
             &BackgroundFrame {
+                opacity: frame.opacity(),
                 shaped_lines: &lines,
                 cell_width,
                 cell_height,

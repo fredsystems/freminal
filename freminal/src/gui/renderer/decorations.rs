@@ -533,6 +533,7 @@ mod decoration_geometry {
         let mut deco = Vec::new();
         let _cursor_range = build_background_instances(
             &BackgroundFrame {
+                opacity: 1.0,
                 shaped_lines: lines,
                 cell_width: m.cell_width,
                 cell_height: m.cell_height,

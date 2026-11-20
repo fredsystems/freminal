@@ -1484,6 +1484,7 @@ pub enum PaneFocus {
 /// | `previous_key`            | `previous_key`                   |
 /// | `scroll_amount`           | `previous_scroll_amount`          |
 /// | `super_state`             | `super_state`                    |
+/// | `text_modifiers`          | `text_modifiers`                 |
 ///
 /// Grouping them into one struct — appearing in both the params and result
 /// types under the same name — states that invariant in the type rather
@@ -1503,6 +1504,11 @@ pub(super) struct InputCarryState {
     /// Physical Super/Command hold-state, tracked per side across frames
     /// (Task 101.2 — see [`SuperKeyState`]).
     pub(super) super_state: SuperKeyState,
+    /// The modifiers in effect for typed text that arrives with no key event
+    /// before it in the batch: the frame's final modifiers, as of the last
+    /// call. Within a batch the modifiers of the preceding `Event::Key` win
+    /// (Task 147 PR review R18).
+    pub(super) text_modifiers: Modifiers,
 }
 
 /// Parameters for [`write_input_to_terminal`].
@@ -1676,6 +1682,7 @@ fn finalize_selection_drag(
 /// - `carry.previous_key` — last pressed key (used for key-repeat deduplication).
 /// - `carry.scroll_amount` — accumulated fractional scroll pixels not yet converted to full line units.
 /// - `carry.super_state` — updated physical Super/Command hold-state for the next call.
+/// - `carry.text_modifiers` — this frame's final modifiers, for text with no key event before it in the next call's batch.
 /// - `left_mouse_button_pressed` — true if a primary left-click was pressed inside this pane's rect this frame (used for click-to-focus by the caller).
 /// - `clipboard_pending` — true if a selection-copy was queued; the caller reads the clipboard channel.
 /// - `deferred_actions` — [`KeyAction`]s dispatched by the binding map this frame that the caller must still apply (e.g. actions that need state outside this function's scope).
@@ -1716,6 +1723,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                 previous_key,
                 scroll_amount,
                 super_state,
+                text_modifiers,
             },
     } = params;
 
@@ -1726,6 +1734,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                 previous_key,
                 scroll_amount,
                 super_state,
+                text_modifiers: input.modifiers,
             },
             left_mouse_button_pressed: false,
             clipboard_pending: false,
@@ -1750,6 +1759,11 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
     // `super_pressed` is the derived "any side down" value consumed below.
     let mut super_state = super_state;
     let mut super_pressed = super_state.any();
+    // The modifiers `Event::Text` is typed with. The text carries none of its
+    // own, and the frame's final modifiers can differ from the ones held when
+    // the key went down (Alt released, or pressed, later in the same frame),
+    // so they follow the `Event::Key` events as they are read.
+    let mut text_modifiers = text_modifiers;
 
     // Derive the terminal origin from the rect.  Pointer events whose
     // position falls outside `terminal_rect` are ignored — they belong to
@@ -1823,6 +1837,10 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
         {
             super_state.right = *pressed;
             super_pressed = super_state.any();
+        }
+
+        if let Event::Key { modifiers, .. } = event {
+            text_modifiers = *modifiers;
         }
 
         if let Event::Key { pressed: false, .. } = event {
@@ -1970,12 +1988,13 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             Event::Text(text)
                 if repeat_characters == Decarm::RepeatKey || previous_key.is_none() =>
             {
-                // Alt is read from the frame's modifiers: `Event::Text`
-                // carries none of its own. The prefix is built here, from
-                // `?1036` as it is now, never added to encoded bytes.
+                // Alt is read from the modifiers of the key event this text
+                // belongs to (`text_modifiers`): `Event::Text` carries none
+                // of its own. The prefix is built here, from `?1036` as it
+                // is now, never added to encoded bytes.
                 text_inputs(
                     text,
-                    input.modifiers,
+                    text_modifiers,
                     HostPlatform::CURRENT,
                     snap.meta_sends_escape,
                 )
@@ -2991,6 +3010,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             previous_key,
             scroll_amount,
             super_state,
+            text_modifiers: input.modifiers,
         },
         left_mouse_button_pressed,
         clipboard_pending,
@@ -4354,6 +4374,7 @@ mod pointer_moved_frame_path_tests {
                 previous_key: None,
                 scroll_amount: 0.0,
                 super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
             },
         });
 
@@ -4421,6 +4442,7 @@ mod pointer_moved_frame_path_tests {
                 previous_key: None,
                 scroll_amount: 0.0,
                 super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
             },
         });
 
@@ -4479,6 +4501,7 @@ mod pointer_moved_frame_path_tests {
                 previous_key: None,
                 scroll_amount: 0.0,
                 super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
             },
         });
 
@@ -4540,6 +4563,21 @@ mod alt_text_tests {
         emu.build_snapshot()
     }
 
+    /// The bytes Alt contributes in front of its text on this host: the `ESC`
+    /// prefix everywhere but macOS, where Option composes and sends none
+    /// (Task 152).
+    fn alt_prefix() -> &'static [u8] {
+        match HostPlatform::CURRENT {
+            HostPlatform::MacOs => b"",
+            HostPlatform::Other => b"\x1b",
+        }
+    }
+
+    /// The bytes for `text` typed with Alt on this host.
+    fn alt_typed(text: &[u8]) -> Vec<u8> {
+        [alt_prefix(), text].concat()
+    }
+
     fn key_press(key: Key, modifiers: Modifiers) -> Event {
         Event::Key {
             key,
@@ -4550,7 +4588,8 @@ mod alt_text_tests {
         }
     }
 
-    /// Feed `events` with `mods` held and return each message sent to the PTY.
+    /// Feed `events` with `mods` held for the whole frame and return each
+    /// message sent to the PTY.
     fn drive(snap: &TerminalSnapshot, mods: Modifiers, events: Vec<Event>) -> Vec<Vec<u8>> {
         drive_with(&BindingMap::default(), snap, mods, events)
     }
@@ -4561,11 +4600,23 @@ mod alt_text_tests {
         mods: Modifiers,
         events: Vec<Event>,
     ) -> Vec<Vec<u8>> {
+        drive_carrying(binding_map, snap, mods, mods, events)
+    }
+
+    /// [`drive_with`] with `carried` as the modifiers left over from the
+    /// previous frame and `final_mods` as this frame's final modifiers.
+    fn drive_carrying(
+        binding_map: &BindingMap,
+        snap: &TerminalSnapshot,
+        carried: Modifiers,
+        final_mods: Modifiers,
+        events: Vec<Event>,
+    ) -> Vec<Vec<u8>> {
         let (input_tx, input_rx) = crossbeam_channel::unbounded();
         let mut view_state = ViewState::new();
         let mut input_state = InputState::default();
         input_state.raw.events.extend(events);
-        input_state.modifiers = mods;
+        input_state.modifiers = final_mods;
         let _ = write_input_to_terminal(WriteInputParams {
             input: &input_state,
             snap,
@@ -4586,6 +4637,7 @@ mod alt_text_tests {
                 previous_key: None,
                 scroll_amount: 0.0,
                 super_state: SuperKeyState::default(),
+                text_modifiers: carried,
             },
         });
         input_rx
@@ -4623,7 +4675,7 @@ mod alt_text_tests {
     fn alt_b_sends_esc_b_while_1036_is_set_and_b_while_it_is_reset() {
         assert_eq!(
             drive(&snapshot_after(b""), ALT, vec![text("b")]),
-            vec![b"\x1bb".to_vec()]
+            vec![alt_typed(b"b")]
         );
         assert_eq!(
             drive(&snapshot_after(b"\x1b[?1036l"), ALT, vec![text("b")]),
@@ -4636,7 +4688,7 @@ mod alt_text_tests {
         let events = vec![key_press(Key::B, ALT), text("b")];
         assert_eq!(
             drive(&snapshot_after(b""), ALT, events),
-            vec![b"\x1bb".to_vec()]
+            vec![alt_typed(b"b")]
         );
     }
 
@@ -4677,7 +4729,7 @@ mod alt_text_tests {
         ];
         assert_eq!(
             drive_with(&map, &snapshot_after(b""), ALT, events),
-            vec![b"\x1bc".to_vec()]
+            vec![alt_typed(b"c")]
         );
     }
 
@@ -4687,7 +4739,7 @@ mod alt_text_tests {
         let events = vec![key_press(Key::C, ALT), text("c")];
         assert_eq!(
             drive_with(&map, &snapshot_after(b""), ALT, events),
-            vec![b"\x1bc".to_vec()]
+            vec![alt_typed(b"c")]
         );
     }
 
@@ -4703,7 +4755,7 @@ mod alt_text_tests {
     fn multi_byte_alt_text_gets_a_single_prefix() {
         assert_eq!(
             drive(&snapshot_after(b""), ALT, vec![text("\u{e9}")]),
-            vec![b"\x1b\xc3\xa9".to_vec()]
+            vec![alt_typed("\u{e9}".as_bytes())]
         );
     }
 
@@ -4740,11 +4792,114 @@ mod alt_text_tests {
             for ch in ["[", "O"] {
                 assert_eq!(
                     drive(&snap, ALT, vec![text(ch)]),
-                    vec![[b"\x1b", ch.as_bytes()].concat()],
+                    vec![alt_typed(ch.as_bytes())],
                     "{select_mode:?} Alt+{ch}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_alt_prefix_follows_the_modifiers_of_the_key_not_the_end_of_the_frame() {
+        // Alt+B, its text, then Alt released within the same frame: the text
+        // was typed with Alt held.
+        let events = vec![key_press(Key::B, ALT), text("b")];
+        assert_eq!(
+            drive_carrying(
+                &BindingMap::default(),
+                &snapshot_after(b""),
+                Modifiers::NONE,
+                Modifiers::NONE,
+                events,
+            ),
+            vec![alt_typed(b"b")]
+        );
+    }
+
+    #[test]
+    fn alt_pressed_after_a_plain_key_does_not_prefix_its_text() {
+        // A plain `b` and its text, then Alt pressed later in the frame: the
+        // text was typed without Alt.
+        let events = vec![key_press(Key::B, Modifiers::NONE), text("b")];
+        assert_eq!(
+            drive_carrying(
+                &BindingMap::default(),
+                &snapshot_after(b""),
+                Modifiers::NONE,
+                ALT,
+                events,
+            ),
+            vec![b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn text_without_a_key_event_uses_the_modifiers_carried_from_the_last_frame() {
+        let snap = snapshot_after(b"");
+        let map = BindingMap::default();
+        assert_eq!(
+            drive_carrying(&map, &snap, ALT, Modifiers::NONE, vec![text("b")]),
+            vec![alt_typed(b"b")]
+        );
+        assert_eq!(
+            drive_carrying(&map, &snap, Modifiers::NONE, ALT, vec![text("b")]),
+            vec![b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn the_frames_final_modifiers_are_carried_to_the_next_call() {
+        let (input_tx, _input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+        let mut input_state = InputState::default();
+        input_state.raw.events.push(text("b"));
+        input_state.modifiers = ALT;
+        let snap = snapshot_after(b"");
+        let result = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap: &snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &BindingMap::default(),
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: InputCarryState {
+                last_reported_mouse_pos: None,
+                previous_key: None,
+                scroll_amount: 0.0,
+                super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
+            },
+        });
+        assert_eq!(result.carry.text_modifiers, ALT);
+
+        // A frame with no events still records the modifiers (Alt released).
+        let idle = InputState::default();
+        let result = write_input_to_terminal(WriteInputParams {
+            input: &idle,
+            snap: &snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &BindingMap::default(),
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: result.carry,
+        });
+        assert_eq!(result.carry.text_modifiers, Modifiers::NONE);
     }
 }
 
@@ -4814,6 +4969,7 @@ mod mouse_report_raw_path_tests {
             previous_key: None,
             scroll_amount: 0.0,
             super_state: SuperKeyState::default(),
+            text_modifiers: Modifiers::NONE,
         }
     }
 
@@ -4971,6 +5127,7 @@ mod logical_row_seam_tests {
                 previous_key: None,
                 scroll_amount: 0.0,
                 super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
             },
         });
         input_rx.try_iter().collect()
