@@ -501,18 +501,6 @@ impl TerminalEmulator {
         Ok((ret, pty_rx))
     }
 
-    /// Return a clone of the PTY write sender.
-    ///
-    /// Used by `main.rs` to pass the real write channel to the GUI before the
-    /// emulator is moved into the PTY consumer thread.  The GUI uses it only
-    /// to inject layout startup commands as `PtyWrite::Write`.  Replies to
-    /// terminal queries do not use it: the GUI sends them through
-    /// `InputEvent::Reply` (Task 130), so the PTY thread frames them.
-    #[must_use]
-    pub fn clone_write_tx(&self) -> crossbeam_channel::Sender<PtyWrite> {
-        self.write_tx.clone()
-    }
-
     /// Return the child-exit receiver from the PTY I/O layer.
     ///
     /// Returns `Some(Receiver<()>)` in normal mode (where a real PTY child
@@ -1693,7 +1681,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    // ── clone_write_tx / write_raw_bytes ──────────────────────────────────────
+    // ── write_raw_bytes ──────────────────────────────────────
 
     #[test]
     fn write_raw_bytes_succeeds() {
@@ -1707,20 +1695,6 @@ mod tests {
             Ok(PtyWrite::Write(bytes)) => {
                 assert_eq!(bytes, b"hello pty");
             }
-            other => panic!("expected PtyWrite::Write, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn clone_write_tx_can_send() {
-        let (emu, rx) = TerminalEmulator::new_headless(None);
-        while rx.try_recv().is_ok() {}
-
-        let tx = emu.clone_write_tx();
-        tx.send(PtyWrite::Write(b"via clone".to_vec())).unwrap();
-
-        match rx.try_recv() {
-            Ok(PtyWrite::Write(bytes)) => assert_eq!(bytes, b"via clone"),
             other => panic!("expected PtyWrite::Write, got: {other:?}"),
         }
     }

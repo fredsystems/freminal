@@ -7,7 +7,6 @@
 //!
 //! Covered:
 //! - `write_raw_bytes` — bytes land on the PTY write channel as `PtyWrite::Write`
-//! - `clone_write_tx` — cloned sender delivers messages to the same receiver
 //! - `set_requested_scroll_offset` / `reset_scroll_offset` — offsets are reflected in
 //!   subsequent snapshots, and are clamped to `max_scroll_offset`
 //! - `build_snapshot` — `scroll_offset` / `max_scroll_offset` semantics under
@@ -121,30 +120,6 @@ fn test_write_raw_bytes_binary() {
         unwrap_write(msg),
         payload.to_vec(),
         "write_raw_bytes must forward binary escape bytes unmodified"
-    );
-}
-
-// ─── clone_write_tx ──────────────────────────────────────────────────────────
-
-/// A sender obtained via `clone_write_tx` delivers messages to the same
-/// receiver as the emulator's internal sender.
-#[test]
-fn test_clone_write_tx_works() {
-    let (emu, rx) = make_emulator();
-    drain(&rx);
-
-    let cloned_tx = emu.clone_write_tx();
-    cloned_tx
-        .send(PtyWrite::Write(b"from_clone".to_vec()))
-        .unwrap();
-
-    let msg = rx
-        .try_recv()
-        .expect("cloned sender must deliver to the shared receiver");
-    assert_eq!(
-        unwrap_write(msg),
-        b"from_clone".to_vec(),
-        "message sent through cloned_tx must arrive on the emulator's write receiver"
     );
 }
 

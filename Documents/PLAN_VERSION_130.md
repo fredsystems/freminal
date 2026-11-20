@@ -7955,6 +7955,13 @@ Stale stub text was corrected at the same time:
   `OPT_REGIS_GRAPHICS` compiled out, `Pi=3` reaches xterm's `default:` arm. The orchestrator
   changed it to 1. `CSI > Pm t` / `CSI > Pm T` are routed to a debug-logged ignore. The
   dispatch matrix gains three routed keys (52). COVERAGE/GAPS are 147.17.
+- **147.10 (done).** `layout_ops` sends each startup command as one
+  `InputEvent::Key(command + "\n")` on `Pane::input_tx` (`send_startup_command`), so it is
+  ordered with other input and recorded as `PtyInput` (redacted while echo is off, like typed
+  input). `layout_ops` was the only production user of `Pane::pty_write_tx`, so the field,
+  the `TabChannels` field and the `pty.rs` clone are removed, with their test and bench
+  constructors; the orchestrator also removed `TerminalEmulator::clone_write_tx`, which then
+  had no caller.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

@@ -28,7 +28,6 @@ use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::geometry::{Point, Rect, point};
-use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, SearchCorpus, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
@@ -147,11 +146,6 @@ pub struct Pane {
     /// dropping the pane drops the last strong sender and the consumer sees
     /// the channel disconnect.
     pub reply_tx: Arc<Sender<InputEvent>>,
-
-    /// Sender for raw bytes to this pane's PTY, for layout startup-command
-    /// injection only. GUI-originated replies (window reports, OSC 52, OSC 99)
-    /// go through `input_tx` as `InputEvent::Reply`.
-    pub pty_write_tx: Sender<PtyWrite>,
 
     /// Receiver for window manipulation commands from this pane's PTY thread.
     pub window_cmd_rx: Receiver<WindowCommand>,
@@ -336,7 +330,6 @@ impl Pane {
             arc_swap: channels.arc_swap,
             reply_tx: Arc::new(channels.input_tx.clone()),
             input_tx: channels.input_tx,
-            pty_write_tx: channels.pty_write_tx,
             window_cmd_rx: channels.window_cmd_rx,
             clipboard_rx: channels.clipboard_rx,
             search_buffer_rx: channels.search_buffer_rx,
@@ -1756,7 +1749,6 @@ mod tests {
     fn dummy_pane(id: PaneId, title: &str) -> Pane {
         let arc_swap = Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
         let (input_tx, _input_rx) = crossbeam_channel::unbounded();
-        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
         let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
@@ -1768,7 +1760,6 @@ mod tests {
             arc_swap,
             reply_tx: Arc::new(input_tx.clone()),
             input_tx,
-            pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
             search_buffer_rx,
@@ -1841,7 +1832,6 @@ mod tests {
         use std::time::Duration;
 
         let (input_tx, input_rx) = crossbeam_channel::unbounded::<InputEvent>();
-        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
         let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
@@ -1851,7 +1841,6 @@ mod tests {
         let channels = crate::gui::pty::TabChannels {
             arc_swap: Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty())),
             input_tx,
-            pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
             search_buffer_rx,

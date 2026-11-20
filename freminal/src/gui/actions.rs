@@ -1037,7 +1037,6 @@ mod tests {
     fn tab_with_input_rx(id: TabId, pane_id: PaneId) -> (Tab, Receiver<InputEvent>) {
         let arc_swap = Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
         let (input_tx, input_rx) = crossbeam_channel::unbounded();
-        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
         let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
@@ -1049,7 +1048,6 @@ mod tests {
             arc_swap,
             reply_tx: Arc::new(input_tx.clone()),
             input_tx,
-            pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
             search_buffer_rx,

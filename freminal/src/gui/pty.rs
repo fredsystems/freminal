@@ -21,7 +21,7 @@ use freminal_common::buffer_states::command_block::CommandBlock;
 use freminal_common::buffer_states::modes::theme::Theming;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::ShellIntegrationConfig;
-use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
+use freminal_common::pty_write::FreminalTerminalSize;
 use freminal_common::send_or_log;
 use freminal_common::term_name::TermName;
 use freminal_terminal_emulator::interface::TerminalEmulator;
@@ -339,11 +339,6 @@ pub struct TabChannels {
     /// dropped.  The replies the GUI sends on it are bounded at the source
     /// instead, by the per-pane `window_cmd_budget` report cap (148.C9).
     pub input_tx: Sender<InputEvent>,
-
-    /// Sender for raw bytes to the PTY, for layout startup-command injection
-    /// only. GUI-originated replies go through `input_tx` as
-    /// `InputEvent::Reply`.
-    pub pty_write_tx: Sender<PtyWrite>,
 
     /// Receiver for window commands from the PTY thread.
     pub window_cmd_rx: Receiver<WindowCommand>,
@@ -811,7 +806,6 @@ pub fn spawn_pty_tab(
         Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
     let arc_swap_gui = Arc::clone(&arc_swap);
 
-    let pty_write_tx = terminal.clone_write_tx();
     let child_exit_rx = terminal.child_exit_rx();
     let echo_off = terminal
         .echo_off_atomic()
@@ -894,7 +888,6 @@ pub fn spawn_pty_tab(
     Ok(TabChannels {
         arc_swap: arc_swap_gui,
         input_tx,
-        pty_write_tx,
         window_cmd_rx,
         clipboard_rx,
         search_buffer_rx,
@@ -1556,6 +1549,7 @@ mod tests {
         Osc99ButtonSupport, Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport,
         Osc99SoundNames, Osc99Support, Osc99UrgencySupport,
     };
+    use freminal_common::pty_write::PtyWrite;
     use freminal_terminal_emulator::io::{GuiReply, WindowStateReport};
 
     /// Helper: build a fresh `CommandBlock` with the given fid.
