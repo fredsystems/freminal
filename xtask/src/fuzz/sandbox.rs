@@ -261,10 +261,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_symlink_into_tmp_is_rejected_under_bwrap() {
-        // The link lives next to this crate (not under /tmp) but resolves to
-        // a directory under /tmp, which the sandbox would mask.
+        // The link must itself live outside /tmp and /dev/shm while resolving
+        // to a directory under /tmp, which the sandbox would mask. The crate
+        // directory is the first choice, but a checkout under /tmp would put
+        // the link there too, so fall back to /var/tmp.
         let target = tempfile::tempdir_in("/tmp").unwrap();
-        let links = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let links = [env!("CARGO_MANIFEST_DIR"), "/var/tmp"]
+            .into_iter()
+            .filter(|base| !hidden_by_private_tmpfs(Path::new(base)))
+            .find_map(|base| tempfile::tempdir_in(base).ok())
+            .expect("no writable directory outside /tmp and /dev/shm for the link");
         let link = links.path().join("seeds");
         std::os::unix::fs::symlink(target.path(), &link).unwrap();
         assert!(!hidden_by_private_tmpfs(&link));

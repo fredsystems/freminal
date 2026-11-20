@@ -8056,6 +8056,9 @@ Stale stub text was corrected at the same time:
   home-manager module and its `notificationsSection` binding; a `lib.evalModules` evaluation
   setting it produced `command_finished_template = ...` under `[notifications]` in the
   generated `config.toml`. nixfmt, statix and deadnix pass.
+- **147.30 (done).** The link directory is the first of `CARGO_MANIFEST_DIR` and `/var/tmp`
+  that is not itself under `/tmp` or `/dev/shm`. From a `git archive` copy under
+  `/tmp/opencode` the test failed before the fix and the eight sandbox tests pass after it.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
