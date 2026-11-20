@@ -70,6 +70,10 @@ pub mod term_name;
 pub mod terminal_size;
 /// Embedded terminfo database blob.
 pub mod terminfo;
+/// The terminfo source (`res/freminal.ti`) and its parser, for table-of-truth
+/// tests in downstream crates. Absent from production builds.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod terminfo_source;
 /// Embedded color theme palettes.
 pub mod themes;
 /// Persisted ephemeral UI window geometry (e.g. Settings window).

@@ -15,6 +15,7 @@ use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm, lnm::Lnm,
     s8c1t::S8c1t,
 };
+use freminal_common::terminfo_source::{FREMINAL_TI, parse_terminfo_entry};
 
 use super::TerminalHandler;
 use crate::input::{KeyEventMeta, KeyModifiers, TerminalInput, TerminalInputPayload};
@@ -22,7 +23,6 @@ use crate::input::{KeyEventMeta, KeyModifiers, TerminalInput, TerminalInputPaylo
 /// The `TERM` handed to `lookup_termcap` where the test is not about `TN`.
 const TEST_TERM: &str = "xterm-freminal";
 
-const TERMINFO_SOURCE: &str = include_str!("../../../../res/freminal.ti");
 const DCS_SOURCE: &str = include_str!("../dcs.rs");
 
 /// The terminfo capability a termcap alias names.
@@ -88,109 +88,6 @@ fn is_key_capability(name: &str) -> bool {
     name.starts_with('k')
 }
 
-/// Decode the escapes of one terminfo string value: `\E`, `\\`, `\,`,
-/// `\:`, `\^`, `\NNN` octal and `^X` control notation.
-fn decode_terminfo_value(raw: &str) -> String {
-    let mut out = String::new();
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                let Some(escaped) = chars.next() else {
-                    panic!("dangling backslash in {raw:?}");
-                };
-                match escaped {
-                    'E' | 'e' => out.push('\x1b'),
-                    'n' | 'l' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    'b' => out.push('\u{8}'),
-                    'f' => out.push('\u{c}'),
-                    's' => out.push(' '),
-                    '0'..='7' => {
-                        let mut value = escaped.to_digit(8).unwrap_or_default();
-                        for _ in 0..2 {
-                            let Some(digit) = chars.peek().and_then(|d| d.to_digit(8)) else {
-                                break;
-                            };
-                            value = value * 8 + digit;
-                            chars.next();
-                        }
-                        let Ok(byte) = u8::try_from(value) else {
-                            panic!("octal escape out of range in {raw:?}");
-                        };
-                        out.push(char::from(byte));
-                    }
-                    other => out.push(other),
-                }
-            }
-            '^' => {
-                let Some(control) = chars.next() else {
-                    panic!("dangling caret in {raw:?}");
-                };
-                let Ok(byte) = u8::try_from(control) else {
-                    panic!("non-ASCII control notation in {raw:?}");
-                };
-                out.push(char::from(if byte == b'?' { 0x7f } else { byte & 0x1f }));
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// Parse the entry named `term` in a terminfo source file into its name
-/// field and a name to value map. Booleans map to `""`, numbers to their
-/// digits and strings to their decoded value.
-fn parse_terminfo_entry(source: &str, term: &str) -> (String, BTreeMap<String, String>) {
-    let mut lines = source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-        .skip_while(|line| !line.starts_with(&format!("{term}|")));
-    let Some(header) = lines.next() else {
-        panic!("entry {term} not found");
-    };
-    let names = header.trim_end().trim_end_matches(',').to_string();
-    let body = lines.collect::<Vec<_>>().join("\n");
-
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut chars = body.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            ',' => tokens.push(std::mem::take(&mut token)),
-            '\\' => {
-                token.push(c);
-                if let Some(escaped) = chars.next() {
-                    token.push(escaped);
-                }
-            }
-            other => token.push(other),
-        }
-    }
-    assert!(token.trim().is_empty(), "text after the last comma");
-
-    let mut caps = BTreeMap::new();
-    for token in tokens {
-        let token = token.trim_start();
-        let name_len = token
-            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .unwrap_or(token.len());
-        let (name, rest) = token.split_at(name_len);
-        let value = match rest.chars().next() {
-            None => String::new(),
-            Some('#') => rest[1..].to_string(),
-            Some('=') => decode_terminfo_value(&rest[1..]),
-            Some(_) => panic!("unsupported capability syntax: {token:?}"),
-        };
-        assert!(
-            caps.insert(name.to_string(), value).is_none(),
-            "capability {name} is declared twice"
-        );
-    }
-    (names, caps)
-}
-
 /// The names `lookup_termcap` answers, read from its match arms so that
 /// a newly added arm cannot escape the table-of-truth test.
 ///
@@ -243,36 +140,12 @@ fn xtgettcap_answered_names() -> Vec<&'static str> {
 }
 
 fn freminal_entry() -> BTreeMap<String, String> {
-    parse_terminfo_entry(TERMINFO_SOURCE, "xterm-freminal").1
-}
-
-#[test]
-fn terminfo_parser_decodes_escapes_and_continuations() {
-    let source = "# a comment, with a comma\nfoo|f|A phrase,\n\tam, cols#80,\n\
-                  \tbel=^G, kbs=\\177, del=^?, esc=\\E[0 q,\n\
-                  \tcomma=a\\,b\\:c\\\\d, nul=\\007\\0338,\n# trailing comment\n\tlast=x,\n";
-    let (names, caps) = parse_terminfo_entry(source, "foo");
-    assert_eq!(names, "foo|f|A phrase");
-    let expected = [
-        ("am", ""),
-        ("cols", "80"),
-        ("bel", "\x07"),
-        ("kbs", "\x7f"),
-        ("del", "\x7f"),
-        ("esc", "\x1b[0 q"),
-        ("comma", "a,b:c\\d"),
-        ("nul", "\x07\x1b8"),
-        ("last", "x"),
-    ];
-    assert_eq!(caps.len(), expected.len(), "{caps:?}");
-    for (name, value) in expected {
-        assert_eq!(caps.get(name).map(String::as_str), Some(value), "{name}");
-    }
+    parse_terminfo_entry(FREMINAL_TI, "xterm-freminal").1
 }
 
 #[test]
 fn terminfo_header_names_are_a_phrase() {
-    let (names, _) = parse_terminfo_entry(TERMINFO_SOURCE, "xterm-freminal");
+    let (names, _) = parse_terminfo_entry(FREMINAL_TI, "xterm-freminal");
     assert_eq!(
         names.split('|').collect::<Vec<_>>(),
         ["xterm-freminal", "freminal", "Freminal terminal emulator"]
@@ -371,12 +244,7 @@ fn terminfo_entry_omits_unimplemented_and_unverified_capabilities() {
 /// Key capabilities the entry declares that the input encoder cannot send, so
 /// the table-of-truth check leaves them unasserted. Each needs a reason; a
 /// name that stops being declared, or that becomes checkable, fails the test.
-const DECLARED_NOT_SENT: [(&str, &str); 3] = [
-    (
-        "kent",
-        "keypad Enter: the legacy `KeyPad` path sends a different sequence and goes away \
-         with Task 147 (SS3 M), so the declared `\\EOM` is not asserted against it",
-    ),
+const DECLARED_NOT_SENT: [(&str, &str); 2] = [
     (
         "kcbt",
         "Shift+Tab: the encoder has no back-tab input (`TerminalInput::Tab` carries no modifiers)",
@@ -387,6 +255,21 @@ const DECLARED_NOT_SENT: [(&str, &str); 3] = [
          keyboard encoder",
     ),
 ];
+
+/// The GUI source file holding the tests named in [`CHECKED_IN_GUI`].
+const GUI_INPUT_SOURCE: &str = include_str!("../../../../freminal/src/gui/terminal/input.rs");
+
+/// Key capabilities that are sent, but by an encoder on the GUI side that this
+/// crate cannot reach (it must not depend on the `freminal` binary crate): the
+/// capability, why, and the GUI test that compares the encoder's bytes with the
+/// value parsed from `res/freminal.ti`. The test checks that the named test
+/// still exists.
+const CHECKED_IN_GUI: [(&str, &str, &str); 1] = [(
+    "kent",
+    "keypad Enter in application keypad mode (SS3 M) is encoded by the GUI's raw-key keypad \
+     path, not by `TerminalInput::to_payload`",
+    "keypad_enter_matches_terminfo_kent",
+)];
 
 /// The bytes the input encoder sends for `input`.
 fn encoded(input: &TerminalInput, decckm: Decckm) -> Vec<u8> {
@@ -528,7 +411,7 @@ fn encoder_key_capabilities() -> KeyCapabilities {
 }
 
 #[test]
-fn every_key_capability_in_the_entry_matches_the_input_encoder_or_is_declared_not_sent() {
+fn every_key_capability_in_the_entry_is_checked_here_declared_not_sent_or_checked_in_gui() {
     let entry = freminal_entry();
     let expected = encoder_key_capabilities();
 
@@ -558,14 +441,41 @@ fn every_key_capability_in_the_entry_matches_the_input_encoder_or_is_declared_no
         );
     }
 
-    for name in entry.keys().filter(|name| is_key_capability(name)) {
+    for (name, reason, gui_test) in CHECKED_IN_GUI {
         assert!(
-            expected.contains_key(name.as_str())
-                || DECLARED_NOT_SENT
-                    .iter()
-                    .any(|(declared, _)| declared == name),
-            "{name} is a key capability in res/freminal.ti that is neither checked against the \
-             encoder nor listed in DECLARED_NOT_SENT"
+            entry.contains_key(name),
+            "{name} is listed as checked-in-GUI but the entry does not declare it ({reason})"
+        );
+        assert!(
+            !expected.contains_key(name),
+            "{name} is checked against the encoder here, so it is not checked-in-GUI ({reason})"
+        );
+        assert!(
+            !DECLARED_NOT_SENT
+                .iter()
+                .any(|(declared, _)| *declared == name),
+            "{name} is in both DECLARED_NOT_SENT and CHECKED_IN_GUI ({reason})"
+        );
+        assert!(
+            GUI_INPUT_SOURCE.contains(&format!("fn {gui_test}()")),
+            "{name} is checked in the GUI by `{gui_test}`, which no longer exists"
+        );
+    }
+
+    for name in entry.keys().filter(|name| is_key_capability(name)) {
+        let sets = [
+            expected.contains_key(name.as_str()),
+            DECLARED_NOT_SENT
+                .iter()
+                .any(|(declared, _)| declared == name),
+            CHECKED_IN_GUI.iter().any(|(checked, _, _)| checked == name),
+        ];
+        assert_eq!(
+            sets.iter().filter(|member| **member).count(),
+            1,
+            "{name} is a key capability in res/freminal.ti that must be in exactly one of: \
+             checked against the encoder here, DECLARED_NOT_SENT, CHECKED_IN_GUI \
+             (checked here, declared-not-sent, checked in GUI = {sets:?})"
         );
     }
 }

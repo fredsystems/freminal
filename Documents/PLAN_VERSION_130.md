@@ -7819,6 +7819,15 @@ Stale stub text was corrected at the same time:
   keypad Enter bytes change.
 - **Scheduling:** when Task 147 rebases onto `main` after #588 merges (if Task 147 merges
   first instead, Task 151 does it on its rebase). Before the Task 147 adversarial review.
+- **Status: done (2026-11-20).** The keypad encoder is GUI-side (147.5), which the emulator
+  crate cannot reach, so the terminfo parser moved to `freminal_common::terminfo_source`
+  behind a test-only `test-utils` feature (the `freminal-notify` / `freminal-windowing`
+  pattern; absent from normal and release builds). The truth test gains `CHECKED_IN_GUI`
+  (only `kent`) and checks every `k*` capability is in exactly one of three sets.
+  `keypad_enter_matches_terminfo_kent` compares the real keypad path's bytes with the parsed
+  `kent` value (a mutation to `SS3 N` fails it). Rebase note: 151's truth test called
+  `to_payload` with the pre-147.4/147.5 argument list; the orchestrator folded that fix into
+  147.4 and 147.5 so every commit builds (each checked with clippy).
 
 #### 147.C4 — Licence check of the shell-integration scripts' third-party-derived parts
 

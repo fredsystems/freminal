@@ -4034,6 +4034,7 @@ mod application_keypad_tests {
     //! form on the live raw-key path, honouring S8C1T.
 
     use super::*;
+    use freminal_common::terminfo_source::{FREMINAL_TI, parse_terminfo_entry};
     use freminal_terminal_emulator::interface::TerminalEmulator;
     use freminal_windowing::{RawKeyEvent, RawKeyMods};
     use winit::keyboard::KeyCode;
@@ -4130,6 +4131,24 @@ mod application_keypad_tests {
 
         emu.handle_incoming_data(b"\x1b>");
         assert_eq!(press(&emu.build_snapshot(), KeyCode::Numpad5), b"5");
+    }
+
+    /// The table-of-truth check for terminfo's `kent`: keypad Enter in
+    /// application keypad mode (non-kitty, 7-bit) must send exactly the value
+    /// `res/freminal.ti` declares. Compared against the parsed terminfo
+    /// source, not a literal, so a change to either side fails here. The
+    /// emulator crate's `terminfo_truth_tests` names this test in
+    /// `CHECKED_IN_GUI`.
+    #[test]
+    fn keypad_enter_matches_terminfo_kent() {
+        let (_, entry) = parse_terminfo_entry(FREMINAL_TI, "xterm-freminal");
+        let kent = entry
+            .get("kent")
+            .expect("res/freminal.ti declares kent for xterm-freminal");
+
+        let snap = snapshot_after(b"\x1b=");
+        assert_eq!(snap.kitty_keyboard_flags, 0, "legacy (non-kitty) encoding");
+        assert_eq!(press(&snap, KeyCode::NumpadEnter), kent.as_bytes());
     }
 
     #[test]

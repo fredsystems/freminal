@@ -45,6 +45,9 @@ winapi = { workspace = true, features = ["handleapi", "memoryapi", "winbase", "w
 [dev-dependencies]
 anyhow.workspace = true
 criterion.workspace = true
+# `test-utils` exposes `terminfo_source` (the `res/freminal.ti` text and its
+# parser) for the table-of-truth tests; production builds never enable it.
+freminal-common = { path = "../freminal-common", features = ["test-utils"] }
 proptest.workspace = true
 test-log.workspace = true
 # assert_cmd.workspace = true
