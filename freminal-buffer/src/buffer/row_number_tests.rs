@@ -14,7 +14,7 @@
 use freminal_common::buffer_states::{row_number::RowNumber, tchar::TChar};
 
 use crate::{
-    buffer::{Buffer, PlaceImageResult},
+    buffer::{Buffer, ImagePlacementMode, PlaceImageResult},
     cell::Cell,
     image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
 };
@@ -79,6 +79,7 @@ fn place(buf: &mut Buffer, cols: usize, rows: usize) -> PlaceImageResult {
         None,
         1,
         None,
+        ImagePlacementMode::Inline,
     )
 }
 

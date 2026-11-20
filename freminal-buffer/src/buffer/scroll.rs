@@ -778,6 +778,7 @@ mod image_count_tests {
     use std::sync::Arc;
 
     use crate::{
+        buffer::ImagePlacementMode,
         image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
         row::Row,
     };
@@ -803,7 +804,18 @@ mod image_count_tests {
             root_gap_ms: 0,
             animation: AnimationControl::default(),
         };
-        let _ = buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+        let _ = buf.place_image(
+            image,
+            0,
+            ImageProtocol::Kitty,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(buf.image_cell_count, 1);
         buf
     }

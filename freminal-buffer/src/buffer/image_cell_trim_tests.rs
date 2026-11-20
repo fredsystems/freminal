@@ -18,7 +18,7 @@ use std::sync::Arc;
 use freminal_common::buffer_states::{format_tag::FormatTag, modes::declrmm::Declrmm};
 
 use crate::{
-    buffer::Buffer,
+    buffer::{Buffer, ImagePlacementMode},
     image_store::{
         AnimationControl, ImagePlacement, ImageProtocol, ImageSizeMode, InlineImage, next_image_id,
     },
@@ -261,7 +261,18 @@ fn make_image(cols: usize, rows: usize) -> InlineImage {
 fn place(buf: &mut Buffer, protocol: ImageProtocol, cols: usize, rows: usize) -> u64 {
     let image = make_image(cols, rows);
     let id = image.id;
-    let _ = buf.place_image(image, 0, protocol, None, None, 0, None, 1, None);
+    let _ = buf.place_image(
+        image,
+        0,
+        protocol,
+        None,
+        None,
+        0,
+        None,
+        1,
+        None,
+        ImagePlacementMode::Inline,
+    );
     id
 }
 

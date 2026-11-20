@@ -23,7 +23,7 @@ use freminal_common::{
 };
 
 use crate::{
-    buffer::{Buffer, PlaceImageResult},
+    buffer::{Buffer, ImagePlacementMode, PlaceImageResult},
     cell::Cell,
     image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
     row::Row,
@@ -72,7 +72,18 @@ fn place_image_at(buf: &mut Buffer, col: usize, row: usize, cols: usize, rows: u
     };
     let id = image.id;
     buf.set_cursor_pos(Some(col), Some(row));
-    let result = buf.place_image(image, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+    let result = buf.place_image(
+        image,
+        0,
+        ImageProtocol::Sixel,
+        None,
+        None,
+        0,
+        None,
+        1,
+        None,
+        ImagePlacementMode::Inline,
+    );
     assert!(matches!(result, PlaceImageResult { .. }));
     id
 }

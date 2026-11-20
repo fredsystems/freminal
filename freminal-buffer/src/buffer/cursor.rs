@@ -206,7 +206,8 @@ impl Buffer {
     /// screen-relative translation.
     ///
     /// The position is clamped to the current buffer dimensions.  Used by
-    /// DECSDM to restore the cursor after `place_image` moves it.
+    /// kitty `C=1` and iTerm2 `doNotMoveCursor` to restore the cursor after
+    /// `place_image` moves it.
     pub fn set_cursor_pos_raw(&mut self, pos: CursorPos) {
         self.cursor.pos.x = if self.width > 0 {
             pos.x.min(self.width - 1)

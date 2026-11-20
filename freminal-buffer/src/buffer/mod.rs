@@ -28,7 +28,7 @@ pub use command_block_log::CommandBlocksGeneration;
 use compression::BlockSlot;
 pub(in crate::buffer) use flatten::MergeCache;
 pub use flatten::{ArcFlattenResult, AutoUrlRange, RowCacheEntry};
-pub use images::PlaceImageResult;
+pub use images::{ImagePlacementMode, PlaceImageResult};
 pub use reflow_remap::ReflowRemap;
 use row_store::RowStore;
 
@@ -61,6 +61,8 @@ mod image_cell_trim_tests;
 mod image_clip_tests;
 #[cfg(test)]
 mod image_delete_tests;
+#[cfg(test)]
+mod image_fixed_origin_tests;
 mod images;
 mod lifecycle;
 mod lines;
@@ -4133,7 +4135,18 @@ mod image_tests {
         let img_id = img.id;
 
         // Cursor starts at (0,0).
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Rows 0 and 1 should have image cells at columns 0, 1, 2.
         for img_row in 0..2_usize {
@@ -4173,12 +4186,34 @@ mod image_tests {
         // Placement instance 1 at row 0, z=0.
         buf.cursor.pos.x = 0;
         buf.cursor.pos.y = 0;
-        buf.place_image(img_a, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+        buf.place_image(
+            img_a,
+            0,
+            ImageProtocol::Kitty,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Placement instance 2 at row 2, z=5.
         buf.cursor.pos.x = 0;
         buf.cursor.pos.y = 2;
-        buf.place_image(img_b, 0, ImageProtocol::Kitty, None, None, 5, None, 2, None);
+        buf.place_image(
+            img_b,
+            0,
+            ImageProtocol::Kitty,
+            None,
+            None,
+            5,
+            None,
+            2,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Both placements exist: 3 cells each.
         assert_eq!(count_image_cells(&buf, img_id), 6);
@@ -4211,12 +4246,34 @@ mod image_tests {
         let mut buf = Buffer::new(20, 10);
         let sixel = make_image(3, 1);
         let sixel_id = sixel.id;
-        buf.place_image(sixel, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            sixel,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         buf.cursor.pos.x = 0;
         buf.cursor.pos.y = 3;
         let kitty = make_image(3, 1);
         let kitty_id = kitty.id;
-        buf.place_image(kitty, 0, ImageProtocol::Kitty, None, None, 0, None, 2, None);
+        buf.place_image(
+            kitty,
+            0,
+            ImageProtocol::Kitty,
+            None,
+            None,
+            0,
+            None,
+            2,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert!(buf.image_store().contains(sixel_id));
         assert!(buf.image_store().contains(kitty_id));
 
@@ -4247,7 +4304,18 @@ mod image_tests {
         let mut buf = Buffer::new(20, 10);
         let img = make_image(3, 1);
         let id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 7, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            7,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         assert_eq!(buf.clear_image_placements_at_cell_with_z(0, 0, 0), None);
         assert_eq!(count_image_cells(&buf, id), 3);
@@ -4261,12 +4329,34 @@ mod image_tests {
         let mut buf = Buffer::new(20, 10);
         let sixel = make_image(3, 1);
         let sixel_id = sixel.id;
-        buf.place_image(sixel, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            sixel,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         buf.cursor.pos.x = 0;
         buf.cursor.pos.y = 3;
         let kitty = make_image(3, 1);
         let kitty_id = kitty.id;
-        buf.place_image(kitty, 0, ImageProtocol::Kitty, None, None, 0, None, 2, None);
+        buf.place_image(
+            kitty,
+            0,
+            ImageProtocol::Kitty,
+            None,
+            None,
+            0,
+            None,
+            2,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         let mut ids = buf.clear_image_placements_visible(0);
         ids.sort_unstable();
@@ -4292,7 +4382,18 @@ mod image_tests {
         buf.cursor.pos.x = 0;
 
         let img = make_image(3, 2);
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Cursor should be at row 2 (below the 2-row image), column 0.
         assert_eq!(buf.cursor.pos.y, 2);
@@ -4321,7 +4422,18 @@ mod image_tests {
         // (tail) row.
         let img = make_image(3, 2);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Kitty,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         let image_last_row = 1; // image occupies rows 0 and 1.
         assert!(
@@ -4375,7 +4487,18 @@ mod image_tests {
 
         let img = make_image(4, 4);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         let image_last_row = 2 + 4 - 1; // rows 2..=5.
         assert!(
@@ -4403,7 +4526,18 @@ mod image_tests {
         let img = make_image(10, 1);
         let img_id = img.id;
 
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Only columns 0..5 should have image cells.
         let row = &buf.rows[0];
@@ -4426,7 +4560,18 @@ mod image_tests {
         let img = make_image(3, 1);
         let img_id = img.id;
 
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Image cells should be at columns 5, 6, 7.
         let row = &buf.rows[0];
@@ -4455,7 +4600,18 @@ mod image_tests {
         let img = make_image(3, 2);
         let img_id = img.id;
 
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // The image should exist in the store.
         assert!(buf.image_store().contains(img_id));
@@ -4487,7 +4643,18 @@ mod image_tests {
         // Place an image at cursor (0,0).
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // The image should be in the store.
         assert!(buf.image_store().contains(img_id));
@@ -4518,7 +4685,18 @@ mod image_tests {
 
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Kitty,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert!(buf.image_store().contains(img_id));
 
         // Push enough lines to drain the image's row off the top.
@@ -4540,7 +4718,18 @@ mod image_tests {
         buf.handle_lf();
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Push a few lines, but not enough to evict the image row.
         for _ in 0..3 {
@@ -4563,7 +4752,18 @@ mod image_tests {
         // Place an image in the primary buffer.
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert!(buf.image_store().contains(img_id));
 
         // Enter alternate screen — primary images should be saved.
@@ -4588,7 +4788,18 @@ mod image_tests {
         // Place image and remember the cell content.
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Verify cell has image before alternate screen.
         assert!(buf.rows[0].cells()[0].has_image());
@@ -4614,7 +4825,18 @@ mod image_tests {
 
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert!(buf.image_store().contains(img_id));
 
         buf.full_reset();
@@ -4632,11 +4854,33 @@ mod image_tests {
 
         let img1 = make_image(2, 1);
         let id1 = img1.id;
-        buf.place_image(img1, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img1,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         let img2 = make_image(3, 1);
         let id2 = img2.id;
-        buf.place_image(img2, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img2,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         assert!(buf.image_store().contains(id1));
         assert!(buf.image_store().contains(id2));
@@ -4651,7 +4895,18 @@ mod image_tests {
         // Image 1 on row 0.
         let img1 = make_image(2, 1);
         let id1 = img1.id;
-        buf.place_image(img1, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img1,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Move cursor down and place image 2.
         for _ in 0..4 {
@@ -4659,7 +4914,18 @@ mod image_tests {
         }
         let img2 = make_image(2, 1);
         let id2 = img2.id;
-        buf.place_image(img2, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img2,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Push many more lines to evict the first image's row.
         for _ in 0..10 {
@@ -4819,6 +5085,7 @@ mod image_tests {
             None,
             1,
             None,
+            ImagePlacementMode::Inline,
         );
 
         // Cursor is now below the image (row 5). Move back to (0,0).
@@ -4838,6 +5105,7 @@ mod image_tests {
             None,
             1,
             None,
+            ImagePlacementMode::Inline,
         );
 
         // Rows 0-1 should have the new image's cells.
@@ -4886,7 +5154,18 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Verify image cells are present (5 cols × 3 rows = 15).
         assert_eq!(count_image_cells(&buf, img_id), 15);
@@ -4911,7 +5190,18 @@ mod image_tests {
         // Place image A at columns 0-2, rows 0-1.
         let img_a = make_image(3, 2);
         let id_a = img_a.id;
-        buf.place_image(img_a, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img_a,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(count_image_cells(&buf, id_a), 6);
 
         // place_image moved cursor below. Move cursor to row 0, col 10
@@ -4920,7 +5210,18 @@ mod image_tests {
         buf.cursor.pos.x = 10;
         let img_b = make_image(3, 2);
         let id_b = img_b.id;
-        buf.place_image(img_b, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img_b,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(count_image_cells(&buf, id_b), 6);
 
         // Write text over image A's first cell.
@@ -4952,7 +5253,18 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Cursor at (0,0); erase from cursor to end of line.
@@ -4976,7 +5288,18 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Move cursor to the end of the image's first row.
@@ -4998,7 +5321,18 @@ mod image_tests {
 
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         buf.cursor.pos.y = 0;
@@ -5019,7 +5353,18 @@ mod image_tests {
         // Place image spanning rows 0-2, cols 0-4.
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Erase from row 1 onward — image has cells on row 1, so the
@@ -5042,7 +5387,18 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Move cursor to col 2 of row 0 and erase 1 char — should trigger
@@ -5065,7 +5421,18 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Erase the entire first line — should clear all image cells.
@@ -5131,7 +5498,18 @@ mod image_tests {
         // Place a 10-col × 3-row image at (0,0).
         let img = make_image(10, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         // Sanity: before reflow, the image occupies a contiguous rectangle —
         // each image row lives on exactly one physical row with col_in_image
@@ -5182,7 +5560,18 @@ mod image_tests {
         // Place an 8-col × 2-row image at (0,0) — fits within the original width.
         let img = make_image(8, 2);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         buf.reflow_to_width(20);
 
@@ -5220,7 +5609,18 @@ mod image_tests {
         buf.cursor.pos.x = 0;
         let img = make_image(5, 2);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
 
         let rows_before = buf.rows.len();
 
@@ -5289,7 +5689,18 @@ mod image_tests {
 
         // Place a 10-col × 3-row image (30 cells total).
         let img = make_image(10, 3);
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.place_image(
+            img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         assert_eq!(buf.image_cell_count, 30);
 
         // Narrow to width 8 — each of the 3 image rows is clipped from 10 to
@@ -9600,7 +10011,18 @@ mod coverage_gap_tests {
             animation: crate::image_store::AnimationControl::default(),
         };
         // Place an image that spans 3 cols starting at col 4 → only col 4 fits
-        buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+        buf.place_image(
+            image,
+            0,
+            ImageProtocol::Kitty,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+            ImagePlacementMode::Inline,
+        );
         // Should have placed at most 1 cell (col 4; cols 5+ out of bounds)
         assert!(buf.image_cell_count <= 1);
     }

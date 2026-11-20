@@ -8027,6 +8027,18 @@ Stale stub text was corrected at the same time:
 - **147.32 (done).** `RowStore` is used only by a `#[cfg(debug_assertions)]` test, so the
   import is gone and that test names `crate::buffer::RowStore`. `cargo bench --no-run --all`
   emits no warnings (apart from the pre-existing `portable-pty` manifest note).
+- **147.19 (done).** xterm checked (`graphics_sixel.c:395-405`, `:853-866`): with sixel
+  scrolling off the graphic is created at `(0, 0)` and never scrolls. `place_image` takes
+  `ImagePlacementMode { Inline, FixedOrigin }`; `FixedOrigin` anchors at the first visible
+  row, column 0, clipped to the screen, without pushing or evicting rows or moving the cursor
+  (a young primary buffer materialises only the screen rows the image covers). Sixel uses it
+  under `Decsdm::DisplayMode` and no longer restores the cursor; `restore_cursor_to_image_origin`
+  stays (kitty `C=1`, iTerm2 `doNotMoveCursor`). Kitty and iTerm2 pass `Inline`. The two
+  DECSDM tests were rewritten to xterm's behaviour; eight new buffer tests, including damage
+  bounded to the image's rows and an `Inline` regression guard. `place_image_fixed_origin`
+  carries the same justified `too_many_arguments` allowance as `place_image`, which it
+  forwards. Not changed (outside the plan): a narrower image over a wider one clears only its
+  own columns, in both modes.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
