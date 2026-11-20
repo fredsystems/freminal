@@ -59,7 +59,7 @@ enriched stubs again and get re-decomposed at activation.
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
 | 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
 | 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete      | 149                                |
-| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | Pending merge | 140                                |
+| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | Complete      | 140                                |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
