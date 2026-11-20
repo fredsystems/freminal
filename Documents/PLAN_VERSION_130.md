@@ -7987,6 +7987,52 @@ whole-string `associated_text` under flags 8+16 — routed to Task 137; (10) a u
 seven config dimensions); not shrunk here. (11) `prettier --check` differences on three plan
 files predate the review (hook excludes `.md`).
 
+#### 147 PR review (PR #589, 2026-11-20)
+
+CI failed `Test macos-latest`; CodeRabbit left 23 actionable comments (three outside the
+diff). Dispositions:
+
+| ID  | Where                      | Finding (short)                                                                   | Disposition                                                               |
+| --- | -------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| R1  | CI                         | macOS: Alt-prefix GUI tests assume a non-macOS host                               | fix (platform-aware expectations)                                         |
+| R2  | agents.md, COVERAGE, GAPS  | table padding                                                                     | fix                                                                       |
+| R3  | plan                       | 147.26 note still says `cargo xtask check` runs gl-pixel clippy                   | fix                                                                       |
+| R4  | SUPPORTED_CONTROL_CODES    | `?1036` row lacks the macOS exception                                             | fix                                                                       |
+| R5  | cursor.rs                  | pending wrap at the DECLRMM right margin is saved as settled                      | fix                                                                       |
+| R6  | terminfo_source.rs         | entry body runs into the next entry                                               | fix                                                                       |
+| R7  | dcs.rs                     | C1 ST after a doubled tmux `ESC ESC` drops a body byte                            | fix                                                                       |
+| R8  | ansi.rs                    | under S8C1T a UTF-8 continuation `0x9C` (`Ŝ`) ends an OSC                         | fix (ST only at a character boundary)                                     |
+| R9  | ansi.rs                    | a mode change inside a tmux payload governs later outer bytes only after the read | fix if contained; else route                                              |
+| R10 | ansi.rs                    | CSI buffer-recycling test cannot detect a dropped buffer                          | fix                                                                       |
+| R11 | input.rs                   | `associated_text` repeated on every character                                     | Task 137 (already routed)                                                 |
+| R12 | input.rs                   | shifted alternate reported without Shift                                          | fix                                                                       |
+| R13 | internal.rs                | RIS during tmux replay leaves parser DECANM stale                                 | fix                                                                       |
+| R14 | graphics_kitty.rs          | Windows: delete access refused by a non-sharing reader rejects the image          | fix (fall back to a plain read)                                           |
+| R15 | graphics_kitty.rs          | Windows: a link swapped in before the open is followed and deleted                | fix (`FILE_FLAG_OPEN_REPARSE_POINT`); residue Task 135                    |
+| R16 | gpu.rs                     | DECSCNM base fill at opacity < 1 double-composites cells (B9, new for DECSCNM)    | fix (no DECSCNM base fill below full opacity); OSC 11 path stays Task 136 |
+| R17 | pixel_harness.rs           | blend state is not set per drawn frame                                            | fix                                                                       |
+| R18 | GUI input.rs               | Alt prefix uses end-of-frame modifiers, not the text event's                      | fix                                                                       |
+| R19 | test_support.rs            | fixture reads persisted app state and layouts                                     | fix (injected empty state)                                                |
+| R20 | xtask                      | `CARGO_ENCODED_RUSTDOCFLAGS` overrides the appended `-D warnings`                 | fix                                                                       |
+| R21 | csi.rs (outside diff)      | an unterminated CSI grows its buffers without bound                               | fix (byte cap)                                                            |
+| R22 | standard.rs (outside diff) | `ESC - A`, `ESC $ B` print their final                                            | fix (consume and ignore)                                                  |
+
+- **Outcomes (2026-11-20).** Every "fix" row is fixed with a test. R9 was contained: the parser
+  stops after a completed `DCS tmux;` wrapper (`push_through_tmux_passthrough`), the state
+  layer applies its payload, and parsing resumes, so a payload's S8C1T or DECANM governs the
+  rest of the read. R8 tracks pending UTF-8 continuation bytes in string states, so `0x9C`
+  ends a string only at a character boundary. R21 caps an open CSI at `MAX_CSI_BYTES` and
+  discards the rest through its final. R22 consumes `ESC - . / $` designators through their
+  final. R16: below full opacity DECSCNM uses the normal pane base (no reversed remainder),
+  `pane_base_color(inversion, opacity)` stays the single source, and an opacity change now
+  forces a pane rebuild (`bg_opacity_changed`). R15: the delete-on-close open adds
+  `FILE_FLAG_OPEN_REPARSE_POINT` and rejects reparse points; a rejected link entry is itself
+  removed when the handle closes, its target never opened. R14 falls back to a plain read on
+  a sharing or access error. R2: no change; every row has the same column width in
+  characters and prettier passes (the comment counted bytes of `—` and `£`). Benchmarks
+  against HEAD on a quiet machine: parser and encoder within ±4%, `instanced_bg*` within ±3%
+  (one +23% case re-ran at −0.9% and −2.1%).
+
 ### 147 Status notes
 
 - **147.1 (done).** `Mode::UnknownQuery { namespace, params }` reuses `ModeNamespace`; the
@@ -8190,9 +8236,10 @@ files predate the review (hook excludes `.md`).
 - **147.26 (done).** The query items' real users are `gpu-profiling` and the `gl-recording`
   tests (the plan said `frame-profiling`); the seven `Gl` methods, `RecordingState::next_query`
   and its four query methods are gated on those. No `allow(dead_code)`. `clippy_gl_pixel_only`
-  (`-p freminal --features gl-pixel --all-targets`, `-D warnings`) runs from `cargo xtask check`
-  (the CI `check` matrix) and `cargo xtask lint`/`ci`; the weekly `gl-pixel` workflow only
-  runs tests.
+  (`-p freminal --features gl-pixel --all-targets`, `-D warnings`) first ran from
+  `cargo xtask check` and `lint`; review finding C1 moved it out of `check` (it failed on the
+  Windows and macOS legs) to `cargo xtask check-gl-pixel` (one Linux CI step), `lint` and
+  `check-windows`. The weekly `gl-pixel` workflow only runs tests.
 - **147.28 (done).** `command_finished_template` (`nullOr str`, default null) is in the
   home-manager module and its `notificationsSection` binding; a `lib.evalModules` evaluation
   setting it produced `command_finished_template = ...` under `[notifications]` in the

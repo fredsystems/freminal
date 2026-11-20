@@ -143,49 +143,49 @@ is the authoritative status table; where the two disagree, COVERAGE is right.
 
 ## DEC Private Modes (CSI ? Pm h / l)
 
-| Mode  | Name                                     | Status      | Notes                                                                                                                  |
-| ----- | ---------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------- |
-| ?1    | DECCKM — Cursor Keys Mode                | done        | `TerminalModes.cursor_key`; GUI translates arrow keys when set                                                         |
-| ?2    | DECANM — VT52 Mode                       | done        | Full VT52 parser with 15 commands; `ESC <` returns to ANSI mode (Task 20.8)                                            |
-| ?3    | DECCOLM — 80/132 Column Mode             | done        | Column switching active when AllowColumnModeSwitch (?40) is enabled                                                    |
-| ?4    | DECSCLM — Scrolling Mode                 | partial     | Recognised but never settable (no smooth scrolling); DECRQM answers permanently reset                                  |
-| ?5    | DECSCNM — Reverse Video                  | done        | Per-pane, per-cell foreground/background swap at render time; a toggle repaints immediately                            |
-| ?6    | DECOM — Origin Mode                      | done        | CUP row 1 → top of scroll region when set                                                                              |
-| ?7    | DECAWM — Auto Wrap Mode                  | done        | Implemented (`Decawm` enum)                                                                                            |
-| ?8    | DECARM — Auto Repeat Keys                | done        | `TerminalModes.repeat_keys`; GUI reads                                                                                 |
-| ?12   | XtCBlink — Cursor Blink                  | done        | Implemented                                                                                                            |
-| ?25   | DECTCEM — Show/Hide Cursor               | done        | Implemented                                                                                                            |
-| ?40   | AllowColumnModeSwitch                    | done        | Gates DECCOLM behavior                                                                                                 |
-| ?42   | DECNRCM — National Replacement           | partial     | Stored and reported by DECRQM; the UK set maps `#` to `£` regardless of this mode                                      |
-| ?45   | ReverseWrapAround                        | done        | `TerminalModes.reverse_wrap_around`                                                                                    |
-| ?47   | Alt Screen Buffer (legacy)               | done        | Switches screens and nothing else: no cursor save, no clear                                                            |
-| ?66   | DECNKM — Numeric Keypad Mode             | done        | DECSET alias for DECKPAM/DECKPNM; maps to `modes.keypad_mode` (Task 20.2)                                              |
-| ?67   | DECBKM — Backarrow Key Mode              | done        | Set: BS sends 0x08; Reset: BS sends 0x7F (Task 20.3)                                                                   |
-| ?69   | DECLRMM — Left/Right Margin Mode         | done        | Horizontal scroll regions via DECSLRM; full margin-aware cursor/edit ops (Task 20.1)                                   |
-| ?80   | DECSDM — Sixel Display Mode              | done        | Set: Sixel no-scroll (display mode); Reset: cursor advances past image (Task 20.5)                                     |
-| ?1000 | X11 Mouse — Normal Tracking              | done        | `TerminalModes.mouse_tracking`; GUI reads and forwards mouse events                                                    |
-| ?1001 | XtMseHilite — Highlight Tracking         | not planned | Recognised and not implemented: set and reset log at `debug!`, DECRQM answers `Ps = 0`; does not turn on mouse reports |
-| ?1002 | X11 Mouse — Button Event                 | done        | `TerminalModes.mouse_tracking`                                                                                         |
-| ?1003 | X11 Mouse — Any Event                    | done        | `TerminalModes.mouse_tracking`                                                                                         |
-| ?1004 | Focus Reporting                          | done        | `TerminalModes.focus_reporting`; GUI sends `InputEvent::FocusChange`                                                   |
-| ?1006 | SGR Mouse — Extended Coordinates         | done        | `TerminalModes.mouse_tracking`                                                                                         |
-| ?1007 | Alternate Scroll Mode                    | done        | Scroll → arrow keys on alt screen when set (Task 20.4)                                                                 |
-| ?1016 | SGR-Pixels Mouse — Pixel Coords          | done        | `TerminalModes.mouse_encoding`; one-based physical pixel coords (Task 124.3a)                                          |
-| ?1034 | Meta Sets Eighth Bit (Interpret Meta)    | not planned | Recognised and not implemented: `debug!` log, DECRQM `Ps = 0`; conflicts with UTF-8 input                              |
-| ?1035 | NumLock Overrides the Application Keypad | not planned | Recognised and not implemented: `debug!` log, DECRQM `Ps = 0`; winit exposes no NumLock state                          |
-| ?1036 | Meta Sends Escape (Alt Sends ESC)        | done        | Default set: legacy Alt+text sends `ESC` then the text (Task 147.24)                                                   |
-| ?1039 | Alt Sends Escape                         | partial     | Stored and reported by DECRQM, with no further effect                                                                  |
-| ?1045 | XTREVWRAP2 — Extended Rev-Wrap           | done        | Extends ?45 reverse-wrap into scrollback region (Task 20.9)                                                            |
-| ?1046 | AllowAltScreen                           | done        | Gates ?47/?1047/?1049 alternate screen switching (Task 20.6)                                                           |
-| ?1047 | Alt Screen Buffer (legacy)               | done        | Enter is the same as ?47; leaving clears the alternate screen, then switches                                           |
-| ?1048 | Save/Restore Cursor (legacy)             | done        | Save/restore through the DECSC slot of the active screen                                                               |
-| ?1049 | Alt Screen Buffer + Save Cursor          | done        | DECSC, switch to the alternate screen, then clear it; leaving restores the cursor                                      |
-| ?1070 | Private Color Registers                  | done        | Per-graphic Sixel palette; default on (Task 20.11)                                                                     |
-| ?2004 | Bracketed Paste                          | done        | `TerminalModes.bracketed_paste`; GUI wraps paste with `\e[200~` / `\e[201~`                                            |
-| ?2026 | Synchronized Output                      | done        | `TerminalModes.synchronized_updates`                                                                                   |
-| ?2027 | Grapheme Clustering                      | done        | Always-on via `unicode-segmentation`; DECRQM reports permanently set (Task 20.7)                                       |
-| ?2048 | In-Band Resize Notifications             | done        | Set sends an in-band size report immediately; DECRQM supported                                                         |
-| ?7727 | Application Escape Key                   | done        | Unambiguous Escape encoding for tmux                                                                                   |
+| Mode  | Name                                     | Status      | Notes                                                                                                                                     |
+| ----- | ---------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| ?1    | DECCKM — Cursor Keys Mode                | done        | `TerminalModes.cursor_key`; GUI translates arrow keys when set                                                                            |
+| ?2    | DECANM — VT52 Mode                       | done        | Full VT52 parser with 15 commands; `ESC <` returns to ANSI mode (Task 20.8)                                                               |
+| ?3    | DECCOLM — 80/132 Column Mode             | done        | Column switching active when AllowColumnModeSwitch (?40) is enabled                                                                       |
+| ?4    | DECSCLM — Scrolling Mode                 | partial     | Recognised but never settable (no smooth scrolling); DECRQM answers permanently reset                                                     |
+| ?5    | DECSCNM — Reverse Video                  | done        | Per-pane, per-cell foreground/background swap at render time; a toggle repaints immediately                                               |
+| ?6    | DECOM — Origin Mode                      | done        | CUP row 1 → top of scroll region when set                                                                                                 |
+| ?7    | DECAWM — Auto Wrap Mode                  | done        | Implemented (`Decawm` enum)                                                                                                               |
+| ?8    | DECARM — Auto Repeat Keys                | done        | `TerminalModes.repeat_keys`; GUI reads                                                                                                    |
+| ?12   | XtCBlink — Cursor Blink                  | done        | Implemented                                                                                                                               |
+| ?25   | DECTCEM — Show/Hide Cursor               | done        | Implemented                                                                                                                               |
+| ?40   | AllowColumnModeSwitch                    | done        | Gates DECCOLM behavior                                                                                                                    |
+| ?42   | DECNRCM — National Replacement           | partial     | Stored and reported by DECRQM; the UK set maps `#` to `£` regardless of this mode                                                         |
+| ?45   | ReverseWrapAround                        | done        | `TerminalModes.reverse_wrap_around`                                                                                                       |
+| ?47   | Alt Screen Buffer (legacy)               | done        | Switches screens and nothing else: no cursor save, no clear                                                                               |
+| ?66   | DECNKM — Numeric Keypad Mode             | done        | DECSET alias for DECKPAM/DECKPNM; maps to `modes.keypad_mode` (Task 20.2)                                                                 |
+| ?67   | DECBKM — Backarrow Key Mode              | done        | Set: BS sends 0x08; Reset: BS sends 0x7F (Task 20.3)                                                                                      |
+| ?69   | DECLRMM — Left/Right Margin Mode         | done        | Horizontal scroll regions via DECSLRM; full margin-aware cursor/edit ops (Task 20.1)                                                      |
+| ?80   | DECSDM — Sixel Display Mode              | done        | Set: Sixel no-scroll (display mode); Reset: cursor advances past image (Task 20.5)                                                        |
+| ?1000 | X11 Mouse — Normal Tracking              | done        | `TerminalModes.mouse_tracking`; GUI reads and forwards mouse events                                                                       |
+| ?1001 | XtMseHilite — Highlight Tracking         | not planned | Recognised and not implemented: set and reset log at `debug!`, DECRQM answers `Ps = 0`; does not turn on mouse reports                    |
+| ?1002 | X11 Mouse — Button Event                 | done        | `TerminalModes.mouse_tracking`                                                                                                            |
+| ?1003 | X11 Mouse — Any Event                    | done        | `TerminalModes.mouse_tracking`                                                                                                            |
+| ?1004 | Focus Reporting                          | done        | `TerminalModes.focus_reporting`; GUI sends `InputEvent::FocusChange`                                                                      |
+| ?1006 | SGR Mouse — Extended Coordinates         | done        | `TerminalModes.mouse_tracking`                                                                                                            |
+| ?1007 | Alternate Scroll Mode                    | done        | Scroll → arrow keys on alt screen when set (Task 20.4)                                                                                    |
+| ?1016 | SGR-Pixels Mouse — Pixel Coords          | done        | `TerminalModes.mouse_encoding`; one-based physical pixel coords (Task 124.3a)                                                             |
+| ?1034 | Meta Sets Eighth Bit (Interpret Meta)    | not planned | Recognised and not implemented: `debug!` log, DECRQM `Ps = 0`; conflicts with UTF-8 input                                                 |
+| ?1035 | NumLock Overrides the Application Keypad | not planned | Recognised and not implemented: `debug!` log, DECRQM `Ps = 0`; winit exposes no NumLock state                                             |
+| ?1036 | Meta Sends Escape (Alt Sends ESC)        | done        | Default set: legacy Alt+text sends `ESC` then the text (Task 147.24). Not on macOS, where Option composes text; Option as Alt is Task 152 |
+| ?1039 | Alt Sends Escape                         | partial     | Stored and reported by DECRQM, with no further effect                                                                                     |
+| ?1045 | XTREVWRAP2 — Extended Rev-Wrap           | done        | Extends ?45 reverse-wrap into scrollback region (Task 20.9)                                                                               |
+| ?1046 | AllowAltScreen                           | done        | Gates ?47/?1047/?1049 alternate screen switching (Task 20.6)                                                                              |
+| ?1047 | Alt Screen Buffer (legacy)               | done        | Enter is the same as ?47; leaving clears the alternate screen, then switches                                                              |
+| ?1048 | Save/Restore Cursor (legacy)             | done        | Save/restore through the DECSC slot of the active screen                                                                                  |
+| ?1049 | Alt Screen Buffer + Save Cursor          | done        | DECSC, switch to the alternate screen, then clear it; leaving restores the cursor                                                         |
+| ?1070 | Private Color Registers                  | done        | Per-graphic Sixel palette; default on (Task 20.11)                                                                                        |
+| ?2004 | Bracketed Paste                          | done        | `TerminalModes.bracketed_paste`; GUI wraps paste with `\e[200~` / `\e[201~`                                                               |
+| ?2026 | Synchronized Output                      | done        | `TerminalModes.synchronized_updates`                                                                                                      |
+| ?2027 | Grapheme Clustering                      | done        | Always-on via `unicode-segmentation`; DECRQM reports permanently set (Task 20.7)                                                          |
+| ?2048 | In-Band Resize Notifications             | done        | Set sends an in-band size report immediately; DECRQM supported                                                                            |
+| ?7727 | Application Escape Key                   | done        | Unambiguous Escape encoding for tmux                                                                                                      |
 
 ## Standard Modes (CSI Pm h / l)
 

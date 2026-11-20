@@ -384,6 +384,25 @@ fn ci() -> Result<()> {
 }
 
 /// Append `-D warnings` to any rustdoc flags already in the environment.
+/// The environment variable and value that deny rustdoc warnings for one
+/// `cargo doc` run, keeping any flags the caller already set.
+///
+/// Cargo reads `CARGO_ENCODED_RUSTDOCFLAGS` (arguments separated by `0x1f`)
+/// in preference to `RUSTDOCFLAGS`, so when the encoded form is set the
+/// denial is appended there; appending to `RUSTDOCFLAGS` would be ignored.
+fn rustdoc_env_denying_warnings(
+    encoded: Option<&str>,
+    plain: Option<&str>,
+) -> (&'static str, String) {
+    match encoded {
+        Some(flags) if !flags.is_empty() => (
+            "CARGO_ENCODED_RUSTDOCFLAGS",
+            format!("{flags}\u{1f}-D\u{1f}warnings"),
+        ),
+        _ => ("RUSTDOCFLAGS", rustdoc_flags_denying_warnings(plain)),
+    }
+}
+
 fn rustdoc_flags_denying_warnings(existing: Option<&str>) -> String {
     match existing {
         Some(flags) if !flags.trim().is_empty() => format!("{} -D warnings", flags.trim()),
@@ -395,19 +414,22 @@ fn rustdoc_flags_denying_warnings(existing: Option<&str>) -> String {
 ///
 /// Catches broken intra-doc links and public docs linking to private items
 /// (`rustdoc::broken_intra_doc_links`, `rustdoc::private_intra_doc_links`),
-/// which neither clippy nor `cargo check` see. `RUSTDOCFLAGS` is set on this
+/// which neither clippy nor `cargo check` see. The rustdoc flags are set on this
 /// one `cargo doc` invocation only, so it cannot leak into the other gates.
 /// `--document-private-items` is deliberately not passed: the docs that ship
 /// are the public ones, and a public doc must not link to a private item.
 /// `--all-features` documents the feature-gated modules too (`gl-pixel`,
 /// `frame-profiling`, ...), which otherwise skip the gate entirely.
 fn check_docs() -> Result<()> {
-    let flags = rustdoc_flags_denying_warnings(std::env::var("RUSTDOCFLAGS").ok().as_deref());
+    let (var, flags) = rustdoc_env_denying_warnings(
+        std::env::var("CARGO_ENCODED_RUSTDOCFLAGS").ok().as_deref(),
+        std::env::var("RUSTDOCFLAGS").ok().as_deref(),
+    );
     cmd(
         "cargo",
         ["doc", "--workspace", "--no-deps", "--all-features"],
     )
-    .env("RUSTDOCFLAGS", flags)
+    .env(var, flags)
     .run_with_trace()?;
     Ok(())
 }
@@ -1310,7 +1332,8 @@ impl ExpressionExt for duct::Expression {
 #[cfg(test)]
 mod tests {
     use super::{
-        gl_pixel_only_clippy_args, rpm_version, rustdoc_flags_denying_warnings, Args, Command,
+        gl_pixel_only_clippy_args, rpm_version, rustdoc_env_denying_warnings,
+        rustdoc_flags_denying_warnings, Args, Command,
     };
     use crate::fuzz::{CrashPolicy, Sandbox};
     use clap::{CommandFactory, Parser};
@@ -1455,6 +1478,29 @@ mod tests {
         assert_eq!(
             rustdoc_flags_denying_warnings(Some("--cfg docsrs")),
             "--cfg docsrs -D warnings"
+        );
+    }
+
+    #[test]
+    fn rustdoc_env_uses_the_encoded_flags_when_set() {
+        assert_eq!(
+            rustdoc_env_denying_warnings(Some("--cfg\u{1f}docsrs"), Some("ignored")),
+            (
+                "CARGO_ENCODED_RUSTDOCFLAGS",
+                "--cfg\u{1f}docsrs\u{1f}-D\u{1f}warnings".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn rustdoc_env_falls_back_to_rustdocflags() {
+        assert_eq!(
+            rustdoc_env_denying_warnings(None, Some("--cfg docsrs")),
+            ("RUSTDOCFLAGS", "--cfg docsrs -D warnings".to_owned())
+        );
+        assert_eq!(
+            rustdoc_env_denying_warnings(Some(""), None),
+            ("RUSTDOCFLAGS", "-D warnings".to_owned())
         );
     }
 
