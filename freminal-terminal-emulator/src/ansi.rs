@@ -162,6 +162,69 @@ pub enum ParserInner {
     /// VT52: `ESC Y` cursor address — waiting for row and column bytes.
     /// First `Option` is the row byte (if received); second call fills column.
     Vt52CursorAddress(Option<u8>),
+    /// VT52: inside an `ESC (`, `ESC )`, `ESC *`, `ESC +`, `ESC SP` or
+    /// `ESC $` introducer, which VT52 has no meaning for. Mirrors xterm's
+    /// `vt52_ignore_table`: the sequence ends at (and swallows) the next byte
+    /// in 0x30-0x7E; 0x20-0x2F and DEL are swallowed and the state stays;
+    /// C0 controls execute and the state stays.
+    Vt52Ignore,
+    /// VT52: part-way through a non-ASCII character met while in
+    /// `Vt52Escape` or `Vt52Ignore`. The character is consumed whole; see
+    /// `FreminalAnsiParser::vt52_non_ascii_byte`.
+    Vt52NonAscii {
+        table: Vt52Table,
+        prefix: Utf8Prefix,
+    },
+}
+
+/// Which of xterm's VT52 tables a byte is looked up in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Vt52Table {
+    /// `vt52_esc_table`: the byte after ESC.
+    Escape,
+    /// `vt52_ignore_table`: inside an `ESC (`-style sequence.
+    Ignore,
+}
+
+impl Vt52Table {
+    const fn parser_state(self) -> ParserInner {
+        match self {
+            Self::Escape => ParserInner::Vt52Escape,
+            Self::Ignore => ParserInner::Vt52Ignore,
+        }
+    }
+}
+
+/// The bytes of a UTF-8 character received so far (at most four).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Utf8Prefix {
+    bytes: [u8; 4],
+    len: usize,
+}
+
+impl Utf8Prefix {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; 4],
+            len: 0,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.bytes.get(..self.len).unwrap_or_default()
+    }
+
+    /// Append `b`; `false` if the prefix is already full.
+    fn push(&mut self, b: u8) -> bool {
+        match self.bytes.get_mut(self.len) {
+            Some(slot) => {
+                *slot = b;
+                self.len += 1;
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Apply to `vt52_mode` / `s8c1t_mode` the change `output` makes to the
@@ -512,6 +575,10 @@ impl FreminalAnsiParser {
     ///                  mode; 'Y' transitions to Vt52CursorAddress.
     /// Vt52CursorAddress — collects the row byte then column byte for the
     ///                  ESC Y row col direct-cursor-address sequence.
+    /// Vt52Ignore     — swallows the rest of a VT52-meaningless `ESC (`-style
+    ///                  sequence (see `ParserInner::Vt52Ignore`).
+    /// Vt52NonAscii   — consuming one non-ASCII character met inside either
+    ///                  of the two states above.
     /// ```
     ///
     /// Plain text bytes are coalesced into `pending_data` and flushed as a
@@ -688,7 +755,7 @@ impl FreminalAnsiParser {
                 },
                 ParserInner::Vt52Escape => {
                     push_data_if_non_empty(&mut data_output, &mut output);
-                    self.handle_vt52_escape(b, &mut output);
+                    self.handle_vt52_escape(b, &mut data_output, &mut output);
                 }
                 ParserInner::Vt52CursorAddress(row_opt) => {
                     push_data_if_non_empty(&mut data_output, &mut output);
@@ -709,6 +776,13 @@ impl FreminalAnsiParser {
                             self.inner = ParserInner::Empty;
                         }
                     }
+                }
+                ParserInner::Vt52Ignore => {
+                    self.handle_vt52_ignore(b, &mut data_output, &mut output);
+                }
+                ParserInner::Vt52NonAscii { table, prefix } => {
+                    let (table, prefix) = (*table, *prefix);
+                    self.vt52_non_ascii_byte(table, prefix, b, &mut data_output, &mut output);
                 }
             }
 
@@ -732,12 +806,129 @@ impl FreminalAnsiParser {
         output
     }
 
+    /// Handle a single byte inside an ignored VT52 `ESC (`-style sequence.
+    ///
+    /// Follows xterm's `vt52_ignore_table` (`VTPrsTbl.c:9890`): C0 controls
+    /// and DEL as in [`Self::vt52_control`], 0x20-0x2F swallowed with the
+    /// state unchanged, 0x30-0x7E swallowed and the state ends, and a
+    /// non-ASCII character as in [`Self::vt52_non_ascii_byte`].
+    fn handle_vt52_ignore(
+        &mut self,
+        b: u8,
+        data_output: &mut Vec<u8>,
+        output: &mut Vec<TerminalOutput>,
+    ) {
+        match b {
+            0x00..=0x1F | 0x7F => self.vt52_control(b, data_output, output),
+            0x20..=0x2F => {}
+            0x30..=0x7E => self.inner = ParserInner::Empty,
+            _ => self.vt52_non_ascii_byte(
+                Vt52Table::Ignore,
+                Utf8Prefix::new(),
+                b,
+                data_output,
+                output,
+            ),
+        }
+    }
+
+    /// A C0 control or DEL met while in a VT52 escape table.
+    ///
+    /// Identical in `vt52_esc_table` and `vt52_ignore_table`: ESC restarts the
+    /// escape (`CASE_ESC`, `charproc.c:3717`: `parsestate = vt52_esc_table`),
+    /// CAN and SUB abort to ground (`CASE_CAN`/`CASE_SUB`, 3618/3646:
+    /// `ResetState`), and every other control either executes (ENQ, BEL, BS,
+    /// HT, LF/VT/FF, CR: 3680-3770, none of which touches `parsestate`) or is
+    /// `CASE_IGNORE` (3614, also leaves `parsestate`), so the table in force
+    /// stays in force.
+    fn vt52_control(&mut self, b: u8, data_output: &mut Vec<u8>, output: &mut Vec<TerminalOutput>) {
+        match b {
+            0x1B => self.inner = ParserInner::Vt52Escape,
+            0x18 | 0x1A => self.inner = ParserInner::Empty,
+            _ => {
+                // Bytes without an executed meaning are dropped, not queued as text.
+                let _ = self.ansi_parser_inner_empty(b, data_output, output);
+            }
+        }
+    }
+
+    /// One byte of a non-ASCII character met while in a VT52 escape table.
+    ///
+    /// xterm decodes UTF-8 before it consults the table: a character above
+    /// U+00FF is `CASE_GROUND_STATE` (`charproc.c:3224-3235`, "wide
+    /// characters ... treated the same as printing characters"), so it is
+    /// swallowed and ends the sequence; U+0080-U+00FF index the table
+    /// (`CASE_IGNORE` in both VT52 tables), so they are swallowed and the
+    /// table stays in force.
+    ///
+    /// `prefix` holds the bytes of the character so far (empty for its first
+    /// byte). Character boundaries are those of `std::str::from_utf8`, the
+    /// same notion the text path's lossy decoding uses: a stray continuation
+    /// byte, an invalid lead byte or a sequence cut short by a non-continuation
+    /// byte is one replacement character (above U+00FF, so it ends the
+    /// sequence). The cutting byte is then handled as ordinary input.
+    fn vt52_non_ascii_byte(
+        &mut self,
+        table: Vt52Table,
+        mut prefix: Utf8Prefix,
+        b: u8,
+        data_output: &mut Vec<u8>,
+        output: &mut Vec<TerminalOutput>,
+    ) {
+        let is_continuation = (0x80..=0xBF).contains(&b);
+        if prefix.len > 0 && !is_continuation {
+            self.inner = ParserInner::Empty;
+            if self.ansi_parser_inner_empty(b, data_output, output).is_ok() {
+                data_output.push(b);
+            }
+            return;
+        }
+        if !prefix.push(b) {
+            self.inner = ParserInner::Empty;
+            return;
+        }
+        match std::str::from_utf8(prefix.as_slice()) {
+            Ok(text) => {
+                let above_latin1 = text.chars().next().is_some_and(|c| u32::from(c) > 0xFF);
+                self.inner = if above_latin1 {
+                    ParserInner::Empty
+                } else {
+                    table.parser_state()
+                };
+            }
+            Err(e) => match e.error_len() {
+                None => self.inner = ParserInner::Vt52NonAscii { table, prefix },
+                Some(invalid) => {
+                    // The invalid bytes are one replacement character; any
+                    // bytes after them are left for the text path to decode.
+                    if let Some(rest) = prefix.as_slice().get(invalid..) {
+                        data_output.extend_from_slice(rest);
+                    }
+                    self.inner = ParserInner::Empty;
+                }
+            },
+        }
+    }
+
     /// Handle a single byte after ESC in VT52 mode.
     ///
     /// VT52 escape sequences are all single-byte commands except `ESC Y` (cursor
     /// address) which takes two additional parameter bytes.
-    fn handle_vt52_escape(&mut self, b: u8, output: &mut Vec<TerminalOutput>) {
+    fn handle_vt52_escape(
+        &mut self,
+        b: u8,
+        data_output: &mut Vec<u8>,
+        output: &mut Vec<TerminalOutput>,
+    ) {
         match b {
+            0x00..=0x1F | 0x7F => self.vt52_control(b, data_output, output),
+            0x80..=0xFF => self.vt52_non_ascii_byte(
+                Vt52Table::Escape,
+                Utf8Prefix::new(),
+                b,
+                data_output,
+                output,
+            ),
             // ESC A — Cursor up
             b'A' => {
                 output.push(TerminalOutput::SetCursorPosRel {
@@ -842,12 +1033,19 @@ impl FreminalAnsiParser {
                 output.push(TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)));
                 self.inner = ParserInner::Empty;
             }
+            // 0x20-0x2F (SP ! " # $ % & ' ( ) * + , - . /) — `CASE_VT52_IGNORE`:
+            // VT52 has no sequence here, and the byte that follows belongs to
+            // it and is swallowed.
+            0x20..=0x2F => {
+                self.inner = ParserInner::Vt52Ignore;
+            }
+            // Every other final is `CASE_GROUND_STATE` in `vt52_esc_table`:
+            // silently ignored, e.g. ESC N/O/n/o/|/}/~ (the ANSI-only shifts).
             _ => {
-                warn!(
-                    "Unknown VT52 escape: 0x{b:02x}; raw sequence: \"{}\"",
+                debug!(
+                    "Ignoring VT52 escape: 0x{b:02x}; raw sequence: \"{}\"",
                     self.current_trace_escaped()
                 );
-                output.push(TerminalOutput::Invalid);
                 self.inner = ParserInner::Empty;
             }
         }
@@ -1428,6 +1626,147 @@ mod tests {
     }
 
     #[test]
+    fn vt52_ignored_introducers_swallow_the_next_printable_byte() {
+        for intro in *b"()*+ $" {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, intro, b'0', b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{intro:02x} 0 A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_ignore_state_swallows_0x20_to_0x2f_and_del_then_ends_on_0x30_to_0x7e() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b$ !/\x7f0A"),
+            vec![TerminalOutput::Data(b"A".to_vec())]
+        );
+        assert_eq!(p.inner, ParserInner::Empty);
+
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b(~A"),
+            vec![TerminalOutput::Data(b"A".to_vec())]
+        );
+    }
+
+    #[test]
+    fn vt52_ignore_state_executes_c0_controls_and_stays() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b(\r\n\x08\x07\t0A"),
+            vec![
+                TerminalOutput::CarriageReturn,
+                TerminalOutput::Newline,
+                TerminalOutput::Backspace,
+                TerminalOutput::Bell,
+                TerminalOutput::Tab,
+                TerminalOutput::Data(b"A".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn vt52_ignore_state_drops_unassigned_controls_and_so_si() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b(\x00\x01\x0e\x0f\x1f0A"),
+            vec![TerminalOutput::Data(b"A".to_vec())]
+        );
+    }
+
+    #[test]
+    fn vt52_ignore_state_cancelled_by_can_and_sub() {
+        for cancel in [0x18u8, 0x1A] {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b'(', cancel, b'0']),
+                vec![TerminalOutput::Data(b"0".to_vec())],
+                "cancel 0x{cancel:02x}"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_ignore_state_esc_restarts_a_vt52_escape() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b(\x1bA"),
+            vec![TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1),
+            }]
+        );
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn vt52_exit_inside_ignore_state_is_an_escape_restart_not_swallowed() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1b(\x1b<A");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)),
+                TerminalOutput::Data(b"A".to_vec()),
+            ]
+        );
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn vt52_ignore_state_survives_a_chunk_boundary() {
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x1b("), vec![]);
+        assert_eq!(p.inner, ParserInner::Vt52Ignore);
+        assert_eq!(p.push(b"0"), vec![]);
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert_eq!(p.push(b"A"), vec![TerminalOutput::Data(b"A".to_vec())]);
+
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x1b"), vec![]);
+        assert_eq!(p.push(b"$"), vec![]);
+        assert_eq!(p.push(b" "), vec![]);
+        assert_eq!(p.inner, ParserInner::Vt52Ignore);
+        assert_eq!(p.push(b"0A"), vec![TerminalOutput::Data(b"A".to_vec())]);
+    }
+
+    #[test]
+    fn vt52_single_and_locking_shift_escapes_are_silent() {
+        for b in *b"NOno|}~" {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b, b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{b:02x}"
+            );
+            assert!(!p.push(&[0x1B, b]).contains(&TerminalOutput::Invalid));
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_ignore_introducers_in_ansi_mode_keep_their_ansi_meaning() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(
+            p.push(b"\x1b(0A"),
+            vec![
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::DecSpecialGraphics,
+                },
+                TerminalOutput::Data(b"A".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
     fn vt52_cursor_home() {
         let mut p = vt52_parser();
         let result = p.push(b"\x1bH");
@@ -1545,11 +1884,209 @@ mod tests {
         );
     }
 
+    /// Finals xterm's `vt52_esc_table` handles; every other byte in
+    /// 0x30-0x7E is `CASE_GROUND_STATE`.
+    const VT52_HANDLED_FINALS: &[u8] = b"ABCDFGHIJKYZ=><";
+
     #[test]
-    fn vt52_unknown_escape_produces_invalid() {
+    fn vt52_ground_state_finals_are_silent() {
+        for b in 0x30u8..=0x7E {
+            if VT52_HANDLED_FINALS.contains(&b) {
+                continue;
+            }
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b, b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{b:02x} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty, "ESC 0x{b:02x}");
+        }
+    }
+
+    #[test]
+    fn vt52_every_byte_0x20_to_0x2f_after_esc_swallows_the_next() {
+        for b in 0x20u8..=0x2F {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b, b'0', b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{b:02x} 0 A"
+            );
+        }
+    }
+
+    #[test]
+    fn vt52_escape_executes_controls_and_stays_in_the_escape() {
+        let up = TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(-1),
+        };
+        let cases: [(u8, TerminalOutput); 8] = [
+            (b'\r', TerminalOutput::CarriageReturn),
+            (b'\n', TerminalOutput::Newline),
+            (0x0B, TerminalOutput::Newline),
+            (0x0C, TerminalOutput::Newline),
+            (0x08, TerminalOutput::Backspace),
+            (0x09, TerminalOutput::Tab),
+            (0x07, TerminalOutput::Bell),
+            (0x05, TerminalOutput::Enq),
+        ];
+        for (control, expected) in cases {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, control, b'A']),
+                vec![expected, up.clone()],
+                "ESC 0x{control:02x} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_escape_drops_ignored_controls_and_del_and_stays() {
+        let up = TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(-1),
+        };
+        for control in [0x00u8, 0x01, 0x0E, 0x0F, 0x10, 0x1F, 0x7F] {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, control, b'A']),
+                vec![up.clone()],
+                "ESC 0x{control:02x} A"
+            );
+        }
+    }
+
+    #[test]
+    fn vt52_escape_restarts_on_esc_and_aborts_on_can_and_sub() {
         let mut p = vt52_parser();
-        let result = p.push(b"\x1bX");
-        assert_eq!(result, vec![TerminalOutput::Invalid]);
+        assert_eq!(
+            p.push(b"\x1b\x1bA"),
+            vec![TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1),
+            }]
+        );
+        for cancel in [0x18u8, 0x1A] {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, cancel, b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{cancel:02x} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_escape_control_split_across_a_chunk_boundary() {
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x1b"), vec![]);
+        assert_eq!(p.push(b"\r"), vec![TerminalOutput::CarriageReturn]);
+        assert_eq!(p.inner, ParserInner::Vt52Escape);
+    }
+
+    #[test]
+    fn vt52_non_ascii_above_latin1_ends_the_ignore_state() {
+        for ch in ["\u{4e16}", "\u{1f600}", "\u{100}"] {
+            let mut p = vt52_parser();
+            let mut input = b"\x1b(".to_vec();
+            input.extend_from_slice(ch.as_bytes());
+            input.push(b'A');
+            assert_eq!(
+                p.push(&input),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC ( {ch:?} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_latin1_character_is_ignored_and_the_ignore_state_stays() {
+        // U+00E9 indexes xterm's table (CASE_IGNORE); only the ASCII `A` ends it.
+        let mut p = vt52_parser();
+        assert_eq!(p.push("\x1b(\u{e9}A".as_bytes()), vec![]);
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert_eq!(p.push(b"A"), vec![TerminalOutput::Data(b"A".to_vec())]);
+
+        let mut p = vt52_parser();
+        assert_eq!(p.push("\x1b(\u{9f}".as_bytes()), vec![]);
+        assert_eq!(p.inner, ParserInner::Vt52Ignore);
+    }
+
+    #[test]
+    fn vt52_non_ascii_in_the_escape_table() {
+        let up = TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(-1),
+        };
+        // Above U+00FF: ground, silently.
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push("\x1b\u{4e16}A".as_bytes()),
+            vec![TerminalOutput::Data(b"A".to_vec())]
+        );
+        // U+0080-U+00FF: ignored, still after the ESC.
+        let mut p = vt52_parser();
+        assert_eq!(p.push("\x1b\u{e9}A".as_bytes()), vec![up]);
+    }
+
+    #[test]
+    fn vt52_non_ascii_character_split_across_chunks() {
+        let bytes = "\u{4e16}".as_bytes();
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x1b("), vec![]);
+        assert_eq!(p.push(&bytes[..1]), vec![]);
+        assert!(matches!(p.inner, ParserInner::Vt52NonAscii { .. }));
+        assert_eq!(p.push(&bytes[1..2]), vec![]);
+        assert!(matches!(p.inner, ParserInner::Vt52NonAscii { .. }));
+        assert_eq!(p.push(&bytes[2..]), vec![]);
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert_eq!(p.push(b"A"), vec![TerminalOutput::Data(b"A".to_vec())]);
+
+        // And in the escape table, with a Latin-1 character (stays in escape).
+        let latin = "\u{e9}".as_bytes();
+        let mut p = vt52_parser();
+        assert_eq!(p.push(&[0x1B, latin[0]]), vec![]);
+        assert!(matches!(p.inner, ParserInner::Vt52NonAscii { .. }));
+        assert_eq!(p.push(&latin[1..]), vec![]);
+        assert_eq!(p.inner, ParserInner::Vt52Escape);
+    }
+
+    #[test]
+    fn vt52_invalid_utf8_is_one_replacement_character_and_ends_the_state() {
+        let data = |bytes: &[u8]| vec![TerminalOutput::Data(bytes.to_vec())];
+        // Stray continuation byte, invalid lead bytes.
+        for bad in [0x80u8, 0xBF, 0xC0, 0xC1, 0xF5, 0xFF] {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b'(', bad, b'A']),
+                data(b"A"),
+                "ESC ( 0x{bad:02x} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+        // Truncated sequence cut short by an ASCII byte: the byte is ordinary input.
+        let mut p = vt52_parser();
+        assert_eq!(p.push(&[0x1B, b'(', 0xE4, 0xB8, b'A']), data(b"A"));
+        assert_eq!(p.inner, ParserInner::Empty);
+        // ... including a control, which then executes normally.
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(&[0x1B, b'(', 0xE4, b'\r']),
+            vec![TerminalOutput::CarriageReturn]
+        );
+        assert_eq!(p.inner, ParserInner::Empty);
+        // A bad second byte: the lead is the replacement character and the
+        // byte after it is left for the text path.
+        let mut p = vt52_parser();
+        assert_eq!(p.push(&[0x1B, b'(', 0xE0, 0x80, b'A']), data(b"\x80A"));
+        // The same in the escape table.
+        let mut p = vt52_parser();
+        assert_eq!(p.push(&[0x1B, 0xFF, b'A']), data(b"A"));
     }
 
     #[test]

@@ -7824,6 +7824,17 @@ Stale stub text was corrected at the same time:
 - **Verification:** VT52 tests: `ESC ( 0 A` prints `A` only; a C0 control after `ESC (` still
   executes; `ESC N` and friends produce no output and no warning.
 - **Scheduling:** within Task 147, before 147.17.
+- **Status: done (2026-11-20; scope widened in review to all of `vt52_esc_table`).** After a
+  VT52 `ESC`, freminal now follows xterm's table byte for byte: all sixteen 0x20-0x2F bytes are
+  `CASE_VT52_IGNORE` (`Vt52Ignore`, which swallows the next printable byte); `CASE_GROUND_STATE`
+  finals are silent (`debug!`); CR/LF/VT/FF/BS/HT/BEL/ENQ execute and the escape continues
+  (`parsestate` is untouched, `charproc.c:3680-3769`); other C0 and DEL are dropped; ESC
+  restarts; CAN/SUB return to ground (`ResetState`). Non-ASCII follows `charproc.c:3221-3239`:
+  a character above U+00FF ends either state, U+0080-U+00FF indexes the table (ignored, state
+  stays); the partial character is held across `push` in `Vt52NonAscii` (named
+  `Vt52Table`, `Utf8Prefix`), with invalid UTF-8 as one replacement character. 26 parser and
+  11 `vttest_vt52.rs` tests; mutations fail 13 and 11 of them. Not mirrored: xterm absorbing a
+  combining mark onto the previous cell before the table lookup, and the CAN/SUB error glyph.
 
 #### 147.C3 — `kent` joins the encoder-checked terminfo set after Task 151
 

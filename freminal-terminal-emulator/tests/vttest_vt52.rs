@@ -687,6 +687,162 @@ fn so_si_still_work_in_ansi_mode_after_vt52_round_trip() {
     h.assert_row(0, "\u{2500}q");
 }
 
+/// `ESC ( 0 A` in VT52 mode prints only `A`: VT52 has no G0 designation, and
+/// xterm swallows the byte after the introducer (`vt52_ignore_table`).
+#[test]
+fn vt52_esc_paren_zero_does_not_print_the_zero() {
+    for intro in *b"()*+ $" {
+        let mut h = VtTestHelper::new_default();
+        h.feed(ENTER_VT52);
+        h.feed(VT52_HOME);
+        h.feed(&[0x1B, intro, b'0', b'A']);
+        h.assert_row(0, "A");
+        h.assert_cursor_pos(1, 0);
+    }
+}
+
+/// The ignored introducer must not change the charset either.
+#[test]
+fn vt52_esc_paren_zero_does_not_designate_graphics() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"\x1b(0q");
+    h.assert_row(0, "q");
+}
+
+/// A C0 control after `ESC (` still executes, and the next printable byte is
+/// then the one swallowed.
+#[test]
+fn vt52_c0_control_after_ignored_introducer_still_executes() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"abc\x1b(\x08\x08");
+    h.assert_cursor_pos(1, 0);
+    h.feed(b"0X");
+    h.assert_row(0, "aXc");
+    h.assert_cursor_pos(2, 0);
+}
+
+/// The byte to swallow may arrive in a later read.
+#[test]
+fn vt52_ignored_introducer_swallows_across_a_read_boundary() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"\x1b(");
+    h.feed(b"0");
+    h.feed(b"A");
+    h.assert_row(0, "A");
+}
+
+/// `ESC <` right after an introducer is an escape restart, so it leaves VT52
+/// mode; nothing of the ignored sequence leaks into ANSI mode.
+#[test]
+fn vt52_exit_after_ignored_introducer_leaves_clean_ansi_state() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"\x1b(\x1b<");
+    h.feed(b"0A");
+    h.assert_row(0, "0A");
+}
+
+/// `ESC N O n o | } ~` are silently ignored: no output, no cursor motion,
+/// no charset change.
+#[test]
+fn vt52_single_and_locking_shifts_are_silent() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"\x1bF");
+    h.feed(b"\x1bN\x1bO\x1bn\x1bo\x1b|\x1b}\x1b~");
+    h.assert_cursor_pos(0, 0);
+    h.feed(b"q");
+    h.assert_row(0, "\u{2500}");
+}
+
+/// A character above U+00FF after an ignored introducer is swallowed whole
+/// and ends the sequence (xterm: a wide character is `CASE_GROUND_STATE`).
+#[test]
+fn vt52_non_ascii_after_ignored_introducer_is_swallowed_whole() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed("\x1b(\u{4e16}A".as_bytes());
+    h.assert_row(0, "A");
+}
+
+/// The same character delivered in three reads.
+#[test]
+fn vt52_non_ascii_after_ignored_introducer_split_across_reads() {
+    let bytes = "\u{4e16}".as_bytes();
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"\x1b(");
+    h.feed(&bytes[..1]);
+    h.feed(&bytes[1..2]);
+    h.feed(&bytes[2..]);
+    h.feed(b"A");
+    h.assert_row(0, "A");
+}
+
+/// An invalid byte is one replacement character: it ends the sequence and the
+/// text that follows prints.
+#[test]
+fn vt52_invalid_byte_after_ignored_introducer_ends_it() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(&[0x1B, b'(', 0xFF, b'A']);
+    h.assert_row(0, "A");
+}
+
+/// Finals xterm sends to `CASE_GROUND_STATE` are silent: nothing prints and
+/// nothing moves.
+#[test]
+fn vt52_unassigned_finals_are_silent() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"\x1bX\x1b0\x1b@\x1bz\x1b[\x1b\x7e");
+    h.assert_cursor_pos(0, 0);
+    h.feed(b"A");
+    h.assert_row(0, "A");
+}
+
+/// A C0 control after a bare `ESC` executes, and the VT52 command that
+/// follows it still applies.
+#[test]
+fn vt52_control_inside_an_escape_executes_and_the_command_follows() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"abc");
+    h.feed(b"\x1b\x08"); // BS inside the escape
+    h.assert_cursor_pos(2, 0);
+    h.feed(b"D"); // the pending escape completes as ESC D: cursor left
+    h.assert_cursor_pos(1, 0);
+    h.feed(b"\x1b\r");
+    h.assert_cursor_pos(0, 0);
+}
+
+/// `ESC ESC A` is one cursor-up; `ESC CAN A` cancels, so `A` prints.
+#[test]
+fn vt52_esc_restarts_and_can_cancels() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(&vt52cup(3, 1));
+    h.feed(b"\x1b\x1bA");
+    h.assert_cursor_pos(0, 1);
+    h.feed(VT52_HOME);
+    h.feed(b"\x1b\x18A");
+    h.assert_row(0, "A");
+}
+
 // ─── Identify (ESC Z) ────────────────────────────────────────────────────────
 
 /// `ESC Z` (DECID) in VT52 mode causes the terminal to respond with
