@@ -11,7 +11,7 @@
 //! it back as screen coordinates (Ghostty `Screen.resize` `saved_cursor_pin`;
 //! xterm `AdjustSavedCursor` for the alternate-screen case).
 
-use freminal_common::buffer_states::tchar::TChar;
+use freminal_common::buffer_states::{modes::declrmm::Declrmm, tchar::TChar};
 
 use crate::{buffer::Buffer, cell::Cell};
 
@@ -272,4 +272,86 @@ fn height_only_resize_without_scrollback_keeps_the_screen_position() {
 
     let restored = buf.cursor_screen_pos();
     assert_eq!((restored.x, restored.y), (6, 3));
+}
+
+// ── Pending wrap at the DECLRMM right margin (147 PR review R5) ──────────
+
+/// A 20-column screen with DECLRMM margins 1-10 and `abcdefghij` printed, so
+/// the cursor is in pending wrap at the margin (column 10).
+fn pending_wrap_at_the_right_margin() -> Buffer {
+    let mut buf = Buffer::new(20, 5);
+    buf.set_declrmm(Declrmm::Enabled);
+    buf.set_left_right_margins(1, 10);
+    buf.insert_text(&text("abcdefghij"));
+    assert_eq!(buf.cursor().pos.x, 10, "setup: pending wrap at the margin");
+    buf
+}
+
+#[test]
+fn declrmm_pending_wrap_survives_save_and_restore() {
+    let mut buf = pending_wrap_at_the_right_margin();
+    buf.save_cursor();
+    buf.set_cursor_pos(Some(0), Some(3));
+
+    buf.restore_cursor();
+
+    assert_eq!(
+        buf.cursor().pos.x,
+        10,
+        "pending wrap restored at the margin"
+    );
+    buf.insert_text(&text("K"));
+    assert_eq!(
+        row_text(&buf, 0),
+        "abcdefghij",
+        "the margin column is intact"
+    );
+    assert_eq!(row_text(&buf, 1), "K", "the next character wraps");
+}
+
+#[test]
+fn declrmm_pending_wrap_across_a_resize_that_resets_the_margins_still_wraps() {
+    let mut buf = pending_wrap_at_the_right_margin();
+    buf.save_cursor();
+    buf.set_cursor_pos(Some(0), Some(3));
+
+    // The margins no longer fit, so they reset to the full 5 columns; 'j'
+    // reflows to the last column.
+    let _ = buf.set_size(5, 5, 0);
+    buf.restore_cursor();
+    buf.insert_text(&text("K"));
+
+    let y = buf.cursor().pos.y;
+    assert_eq!(row_text(&buf, y), "K", "the character wraps");
+    assert_eq!(row_text(&buf, y - 1), "fghij", "'j' is not overwritten");
+}
+
+#[test]
+fn declrmm_pending_wrap_across_a_widening_resize_keeps_the_margin_edge() {
+    let mut buf = pending_wrap_at_the_right_margin();
+    buf.save_cursor();
+    buf.set_cursor_pos(Some(0), Some(3));
+
+    let _ = buf.set_size(30, 5, 0);
+    buf.restore_cursor();
+
+    assert_eq!(buf.left_right_margins(), (0, 9), "setup: margins kept");
+    assert_eq!(buf.cursor().pos.x, 10, "still pending at the margin");
+    buf.insert_text(&text("K"));
+    assert_eq!(row_text(&buf, 0), "abcdefghij");
+    assert_eq!(row_text(&buf, 1), "K");
+}
+
+#[test]
+fn declrmm_cursor_right_of_the_margin_is_not_saved_as_pending_wrap() {
+    let mut buf = Buffer::new(20, 5);
+    buf.set_declrmm(Declrmm::Enabled);
+    buf.set_left_right_margins(1, 10);
+    buf.set_cursor_pos(Some(15), Some(0));
+    buf.save_cursor();
+    buf.set_cursor_pos(Some(0), Some(2));
+
+    buf.restore_cursor();
+
+    assert_eq!(buf.cursor().pos.x, 15, "an ordinary column, restored as is");
 }

@@ -23,9 +23,11 @@ use crate::buffer::Buffer;
 
 /// Whether a saved cursor was in the pending-wrap position.
 ///
-/// The live cursor encodes pending wrap as `pos.x == width` (one past the last
-/// column). A save keeps the column clamped to `width - 1` and records the
-/// pending state separately, so the saved column is always a real column.
+/// The live cursor encodes pending wrap as `pos.x` at the effective wrap column
+/// (`width`, or `scroll_region_right + 1` under DECLRMM), one past the last
+/// column that can be written. A save keeps the column clamped to the last
+/// writable column and records the pending state separately, so the saved
+/// column is always a real column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::buffer) enum SavedWrapState {
     /// The cursor sat on a real column; the next print stays on the row.
@@ -72,7 +74,7 @@ pub(in crate::buffer) struct SavedCursor {
     pub(in crate::buffer) decom: Decom,
     /// Whether the cursor was in the pending-wrap position at the time of the
     /// save. When `Pending`, `cursor.pos.x` is the right-edge column
-    /// (`width - 1` at save time).
+    /// (`effective_wrap_column() - 1` at save time).
     pub(in crate::buffer) wrap: SavedWrapState,
 }
 
@@ -95,6 +97,17 @@ pub(in crate::buffer) enum SavedCursorPin {
 }
 
 impl Buffer {
+    /// The column at which a print wraps: `scroll_region_right + 1` while
+    /// DECLRMM is enabled, otherwise the screen width. A cursor sitting at
+    /// this column has a pending wrap.
+    pub(in crate::buffer) const fn effective_wrap_column(&self) -> usize {
+        if matches!(self.declrmm_enabled, Declrmm::Enabled) {
+            self.scroll_region_right + 1
+        } else {
+            self.width
+        }
+    }
+
     /// Pin the saved cursor's cell ahead of a resize, or `None` when there is
     /// nothing to follow: no saved cursor, or one saved below every stored
     /// row (blank screen space no text occupies), which keeps its screen
@@ -127,13 +140,14 @@ impl Buffer {
                 .filter(|&y| y < self.height),
             SavedCursorPin::Lost => None,
         };
-        let last_column = self.width.saturating_sub(1);
+        let last_screen_column = self.width.saturating_sub(1);
+        let last_column = self.effective_wrap_column().saturating_sub(1);
         let Some(saved) = self.saved_cursor.as_mut() else {
             return;
         };
         if let (SavedCursorPin::Cell { x, .. }, Some(y)) = (pin, screen_y) {
             saved.cursor.pos.y = y;
-            saved.cursor.pos.x = x.min(last_column);
+            saved.cursor.pos.x = x.min(last_screen_column);
             if saved.wrap == SavedWrapState::Pending && saved.cursor.pos.x < last_column {
                 saved.cursor.pos.x += 1;
                 saved.wrap = SavedWrapState::Settled;
@@ -357,12 +371,21 @@ impl Buffer {
     ///
     /// Saves the cursor's **screen** position (see `SavedCursor`) together
     /// with its associated `CursorState`, the DECOM (origin mode) state and
-    /// whether the cursor is in the pending-wrap position (`x == width`).
+    /// whether the cursor is in the pending-wrap position (`x` at the
+    /// effective wrap column, see `effective_wrap_column`).
     pub fn save_cursor(&mut self) {
         let mut cursor = self.cursor.clone();
         cursor.pos = self.cursor_screen_pos();
-        let wrap = if self.width > 0 && cursor.pos.x >= self.width {
-            cursor.pos.x = self.width - 1;
+        let edge = self.effective_wrap_column();
+        let pending = if self.declrmm_enabled == Declrmm::Enabled {
+            // A cursor positioned right of the margin is not pending wrap; it
+            // is simply outside the margins.
+            cursor.pos.x == edge
+        } else {
+            cursor.pos.x >= edge
+        };
+        let wrap = if edge > 0 && pending {
+            cursor.pos.x = edge - 1;
             SavedWrapState::Pending
         } else {
             SavedWrapState::Settled
@@ -415,9 +438,10 @@ impl Buffer {
         // Clamp to current dimensions after restore; pending wrap survives
         // only while the saved column is still the right edge.
         if self.width > 0 {
-            let at_edge = self.cursor.pos.x == self.width - 1;
+            let edge = self.effective_wrap_column();
+            let at_edge = self.cursor.pos.x + 1 == edge;
             self.cursor.pos.x = if saved.wrap == SavedWrapState::Pending && at_edge {
-                self.width
+                edge
             } else {
                 self.cursor.pos.x.min(self.width - 1)
             };
