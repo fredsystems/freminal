@@ -23,9 +23,9 @@
 //! | none   | `$`          | `p` (DECRQM, ANSI)                                                  |
 //! | none   | `!`          | `p` (DECSTR)                                                        |
 //! | none   | SP           | `q` (DECSCUSR)                                                      |
-//! | `?`    | none         | `h l n u`                                                           |
+//! | `?`    | none         | `h l n u S`                                                         |
 //! | `?`    | `$`          | `p` (DECRQM, private)                                               |
-//! | `>`    | none         | `c q m u`                                                           |
+//! | `>`    | none         | `c q m u t T`                                                       |
 //! | `<`    | none         | `u`                                                                 |
 //! | `=`    | none         | `c u`                                                               |
 
@@ -53,7 +53,9 @@ use super::csi_commands::{
     rep::ansi_parser_inner_csi_finished_rep, scorc::ansi_parser_inner_csi_finished_scorc,
     sd::ansi_parser_inner_csi_finished_sd, sgr::ansi_parser_inner_csi_finished_sgr,
     su::ansi_parser_inner_csi_finished_su, tbc::ansi_parser_inner_csi_finished_tbc,
-    vpa::ansi_parser_inner_csi_finished_vpa, xtversion::ansi_parser_inner_csi_finished_xtversion,
+    vpa::ansi_parser_inner_csi_finished_vpa,
+    xtsmgraphics::ansi_parser_inner_csi_finished_xtsmgraphics,
+    xtversion::ansi_parser_inner_csi_finished_xtversion,
 };
 use super::csi_key::{CsiIntermediate, CsiKey, CsiPrefix};
 use crate::ansi::ParserOutcome;
@@ -203,6 +205,8 @@ fn question(
             ansi_parser_inner_csi_finished_scorc(params, output);
             ParserOutcome::Finished
         }
+        // XTSMGRAPHICS.
+        b'S' => ansi_parser_inner_csi_finished_xtsmgraphics(params, output),
         _ => return None,
     };
     Some(outcome)
@@ -224,6 +228,16 @@ fn greater(
         // Kitty keyboard protocol: push.
         b'u' => {
             ansi_parser_inner_csi_finished_scorc(params, output);
+            ParserOutcome::Finished
+        }
+        // XTSMTITLE (`CSI > Pm t`) and XTRMTITLE (`CSI > Pm T`): xterm title
+        // mode features. Freminal has no title modes; recognised and ignored.
+        b't' | b'T' => {
+            tracing::debug!(
+                "XTSMTITLE/XTRMTITLE (CSI > Pm {}) ignored: title modes are not supported",
+                char::from(final_byte)
+            );
+            output.push(TerminalOutput::Skipped);
             ParserOutcome::Finished
         }
         _ => return None,

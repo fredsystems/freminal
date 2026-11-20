@@ -7,7 +7,7 @@
 //!
 //! One concept: building a current GL context that renders into an
 //! offscreen pbuffer instead of a window. This is the Phase 2 counterpart
-//! to [`crate::gl_context`]'s windowed path, and is **additive** — it
+//! to `crate::gl_context`'s windowed path, and is **additive** — it
 //! shares no code with, and changes nothing about, how the real
 //! application creates its context.
 //!

@@ -30,6 +30,7 @@ use freminal_common::buffer_states::kitty_graphics::{
 };
 use freminal_common::buffer_states::row_number::RowNumber;
 
+use freminal_buffer::buffer::{ImagePlacementMode, PlaceImageRequest};
 use freminal_buffer::image_store::{
     AnimationControl, AnimationRunMode, ImageProtocol, ImageSizeMode, InlineImage, SourceCrop,
     SubCellOffset, next_image_id, next_placement_instance_id,
@@ -229,12 +230,53 @@ impl FileIdentity {
     }
 }
 
+/// What a `t=f` / `t=t` transmission intends to do with the file it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KittyFileUse {
+    /// `t=f`: read the file and leave it alone.
+    Read,
+    /// `t=t`: read the file, then delete it if it is a temporary file.
+    Consume,
+}
+
+/// What happens to a file after it has been read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KittyFileFate {
+    Keep,
+    Delete,
+}
+
+/// The fate of the file at `canonical` for a transmission that `usage`
+/// describes.
+///
+/// Only a [`KittyFileUse::Consume`] of a file that passes
+/// [`may_delete_kitty_temp_file`] is deleted. It is decided before the file is
+/// opened because on Windows the deletion is requested by the open itself.
+fn kitty_file_fate(usage: KittyFileUse, canonical: &std::path::Path) -> KittyFileFate {
+    match usage {
+        KittyFileUse::Read => KittyFileFate::Keep,
+        KittyFileUse::Consume => {
+            if may_delete_kitty_temp_file(canonical) {
+                KittyFileFate::Delete
+            } else {
+                KittyFileFate::Keep
+            }
+        }
+    }
+}
+
 /// A file read for a `t=f` / `t=t` transmission.
 struct LoadedKittyFile {
     /// The canonical path the file was opened through.
     canonical: std::path::PathBuf,
     /// The file contents.
     data: Vec<u8>,
+    /// Whether the file is deleted once read. On Windows it already has been
+    /// by the time this value exists: the handle that read it was opened
+    /// delete-on-close and has been dropped. If that open was refused (a
+    /// sharing violation or access denied) the file was read through an
+    /// ordinary open instead and this is [`KittyFileFate::Keep`].
+    fate: KittyFileFate,
     /// The identity of the opened object, so a `t=t` deletion can be bound
     /// to the file that was actually read rather than to whatever the path
     /// names by then.
@@ -278,12 +320,111 @@ fn open_regular_kitty_file(canonical: &std::path::Path) -> Result<std::fs::File,
     }
 
     let file = options.open(canonical).map_err(KittyFileError::Open)?;
+    require_regular_file(file)
+}
+
+/// Confirm that `file` is a regular file, judging by the handle itself.
+fn require_regular_file(file: std::fs::File) -> Result<std::fs::File, KittyFileError> {
     let metadata = file.metadata().map_err(KittyFileError::Open)?;
     if metadata.is_file() {
         Ok(file)
     } else {
         Err(KittyFileError::NotRegularFile)
     }
+}
+
+/// Open `canonical` read-only so that the file is deleted when the returned
+/// handle is closed, and confirm the handle is a regular file.
+///
+/// Windows has no handle-relative unlink in `std`, and deleting by pathname
+/// would delete whatever the path names by then. `FILE_FLAG_DELETE_ON_CLOSE`
+/// ties the deletion to the handle: the file deleted is the file read. The
+/// open asks for `DELETE` access, which that flag requires, and shares
+/// read, write and delete so that it cannot fail on another process holding
+/// the file open, which `t=t` clients routinely do.
+///
+/// The deletion also happens if a later step rejects the file (it is too
+/// large, or fails to read). That is intended: the caller has already
+/// established that the file is a `tty-graphics-protocol` temporary file the
+/// client handed over for consumption.
+///
+/// The open does not follow a link in the final path component
+/// (`FILE_FLAG_OPEN_REPARSE_POINT`), so a link swapped in after
+/// canonicalisation is opened as the link itself, and the handle is rejected
+/// unless it is a regular file that is not a reparse point. The target of such
+/// a link is never opened, read or deleted; only the link entry itself is
+/// removed when the rejected handle closes.
+///
+/// Asking for `DELETE` access can be refused (a sharing violation, because
+/// another process holds the file open without `FILE_SHARE_DELETE`, or access
+/// denied, for example on a read-only file). The image must still load, as it
+/// did before the deletion was bound to the handle, so that refusal falls back
+/// to an ordinary read-only open and the returned fate is
+/// [`KittyFileFate::Keep`].
+#[cfg(windows)]
+fn open_regular_kitty_file_deleting_on_close(
+    canonical: &std::path::Path,
+) -> Result<(std::fs::File, KittyFileFate), KittyFileError> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use winapi::um::winbase::{FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_OPEN_REPARSE_POINT};
+    use winapi::um::winnt::{
+        DELETE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ,
+    };
+
+    let file = match std::fs::OpenOptions::new()
+        .access_mode(GENERIC_READ | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(canonical)
+    {
+        Ok(file) => file,
+        Err(e) if delete_open_refusal_allows_plain_read(&e) => {
+            tracing::debug!(
+                "Kitty graphics: not deleting {}: delete-on-close open refused ({e}); reading without deletion",
+                canonical.display()
+            );
+            return Ok((open_regular_kitty_file(canonical)?, KittyFileFate::Keep));
+        }
+        Err(e) => return Err(KittyFileError::Open(e)),
+    };
+
+    let metadata = file.metadata().map_err(KittyFileError::Open)?;
+    if !metadata.is_file() || is_reparse_point_attributes(metadata.file_attributes()) {
+        return Err(KittyFileError::NotRegularFile);
+    }
+    Ok((file, KittyFileFate::Delete))
+}
+
+/// `ERROR_ACCESS_DENIED`.
+#[cfg(any(windows, test))]
+const WIN32_ERROR_ACCESS_DENIED: i32 = 5;
+/// `ERROR_SHARING_VIOLATION`.
+#[cfg(any(windows, test))]
+const WIN32_ERROR_SHARING_VIOLATION: i32 = 32;
+/// `FILE_ATTRIBUTE_REPARSE_POINT`.
+#[cfg(any(windows, test))]
+const WIN32_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// Whether a failed delete-on-close open should fall back to an ordinary
+/// read-only open.
+///
+/// A sharing violation or access-denied error from the open means the
+/// `DELETE` access could not be granted, not that the file cannot be read.
+/// Any other error (not found, a bad path) would fail the plain open too.
+/// Pure logic over the raw OS error, so it is testable on every platform.
+#[cfg(any(windows, test))]
+fn delete_open_refusal_allows_plain_read(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(WIN32_ERROR_ACCESS_DENIED | WIN32_ERROR_SHARING_VIOLATION)
+    )
+}
+
+/// Whether Windows file `attributes` mark a reparse point (symlink, junction,
+/// or other link-like object). Pure logic, testable on every platform.
+#[cfg(any(windows, test))]
+const fn is_reparse_point_attributes(attributes: u32) -> bool {
+    attributes & WIN32_FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 /// Bind the refused-prefix check to the object that was actually opened.
@@ -358,8 +499,10 @@ fn kitty_path_allowed_on_windows(path_str: &str) -> bool {
 /// Validate, open and read the file named by a `t=f` / `t=t` payload.
 ///
 /// The result carries the canonical path and (on unix) the identity of the
-/// opened object, so a `t=t` deletion targets exactly what was read.
-fn load_kitty_file(payload: &[u8]) -> Result<LoadedKittyFile, KittyFileError> {
+/// opened object, so a `t=t` deletion targets exactly what was read. On
+/// Windows a file whose fate is [`KittyFileFate::Delete`] is opened
+/// delete-on-close and is gone once this function returns.
+fn load_kitty_file(payload: &[u8], usage: KittyFileUse) -> Result<LoadedKittyFile, KittyFileError> {
     let path_str = std::str::from_utf8(payload).map_err(|_| KittyFileError::NotUtf8)?;
     // Before ANY filesystem call: `is_absolute` is true for a UNC path and
     // `canonicalize` would contact its host.
@@ -377,6 +520,13 @@ fn load_kitty_file(payload: &[u8]) -> Result<LoadedKittyFile, KittyFileError> {
         return Err(KittyFileError::RefusedPrefix);
     }
 
+    let fate = kitty_file_fate(usage, &canonical);
+    #[cfg(windows)]
+    let (file, fate) = match fate {
+        KittyFileFate::Delete => open_regular_kitty_file_deleting_on_close(&canonical)?,
+        KittyFileFate::Keep => (open_regular_kitty_file(&canonical)?, KittyFileFate::Keep),
+    };
+    #[cfg(not(windows))]
     let file = open_regular_kitty_file(&canonical)?;
     #[cfg(unix)]
     let identity = verify_opened_kitty_file(&file, path, &canonical)?;
@@ -385,6 +535,7 @@ fn load_kitty_file(payload: &[u8]) -> Result<LoadedKittyFile, KittyFileError> {
     Ok(LoadedKittyFile {
         canonical,
         data,
+        fate,
         #[cfg(unix)]
         identity,
     })
@@ -465,15 +616,22 @@ fn delete_kitty_temp_file(loaded: &LoadedKittyFile) -> Result<(), KittyFileError
         .map_err(|e| KittyFileError::Delete(std::io::Error::from(e)))
 }
 
-/// Delete the `t=t` file that `loaded` was read from.
+/// Confirm the deletion of the `t=t` file that `loaded` was read from.
 ///
-/// Non-unix fallback: `std` exposes no handle-relative delete, so this
-/// removes by pathname. The race the unix implementation closes (a swap
-/// redirecting the path into `/proc`, `/sys` or `/dev`) does not apply
-/// here, since those prefixes do not exist on Windows.
-#[cfg(not(unix))]
+/// Windows: the file was opened delete-on-close by [`load_kitty_file`] and the
+/// handle was dropped after reading, so the file deleted is the file read (see
+/// [`open_regular_kitty_file_deleting_on_close`]). All that is left is to
+/// report an entry still present at the path, which means something else held
+/// it open at the time.
+#[cfg(windows)]
 fn delete_kitty_temp_file(loaded: &LoadedKittyFile) -> Result<(), KittyFileError> {
-    std::fs::remove_file(&loaded.canonical).map_err(KittyFileError::Delete)
+    if loaded.canonical.exists() {
+        Err(KittyFileError::Delete(std::io::Error::other(
+            "file still present after its handle was closed",
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 /// Apply a signed cell offset (`H=`/`V=`) to a `usize` origin coordinate.
@@ -1423,7 +1581,7 @@ impl TerminalHandler {
 
         // Look up the previously transmitted image.
         let Some(stored_image) = self.buffer.image_store().get(id).cloned() else {
-            tracing::warn!(
+            tracing::debug!(
                 "Kitty graphics: a=p for unknown image id={image_id} \
                  (store has {} images)",
                 self.buffer.image_store().len(),
@@ -1550,13 +1708,16 @@ impl TerminalHandler {
         let place_result = self.buffer.place_image(
             image_to_place,
             0,
-            ImageProtocol::Kitty,
-            cmd.control.image_number,
-            cmd.control.placement_id,
-            cmd.control.z_index.unwrap_or(0),
-            source_crop,
-            placement_instance,
-            subcell_offset,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: cmd.control.image_number,
+                placement_id: cmd.control.placement_id,
+                z_index: cmd.control.z_index.unwrap_or(0),
+                source_crop,
+                placement_instance,
+                subcell_offset,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // `C=1` (no cursor movement): put the cursor back on the image origin,
@@ -1813,7 +1974,12 @@ impl TerminalHandler {
         quiet: u8,
         delete_after: bool,
     ) -> Option<Vec<u8>> {
-        let loaded = match load_kitty_file(payload) {
+        let usage = if delete_after {
+            KittyFileUse::Consume
+        } else {
+            KittyFileUse::Read
+        };
+        let loaded = match load_kitty_file(payload, usage) {
             Ok(loaded) => loaded,
             Err(e) => {
                 tracing::debug!("Kitty graphics: refusing file transmission: {e}");
@@ -1833,7 +1999,7 @@ impl TerminalHandler {
         );
 
         if delete_after {
-            if may_delete_kitty_temp_file(&loaded.canonical) {
+            if loaded.fate == KittyFileFate::Delete {
                 if let Err(e) = delete_kitty_temp_file(&loaded) {
                     // Not fatal -- we still have the data.
                     tracing::debug!(
@@ -1848,7 +2014,7 @@ impl TerminalHandler {
                 }
             } else {
                 tracing::debug!(
-                    "Kitty graphics: not deleting {}: not a tty-graphics-protocol file in a temporary directory",
+                    "Kitty graphics: not deleting {}: not a tty-graphics-protocol file in a temporary directory, or deletion was not possible",
                     loaded.canonical.display()
                 );
             }
@@ -2341,13 +2507,16 @@ impl TerminalHandler {
         let place_result = self.buffer.place_image(
             inline_image,
             0,
-            ImageProtocol::Kitty,
-            control.image_number,
-            control.placement_id,
-            control.z_index.unwrap_or(0),
-            source_crop,
-            placement_instance,
-            subcell_offset,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: control.image_number,
+                placement_id: control.placement_id,
+                z_index: control.z_index.unwrap_or(0),
+                source_crop,
+                placement_instance,
+                subcell_offset,
+                mode: ImagePlacementMode::Inline,
+            },
         );
 
         // `C=1` (no cursor movement) — mirrors `stamp_kitty_put`'s handling of
@@ -4136,7 +4305,10 @@ fn extract_rect(
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::load_kitty_file;
+    use super::{
+        KittyFileFate, KittyFileUse, WIN32_FILE_ATTRIBUTE_REPARSE_POINT, delete_kitty_temp_file,
+        load_kitty_file, open_regular_kitty_file_deleting_on_close,
+    };
 
     /// The property the macOS `mmap` reader relies on: XNU rejects a second
     /// `ftruncate` of a shared-memory object, so it can never shrink under a
@@ -4193,14 +4365,15 @@ mod tests {
 
     #[cfg(unix)]
     use super::{
-        FileIdentity, delete_kitty_temp_file, load_kitty_file, open_regular_kitty_file,
-        verify_opened_kitty_file,
+        FileIdentity, KittyFileUse, delete_kitty_temp_file, load_kitty_file,
+        open_regular_kitty_file, verify_opened_kitty_file,
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     use super::{KITTY_SHM_READ_CHUNK, read_kitty_shm_object};
     use super::{
-        KittyFileError, ShmBoundsError, is_refused_kitty_path, kitty_path_allowed_on_windows,
-        read_capped, shm_read_bounds,
+        KittyFileError, ShmBoundsError, WIN32_ERROR_ACCESS_DENIED, WIN32_ERROR_SHARING_VIOLATION,
+        delete_open_refusal_allows_plain_read, is_refused_kitty_path, is_reparse_point_attributes,
+        kitty_path_allowed_on_windows, read_capped, shm_read_bounds,
     };
     #[cfg(unix)]
     use super::{
@@ -8081,9 +8254,191 @@ mod tests {
     }
 
     #[test]
+    fn kitty_file_fate_deletes_only_a_consumed_marked_temp_file() {
+        use super::{KittyFileFate, KittyFileUse, kitty_file_fate};
+
+        let marked = write_unique_png("tty-graphics-protocol-fate-");
+        let unmarked = write_unique_png("freminal_fate_unmarked_");
+        let marked_canonical = std::fs::canonicalize(&marked).expect("canonicalise");
+        let unmarked_canonical = std::fs::canonicalize(&unmarked).expect("canonicalise");
+        let outside = std::path::Path::new("/nonexistent/tty-graphics-protocol/x.png");
+        let _ = std::fs::remove_file(&marked);
+        let _ = std::fs::remove_file(&unmarked);
+
+        assert_eq!(
+            kitty_file_fate(KittyFileUse::Consume, &marked_canonical),
+            KittyFileFate::Delete
+        );
+        assert_eq!(
+            kitty_file_fate(KittyFileUse::Read, &marked_canonical),
+            KittyFileFate::Keep,
+            "t=f never deletes"
+        );
+        assert_eq!(
+            kitty_file_fate(KittyFileUse::Consume, &unmarked_canonical),
+            KittyFileFate::Keep,
+            "a file without the marker is kept"
+        );
+        assert_eq!(
+            kitty_file_fate(KittyFileUse::Consume, outside),
+            KittyFileFate::Keep,
+            "a marked file outside a temporary directory is kept"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_load_consume_deletes_the_file_by_handle() {
+        let path = write_unique_png("tty-graphics-protocol-handle-");
+
+        let loaded = load_kitty_file(
+            path.to_str().expect("utf-8").as_bytes(),
+            KittyFileUse::Consume,
+        )
+        .expect("load");
+        let gone = !path.exists();
+        let confirmed = delete_kitty_temp_file(&loaded);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(!loaded.data.is_empty(), "the file was read");
+        assert!(gone, "the handle that read the file deleted it on close");
+        assert!(confirmed.is_ok(), "{confirmed:?}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_load_read_leaves_the_file_in_place() {
+        let path = write_unique_png("tty-graphics-protocol-keep-");
+
+        let loaded = load_kitty_file(path.to_str().expect("utf-8").as_bytes(), KittyFileUse::Read)
+            .expect("load");
+        let survived = path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(!loaded.data.is_empty(), "the file was read");
+        assert!(survived, "t=f must not delete the file");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_load_consume_deletes_a_file_another_handle_holds_open() {
+        let path = write_unique_png("tty-graphics-protocol-shared-");
+        let other = std::fs::File::open(&path).expect("open the file as another reader");
+
+        let loaded = load_kitty_file(
+            path.to_str().expect("utf-8").as_bytes(),
+            KittyFileUse::Consume,
+        );
+        drop(other);
+        let gone = !path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            loaded.is_ok(),
+            "the share mode must admit another reader: {:?}",
+            loaded.err()
+        );
+        assert!(gone, "the file goes once the last handle closes");
+    }
+
+    #[test]
+    fn kitty_delete_open_refusal_falls_back_only_for_sharing_and_access_errors() {
+        for code in [WIN32_ERROR_SHARING_VIOLATION, WIN32_ERROR_ACCESS_DENIED] {
+            assert!(
+                delete_open_refusal_allows_plain_read(&std::io::Error::from_raw_os_error(code)),
+                "os error {code} falls back to a plain read"
+            );
+        }
+        for code in [2, 3, 123] {
+            assert!(
+                !delete_open_refusal_allows_plain_read(&std::io::Error::from_raw_os_error(code)),
+                "os error {code} does not fall back"
+            );
+        }
+        assert!(
+            !delete_open_refusal_allows_plain_read(&std::io::Error::other("no os error")),
+            "an error without an OS code does not fall back"
+        );
+    }
+
+    #[test]
+    fn kitty_reparse_point_attribute_is_detected() {
+        assert!(is_reparse_point_attributes(0x0000_0400));
+        assert!(is_reparse_point_attributes(0x0000_0420));
+        assert!(!is_reparse_point_attributes(0x0000_0020));
+        assert!(!is_reparse_point_attributes(0));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_windows_reparse_attribute_constant_matches_winapi() {
+        assert_eq!(
+            WIN32_FILE_ATTRIBUTE_REPARSE_POINT,
+            winapi::um::winnt::FILE_ATTRIBUTE_REPARSE_POINT
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_load_consume_falls_back_when_another_handle_forbids_delete() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use winapi::um::winnt::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let path = write_unique_png("tty-graphics-protocol-nodelete-");
+        let other = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .expect("open the file without FILE_SHARE_DELETE");
+
+        let loaded = load_kitty_file(
+            path.to_str().expect("utf-8").as_bytes(),
+            KittyFileUse::Consume,
+        );
+        drop(other);
+        let survived = path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        let loaded = loaded.expect("the image still loads");
+        assert!(!loaded.data.is_empty(), "the file was read");
+        assert_eq!(loaded.fate, KittyFileFate::Keep, "deletion was skipped");
+        assert!(survived, "the file is left in place");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_delete_on_close_open_rejects_a_link_without_touching_its_target() {
+        let target = write_unique_png("tty-graphics-protocol-target-");
+        let link = target.with_file_name(format!(
+            "tty-graphics-protocol-link-{}.png",
+            target
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("link")
+        ));
+        if let Err(e) = std::os::windows::fs::symlink_file(&target, &link) {
+            eprintln!("skipping: cannot create a symlink without privilege: {e}");
+            let _ = std::fs::remove_file(&target);
+            return;
+        }
+
+        let result = open_regular_kitty_file_deleting_on_close(&link);
+        let target_survived = target.exists();
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+
+        assert!(
+            matches!(result, Err(KittyFileError::NotRegularFile)),
+            "a link must be rejected, got {:?}",
+            result.map(|(_, fate)| fate)
+        );
+        assert!(target_survived, "the link's target must not be deleted");
+    }
+
+    #[test]
     #[cfg(windows)]
     fn kitty_load_refuses_unc_path_before_touching_the_filesystem() {
-        let result = load_kitty_file(b"\\\\host\\share\\x.png");
+        let result = load_kitty_file(b"\\\\host\\share\\x.png", KittyFileUse::Read);
         assert!(
             matches!(result, Err(KittyFileError::NotLocalPath)),
             "a UNC path must be refused without resolving it"
@@ -8140,7 +8495,11 @@ mod tests {
     #[cfg(unix)]
     fn kitty_delete_refuses_entry_replaced_after_load() {
         let path = write_unique_png("tty-graphics-protocol-swap-");
-        let loaded = load_kitty_file(path.to_str().expect("utf-8").as_bytes()).expect("load");
+        let loaded = load_kitty_file(
+            path.to_str().expect("utf-8").as_bytes(),
+            KittyFileUse::Consume,
+        )
+        .expect("load");
 
         // Replace the entry with a different file. The replacement is created
         // while the original still exists so it cannot reuse its inode.
@@ -8165,7 +8524,11 @@ mod tests {
     #[cfg(unix)]
     fn kitty_delete_removes_the_file_that_was_read() {
         let path = write_unique_png("tty-graphics-protocol-direct-");
-        let loaded = load_kitty_file(path.to_str().expect("utf-8").as_bytes()).expect("load");
+        let loaded = load_kitty_file(
+            path.to_str().expect("utf-8").as_bytes(),
+            KittyFileUse::Consume,
+        )
+        .expect("load");
 
         let result = delete_kitty_temp_file(&loaded);
         let gone = !path.exists();
@@ -10218,7 +10581,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_put_unknown_id_logs_a_bounded_message() {
+    fn kitty_put_unknown_id_logs_a_bounded_debug_message() {
         use crate::log_capture::{capture, warnings};
 
         let (mut handler, _rx) = kitty_handler();
@@ -10238,14 +10601,26 @@ mod tests {
             });
         });
 
+        // The client already gets ENOENT on the wire, so a client probing an
+        // unknown id every frame must not fill the log above debug level.
         let warns = warnings(&events);
-        assert_eq!(warns.len(), 1, "exactly one warn: {warns:?}");
-        let warn = &warns[0].1;
-        assert!(warn.contains("9999"), "warn names the requested id: {warn}");
-        assert!(warn.contains("20"), "warn carries the store size: {warn}");
+        assert!(warns.is_empty(), "unknown-id a=p must not warn: {warns:?}");
+        let summary = events
+            .iter()
+            .find(|(level, text)| *level == tracing::Level::DEBUG && text.contains("unknown"))
+            .map(|(_, text)| text.as_str())
+            .expect("a debug line reports the unknown id");
         assert!(
-            !warn.contains('[') && !warn.contains("stored image ids"),
-            "warn must not list the stored ids: {warn}"
+            summary.contains("9999"),
+            "debug names the requested id: {summary}"
+        );
+        assert!(
+            summary.contains("20"),
+            "debug carries the store size: {summary}"
+        );
+        assert!(
+            !summary.contains('[') && !summary.contains("stored image ids"),
+            "summary must not list the stored ids: {summary}"
         );
 
         let debug = events

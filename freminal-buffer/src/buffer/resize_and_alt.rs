@@ -21,9 +21,27 @@ use freminal_common::buffer_states::{
 use crate::row::{Row, RowJoin, RowOrigin};
 
 use super::command_block_log::CommandBlockLog;
+use super::cursor::SavedCursorPin;
 use super::reflow_remap::{OldRowMeta, ReflowRemap};
 use super::{Buffer, ParkedScreen, RowStore};
 use crate::image_store::ImageStore;
+
+/// What entering the alternate screen does to its contents.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AlternateContents {
+    /// Keep a parked alternate screen as it was; a first-ever one is blank.
+    Keep,
+    /// The alternate screen comes up blank, with the current background.
+    Clear,
+}
+
+/// The left/right margin state both screens share (DECLRMM and DECSLRM).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LeftRightMargins {
+    declrmm: Declrmm,
+    left: usize,
+    right: usize,
+}
 
 impl Buffer {
     /// Resize the terminal buffer and return the adjusted `scroll_offset`.
@@ -46,6 +64,15 @@ impl Buffer {
         // up with `self.width` / `self.height` yet.
         let parked_primary = self.parked_primary.take();
         let parked_alternate = self.parked_alternate.take();
+        // The left/right margins are shared by both screens and are
+        // revalidated below; the parked screens are resized under the same
+        // pre-resize margins so their saved cursors settle on the same edge.
+        let margins = self.shared_left_right_margins();
+
+        // The saved cursor (DECSC) is kept in screen coordinates, which this
+        // resize invalidates. Pin its cell now, carry it through the reflow,
+        // height change and eviction below, and read it back at the end.
+        let mut saved_pin = self.pin_saved_cursor();
 
         // ---- NO BLANKET DECOMPACT NEEDED (Task 118.3 fix / 118.x follow-up) ----
         // An earlier version of this function force-decompacted every row
@@ -79,7 +106,7 @@ impl Buffer {
         // update each row's max_width (content that extends beyond the new width
         // is simply clipped, which matches xterm/VT behaviour).
         let after_reflow = if width_changed && self.kind != BufferType::Alternate {
-            self.reflow_to_width(new_width);
+            self.reflow_rows(new_width, &mut saved_pin);
             0
         } else {
             scroll_offset
@@ -182,6 +209,8 @@ impl Buffer {
         // idle tick.
         let final_offset = self.enforce_scrollback_limit(after_resize);
 
+        self.settle_saved_cursor(saved_pin);
+
         // Resize whichever screen is parked, so every store matches the
         // buffer's dimensions and a later switch installs a screen of the
         // current size. Without this, leaving a full-screen TUI (e.g. nvim)
@@ -193,6 +222,7 @@ impl Buffer {
                 (old_width, old_height),
                 (new_width, new_height),
                 self.scrollback_limit,
+                margins,
             );
             // The primary marks held in `self` belong to the store that was
             // just reflowed / trimmed; translate them with it (primary marks
@@ -212,6 +242,7 @@ impl Buffer {
                 (old_width, old_height),
                 (new_width, new_height),
                 self.scrollback_limit,
+                margins,
             ));
         }
 
@@ -278,6 +309,7 @@ impl Buffer {
         old_size: (usize, usize),
         new_size: (usize, usize),
         scrollback_limit: usize,
+        margins: LeftRightMargins,
     ) -> (ParkedScreen, Option<ReflowRemap>) {
         Self::resize_parked_screen(
             parked,
@@ -285,6 +317,7 @@ impl Buffer {
             old_size,
             new_size,
             scrollback_limit,
+            margins,
         )
     }
 
@@ -299,6 +332,7 @@ impl Buffer {
         old_size: (usize, usize),
         new_size: (usize, usize),
         scrollback_limit: usize,
+        margins: LeftRightMargins,
     ) -> ParkedScreen {
         Self::resize_parked_screen(
             parked,
@@ -306,6 +340,7 @@ impl Buffer {
             old_size,
             new_size,
             scrollback_limit,
+            margins,
         )
         .0
     }
@@ -315,14 +350,17 @@ impl Buffer {
     /// `Buffer` of the given `kind` that holds the parked screen's state.
     ///
     /// The temporary buffer's cursor is the screen's `reflow_anchor`, which is
-    /// what a reflow or height shrink anchors on; the margins are full-screen
-    /// and are discarded (margins are shared and live on the real buffer).
+    /// what a reflow or height shrink anchors on. The left/right margins are
+    /// the real buffer's pre-resize ones (`margins`), so the saved cursor
+    /// settles against the same wrap edge; the temporary buffer's margins are
+    /// discarded afterwards (they are shared and live on the real buffer).
     fn resize_parked_screen(
         parked: ParkedScreen,
         kind: BufferType,
         (old_width, old_height): (usize, usize),
         (new_width, new_height): (usize, usize),
         scrollback_limit: usize,
+        margins: LeftRightMargins,
     ) -> (ParkedScreen, Option<ReflowRemap>) {
         let mut tmp = Self {
             rows: parked.rows,
@@ -358,9 +396,9 @@ impl Buffer {
             preserve_scrollback_anchor: false,
             scroll_region_top: 0,
             scroll_region_bottom: old_height.saturating_sub(1),
-            scroll_region_left: 0,
-            scroll_region_right: old_width.saturating_sub(1),
-            declrmm_enabled: Declrmm::Disabled,
+            scroll_region_left: margins.left,
+            scroll_region_right: margins.right,
+            declrmm_enabled: margins.declrmm,
             tab_stops: Self::default_tab_stops(old_width),
             decom_enabled: Decom::NormalCursor,
             image_store: parked.image_store,
@@ -392,10 +430,6 @@ impl Buffer {
         (resized, remap)
     }
 
-    // Inherently large: the reflow algorithm walks every logical line, splits/joins rows at the
-    // new width, and preserves all cell content and tags. The size reflects algorithmic
-    // complexity, not lack of structure.
-    #[allow(clippy::too_many_lines)]
     /// Re-wrap all rows to `new_width` columns without losing any text.
     ///
     /// ## Algorithm
@@ -425,8 +459,23 @@ impl Buffer {
     ///    prompt marks and command blocks and kept for
     ///    [`Buffer::take_reflow_remap`].
     ///
+    /// The saved cursor (DECSC) follows its cell through the reflow.
+    ///
     /// The operation is O(total cells) — linear in the amount of text.
     pub fn reflow_to_width(&mut self, new_width: usize) {
+        let mut saved_pin = self.pin_saved_cursor();
+        self.reflow_rows(new_width, &mut saved_pin);
+        self.settle_saved_cursor(saved_pin);
+    }
+
+    /// The reflow itself, carrying `saved_pin` (the pinned saved cursor, see
+    /// [`SavedCursorPin`]) through the row renumbering. The caller settles it
+    /// once the dimensions are final.
+    // Inherently large: the reflow algorithm walks every logical line, splits/joins rows at the
+    // new width, and preserves all cell content and tags. The size reflects algorithmic
+    // complexity, not lack of structure.
+    #[allow(clippy::too_many_lines)]
+    fn reflow_rows(&mut self, new_width: usize, saved_pin: &mut Option<SavedCursorPin>) {
         if new_width == 0 || self.rows.is_empty() || new_width == self.width {
             // Nothing to do
             return;
@@ -827,6 +876,16 @@ impl Buffer {
             line_new_starts,
             new_row_cells,
         );
+        if let Some(pin) = saved_pin.as_mut()
+            && let SavedCursorPin::Cell { row, x } = *pin
+        {
+            *pin = remap
+                .map_cell(row, x)
+                .map_or(SavedCursorPin::Lost, |(row, x)| SavedCursorPin::Cell {
+                    row,
+                    x,
+                });
+        }
         self.record_reflow_remap(remap);
     }
 
@@ -1081,6 +1140,15 @@ impl Buffer {
     /// `resetMargins`, and `set_lr_margins` (charproc.c) clamps both margins
     /// to `max_col`; this keeps freminal's existing preserve-a-valid-partial-
     /// region behaviour for the cases where the result is still in range.
+    /// The shared left/right margin state, for resizing a parked screen.
+    const fn shared_left_right_margins(&self) -> LeftRightMargins {
+        LeftRightMargins {
+            declrmm: self.declrmm_enabled,
+            left: self.scroll_region_left,
+            right: self.scroll_region_right,
+        }
+    }
+
     const fn revalidate_left_right_margins(&mut self, old_width: usize) {
         let was_full_width =
             self.scroll_region_left == 0 && self.scroll_region_right == old_width.saturating_sub(1);
@@ -1304,20 +1372,54 @@ impl Buffer {
     /// screen row). The scroll margins are shared by both screens and are not
     /// touched. Tab stops are shared too, matching xterm.
     pub fn switch_to_alternate(&mut self) {
+        self.enter_alternate(AlternateContents::Keep);
+    }
+
+    /// Switch to the alternate screen and blank it: [`Self::switch_to_alternate`]
+    /// followed by [`Self::clear_alternate_screen`], which is the `?1049` entry.
+    ///
+    /// For a first-ever (or post-RIS) alternate screen the incoming store is
+    /// built once, already blank with the current background (BCE), where the
+    /// pair builds a blank store and then a second to replace it. A parked
+    /// alternate screen is switched in and cleared by the ordinary rebuild, so
+    /// its rows are renumbered past the parked store's. When the alternate
+    /// screen is already active this only clears it, as the pair does.
+    pub fn switch_to_alternate_cleared(&mut self) {
+        if self.kind == BufferType::Alternate {
+            self.clear_alternate_screen();
+        } else {
+            self.enter_alternate(AlternateContents::Clear);
+        }
+    }
+
+    /// Shared body of [`Self::switch_to_alternate`] and
+    /// [`Self::switch_to_alternate_cleared`]; a no-op when the alternate screen
+    /// is already active.
+    fn enter_alternate(&mut self, contents: AlternateContents) {
         if self.kind == BufferType::Alternate {
             return;
         }
 
         let screen_y = self.cursor_screen_pos().y;
 
-        let incoming = self.parked_alternate.take().unwrap_or_else(|| {
+        let parked = self.parked_alternate.take();
+        let needs_clear = parked.is_some() && contents == AlternateContents::Clear;
+        let incoming = parked.unwrap_or_else(|| {
+            // Blank with the erase background when the entry clears, which is
+            // exactly what `clear_alternate_screen` would make of it; the
+            // default tag leaves plain sparse rows.
+            let blank_tag = match contents {
+                AlternateContents::Keep => FormatTag::default(),
+                AlternateContents::Clear => self.erase_tag(),
+            };
             // The alternate screen's rows are numbered in their own
             // namespace (Task 125.14), so a primary row number can never
             // alias an alternate row.
             ParkedScreen {
-                rows: RowStore::from_rows_at(
+                rows: Self::blank_alternate_store(
                     self.next_alt_base,
-                    (0..self.height).map(|_| Row::new(self.width)),
+                    (self.width, self.height),
+                    &blank_tag,
                 ),
                 reflow_anchor: CursorState::default(),
                 saved_cursor: None,
@@ -1341,6 +1443,10 @@ impl Buffer {
         self.merge_cache = None;
 
         self.cursor.pos.y = self.buffer_row_for_screen_row(screen_y);
+
+        if needs_clear {
+            self.clear_alternate_screen();
+        }
 
         self.debug_assert_invariants();
         self.debug_assert_screen_parking();
@@ -1406,23 +1512,17 @@ impl Buffer {
     /// stored with the same mechanism ED uses ([`Row::clear_with_tag`]): with a
     /// default background the rows stay sparse, otherwise every cell is an
     /// explicit blank. ED, EL and the other erases blank with the same
-    /// tag ([`Self::erase_tag`]).
+    /// tag (`Self::erase_tag`).
     pub fn clear_alternate_screen(&mut self) {
         if self.kind != BufferType::Alternate {
             return;
         }
 
         let blank_tag = self.erase_tag();
-        let width = self.width;
-        self.rows = RowStore::from_rows_at(
+        self.rows = Self::blank_alternate_store(
             self.rows.next_number(),
-            (0..self.height).map(|_| {
-                let mut row = Row::new(width);
-                if !blank_tag.is_visually_default() {
-                    row.clear_with_tag(&blank_tag);
-                }
-                row
-            }),
+            (self.width, self.height),
+            &blank_tag,
         );
         self.image_store.clear();
         self.image_cell_count = 0;
@@ -1430,6 +1530,26 @@ impl Buffer {
         self.merge_cache = None;
 
         self.debug_assert_invariants();
+    }
+
+    /// A store of `height` blank alternate-screen rows numbered from `base`,
+    /// each carrying `blank_tag`'s background (BCE) as
+    /// [`Self::clear_alternate_screen`] documents.
+    fn blank_alternate_store(
+        base: RowNumber,
+        (width, height): (usize, usize),
+        blank_tag: &FormatTag,
+    ) -> RowStore {
+        RowStore::from_rows_at(
+            base,
+            (0..height).map(|_| {
+                let mut row = Row::new(width);
+                if !blank_tag.is_visually_default() {
+                    row.clear_with_tag(blank_tag);
+                }
+                row
+            }),
+        )
     }
 
     /// Exchange the active screen's per-screen state with `incoming`'s,

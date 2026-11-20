@@ -9,6 +9,7 @@
 //! as well as pane-specific rendering types (`PaneRenderCache`, `RenderState`,
 //! and `new_render_state`) required by the multi-pane GUI architecture.
 
+mod alt_text;
 pub(crate) mod coords;
 pub mod cursor_appearance;
 pub(crate) mod cursor_blink;

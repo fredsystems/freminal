@@ -1,6 +1,17 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
-Last updated: 2026-11-19 — Task 140 — new "Underlines and SGR parity" section,
+Last updated: 2026-11-20 — Task 147 — string terminators, graphics transfer and
+keyboard encoding notes (including per-character non-ASCII text under flag 8). A bare ESC (one not followed by `\`) now ends an OSC,
+DCS or APC string, which is a freminal difference from kitty for the OSC 99,
+OSC 22 and graphics envelopes (147.8). The graphics notes record the chunk
+assembler's cap (147.13), the debug-level log for an `a=p` naming an unknown id
+(147.13) and the Windows `t=t` deletion by handle, with the platform difference
+routed to Task 135 (147.14). The keyboard deltas record that every generated
+CSI / SS3 introducer honours S8C1T (147.4), the application-keypad SS3 forms
+(147.5), the legacy Alt+text ESC prefix (147.24) and that mouse reports no
+longer pass through the key encoder (147.C1). No other section changed.
+
+Earlier: 2026-11-19 — Task 140 — new "Underlines and SGR parity" section,
 distilled from the kitty 0.49.2 underlines page and the SGR part of the misc
 protocol page, and written to the shipped behaviour: SGR 21, `4:N`, SGR 221 and
 222, the underline colour rules, per-cell underline geometry, the background-only
@@ -171,6 +182,12 @@ ESC ] 99 ; <metadata> ; <payload> ST
 - A receiver must ignore keys it does not understand. For a known key with a
   value it does not understand, it should either ignore the whole escape code
   or make a best effort. freminal ignores that key and applies the rest.
+- **Bare ESC (a freminal difference, Task 147.8).** An ESC followed by anything
+  other than `\` ends the escape code: the body received so far is dispatched
+  and the ESC starts a new escape sequence. This is the Williams VT state
+  machine, as Ghostty and WezTerm do; kitty, and freminal before this task, keep
+  the ESC in the body. `ESC BEL` ends the string at the ESC, and BEL then
+  begins a new escape. BEL and the C1 ST under S8C1T still terminate.
 
 Minimal example (title only, no metadata): `ESC ] 99 ; ; Hello world ST`.
 
@@ -781,7 +798,7 @@ ESC ] 22 ; <optional first char> <comma-separated list of shape names> ST
 ```
 
 - `ESC ]` is `0x1B 0x5D`. `ST` is `ESC \` = `0x1B 0x5C`; BEL also terminates a
-  request.
+  request. A bare ESC ends it too, as for OSC 99 (Task 147.8).
 - Spaces above are for clarity only and are never sent.
 - The first byte of the body selects the operation only if it is `=`, `>`, `<` or
   `?`. Any other first byte (or an empty body) is a set, and the byte belongs to
@@ -1153,6 +1170,13 @@ On chunked transfers (`m=1`), only the first escape carries the full control set
 subsequent chunks carry only `m` (and optionally `q`), plus `a=f` for animation
 frames.
 
+A bare ESC inside the APC (one not followed by `\`) ends it as if ST had
+arrived: the control data and payload received so far are dispatched, and the ESC
+starts a new escape sequence. kitty, and freminal before Task 147.8, keep the ESC
+in the body. The chunk assembler grows under the 400 MiB total cap and never
+reserves capacity past it, so a doubling `Vec` cannot transiently take about
+twice the cap (Task 147.13).
+
 ### Control key table — meaning depends on the action
 
 **This is the single most important table for Task 100.** Several key letters
@@ -1341,7 +1365,13 @@ with its `(dev, ino)` required to match the opened handle; reads are capped at
 400 MiB. Every failure is answered with `EBADF:Failed to read image file`.
 A `t=t` deletion is bound to the file that was read: the entry is re-opened
 relative to a parent-directory handle, its identity checked, then `unlinkat`
-(unix; pathname removal elsewhere).
+(unix). On Windows (Task 147.14) the deletion decision is made before the open: a
+file that may be deleted is opened with `FILE_FLAG_DELETE_ON_CLOSE` and a share
+mode that includes delete, checked to be a regular file by handle, read through
+that handle and dropped, so the file deleted is the file read. A platform
+difference remains, routed to Task 135: on Windows a marked `t=t` file is
+deleted even when reading it then fails (for example over the size cap), while
+on unix it is kept; Task 135 settles which is right against kitty's source.
 
 ### Responses and error codes
 
@@ -1354,6 +1384,9 @@ ESC _ G i=<id>[,p=<placement>] ; <OK-or-ERROR[:detail]> ESC \
   placements as of Task 100; renamed from `format_kitty_response` and framed
   S8C1T-aware by `write_apc_response` since Task 129.13.)
 - `q=1` suppresses OK; `q=2` suppresses all. Message is printable ASCII.
+- An `a=p` naming an unknown image id is answered `ENOENT` and logged at
+  `debug!`, because the client already learns of it on the wire; a client probing
+  every frame no longer fills the logs (Task 147.13).
 
 Named error codes: `ENOENT`, `EINVAL`, `ENOTSUP`, `ETOODEEP`, `ECYCLE`,
 `ENOPARENT`, `ENOSPC`. Error form is `CODE:detail`; success is bare `OK`.
@@ -1593,7 +1626,9 @@ sub-32/127 legacy numbers. Selected values freminal must confirm/emit:
 
 F3 must be `13 ~` only (not `CSI R`, which collides with CPR). Modifier keys,
 keypad keys, and media keys are reported as their own `CSI u` codes primarily
-under flag 8.
+under flag 8. Under flag 8, freminal encodes non-ASCII text one character at a
+time (`é` is `CSI 233 u`, `É` is `CSI 233 ; 2 u`), not one `CSI u` per UTF-8 byte
+(Task 147 review, A5).
 
 ### Legacy ctrl mapping (reference for flag behaviour)
 
@@ -1634,8 +1669,10 @@ across platforms. Remaining gaps: lock-state (reverted), ISO_Level3/5_Shift
   - **⏳ Gap (no platform source):** `hyper`/`meta` (16/32) remain unavailable on
     any current platform path. The `KeyModifiers` fields exist but stay `0`.
 - Functional keys present: arrows, Home/End, Insert/Delete, PageUp/Down, F1–F35,
-  Enter/Tab/Backspace/Escape, modifier-keys-as-keys. `KeyPad(u8)` carries only
-  legacy bytes, not KKP codepoints.
+  Enter/Tab/Backspace/Escape, modifier-keys-as-keys. The legacy (non-KKP) keypad
+  bytes are produced in the raw-key path, not as KKP codepoints: in application
+  keypad mode (DECKPAM) they are the VT220 SS3 forms (`SS3 p` to `SS3 y`, and so
+  on), and `TerminalInput::KeyPad` was removed (Task 147.5).
   - **✅ Done (101.3):** F13–F35 (`CSI 57376 u`…`57398 u`, KKP path only) and
     modifier-keys-as-keys ShiftLeft/Right, ControlLeft/Right, AltLeft/Right,
     SuperLeft/Right (57441–57444 / 57447–57450, under flag 8; Hyper/Meta omitted —
@@ -1673,6 +1710,18 @@ across platforms. Remaining gaps: lock-state (reverted), ISO_Level3/5_Shift
   a fresh one on entry. Before, a second `?1049h` moved the alternate stack over
   the parked main stack and the main stack was lost. RIS **and DECSTR** clear both
   stacks, as kitty's `do_screen_reset` does (DECSTR previously left them).
+- **Done (Task 147.4): S8C1T.** Every CSI or SS3 introducer the terminal generates,
+  kitty `CSI u` and `modifyOtherKeys` included, is `0x9B` / `0x8F` under S8C1T and
+  `ESC [` / `ESC O` otherwise. kitty has no S8C1T; freminal follows xterm's
+  per-introducer rule. Alt-prefixed text and VT52 mode stay 7-bit.
+- **Done (Task 147.24): legacy Alt+text.** While `?1036` is set (the default),
+  legacy Alt+text (Alt without Ctrl) sends `ESC` followed by the text. With any
+  kitty keyboard flag active the bytes are unchanged, and Alt on text keys is still
+  not encoded as `CSI u` (Task 137). macOS Option keeps composing characters;
+  Option as Alt is Task 152.
+- **Done (Task 147.C1): mouse reports.** Mouse reports are sent as raw bytes, not
+  through the key encoder, so flag 8 (or flag 2) no longer re-encodes each byte of
+  a report as its own `CSI u`.
 - Conformant, do not touch: stack set/push/pop, `CSI ? u` query, XTGETTCAP `u`
   (all tested). All 5 flag bits defined.
 - Base-layout sub-field always equals the key codepoint (no physical-layout map).

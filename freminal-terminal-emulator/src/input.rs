@@ -10,10 +10,11 @@
 //! source of truth for xterm/VT key encoding in this codebase.
 
 use std::borrow::Cow;
+use std::io::Write as _;
 
 use freminal_common::buffer_states::modes::{
-    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm,
+    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm, lnm::Lnm,
+    s8c1t::S8c1t,
 };
 
 /// Key event type for KKP flag 2 (report event types).
@@ -74,22 +75,102 @@ const fn char_to_ctrl_code(c: u8) -> u8 {
     c & 0b0001_1111
 }
 
-/// Build an xterm-style modified key sequence: `ESC [ 1 ; <mod> <final>`.
+/// The C1 control that opens a generated key, focus, mouse or paste sequence.
 ///
-/// Used for arrow keys and Home/End when a modifier is held.
-fn modified_csi_final(modifier: u16, final_byte: u8) -> TerminalInputPayload {
-    TerminalInputPayload::Owned(format!("\x1b[1;{modifier}{}", final_byte as char).into_bytes())
+/// Every CSI or SS3 introducer the terminal generates is emitted through this
+/// type, so that S8C1T (`ESC SP G`) is honoured in one place: `ESC [` /
+/// `ESC O` in 7-bit mode, the single bytes `0x9B` / `0x8F` in 8-bit mode.
+///
+/// The introducer is chosen where a sequence is *built*. Rewriting the encoded
+/// bytes afterwards would be wrong: Alt+`[` and Alt+`O` legitimately send
+/// `ESC [` and `ESC O` as an Alt prefix plus a character, in either mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Introducer {
+    /// Control Sequence Introducer.
+    Csi,
+    /// Single Shift Three, which introduces the application-mode key forms.
+    Ss3,
 }
 
-/// Build an xterm-style modified tilde key sequence: `ESC [ <code> ; <mod> ~`.
+impl Introducer {
+    /// The bytes that introduce a sequence under `mode`.
+    #[must_use]
+    pub const fn bytes(self, mode: S8c1t) -> &'static [u8] {
+        match (self, mode) {
+            (Self::Csi, S8c1t::SevenBit) => b"\x1b[",
+            (Self::Csi, S8c1t::EightBit) => b"\x9b",
+            (Self::Ss3, S8c1t::SevenBit) => b"\x1bO",
+            (Self::Ss3, S8c1t::EightBit) => b"\x8f",
+        }
+    }
+
+    /// `body` preceded by this introducer under `mode`.
+    #[must_use]
+    pub fn frame(self, mode: S8c1t, body: &[u8]) -> Vec<u8> {
+        let intro = self.bytes(mode);
+        let mut bytes = Vec::with_capacity(intro.len() + body.len());
+        bytes.extend_from_slice(intro);
+        bytes.extend_from_slice(body);
+        bytes
+    }
+}
+
+/// An owned sequence: `intro` under `mode`, then the formatted `body`.
+fn owned_sequence(
+    intro: Introducer,
+    mode: S8c1t,
+    body: std::fmt::Arguments<'_>,
+) -> TerminalInputPayload {
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(intro.bytes(mode));
+    // Writing to a `Vec<u8>` cannot fail.
+    let _ = bytes.write_fmt(body);
+    TerminalInputPayload::Owned(bytes)
+}
+
+/// A fixed sequence, `$body` after a CSI (`csi`) or SS3 (`ss3`) introducer.
+///
+/// 7-bit mode stays a borrowed static slice, so the common path does not
+/// allocate; 8-bit mode builds the owned form through [`owned_sequence`].
+macro_rules! static_sequence {
+    (csi, $mode:expr, $body:literal) => {
+        match $mode {
+            S8c1t::SevenBit => TerminalInputPayload::Many(concat!("\x1b[", $body).as_bytes()),
+            S8c1t::EightBit => {
+                owned_sequence(Introducer::Csi, S8c1t::EightBit, format_args!("{}", $body))
+            }
+        }
+    };
+    (ss3, $mode:expr, $body:literal) => {
+        match $mode {
+            S8c1t::SevenBit => TerminalInputPayload::Many(concat!("\x1bO", $body).as_bytes()),
+            S8c1t::EightBit => {
+                owned_sequence(Introducer::Ss3, S8c1t::EightBit, format_args!("{}", $body))
+            }
+        }
+    };
+}
+
+/// Build an xterm-style modified key sequence: `CSI 1 ; <mod> <final>`.
+///
+/// Used for arrow keys and Home/End when a modifier is held.
+fn modified_csi_final(s8c1t: S8c1t, modifier: u16, final_byte: u8) -> TerminalInputPayload {
+    owned_sequence(
+        Introducer::Csi,
+        s8c1t,
+        format_args!("1;{modifier}{}", final_byte as char),
+    )
+}
+
+/// Build an xterm-style modified tilde key sequence: `CSI <code> ; <mod> ~`.
 ///
 /// Used for Insert/Delete/PageUp/PageDown and F5–F12 when a modifier is held.
-fn modified_csi_tilde(code: u8, modifier: u16) -> TerminalInputPayload {
-    TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}~").into_bytes())
+fn modified_csi_tilde(s8c1t: S8c1t, code: u8, modifier: u16) -> TerminalInputPayload {
+    owned_sequence(Introducer::Csi, s8c1t, format_args!("{code};{modifier}~"))
 }
 
 /// Build a KKP CSI-final functional-key sequence with an event-type
-/// sub-field: `ESC [ 1 ; <mod>:<event> <final>`.
+/// sub-field: `CSI 1 ; <mod>:<event> <final>`.
 ///
 /// Used for arrows, Home/End, and F1–F4 when the Kitty Keyboard Protocol
 /// `REPORT_EVENT_TYPES` (flag 2) flag is active and the event is a repeat or
@@ -99,24 +180,35 @@ fn modified_csi_tilde(code: u8, modifier: u16) -> TerminalInputPayload {
 /// sequence (e.g. `ESC O B`) carries no event-type information and would be
 /// wrongly read by applications as a fresh key *press*, duplicating the
 /// key — this builder exists to avoid exactly that bug.
-fn kkp_csi_final_event(modifier: u16, event: u8, final_byte: u8) -> TerminalInputPayload {
-    TerminalInputPayload::Owned(
-        format!("\x1b[1;{modifier}:{event}{}", final_byte as char).into_bytes(),
+fn kkp_csi_final_event(
+    s8c1t: S8c1t,
+    modifier: u16,
+    event: u8,
+    final_byte: u8,
+) -> TerminalInputPayload {
+    owned_sequence(
+        Introducer::Csi,
+        s8c1t,
+        format_args!("1;{modifier}:{event}{}", final_byte as char),
     )
 }
 
 /// Build a KKP CSI-tilde functional-key sequence with an event-type
-/// sub-field: `ESC [ <code> ; <mod>:<event> ~`.
+/// sub-field: `CSI <code> ; <mod>:<event> ~`.
 ///
 /// Used for Insert/Delete/PageUp/PageDown and F5–F12 when the Kitty Keyboard
 /// Protocol `REPORT_EVENT_TYPES` (flag 2) flag is active and the event is a
 /// repeat or release.  See [`kkp_csi_final_event`] for why a bare legacy
 /// tilde sequence is unsafe for non-press events.
-fn kkp_csi_tilde_event(code: u8, modifier: u16, event: u8) -> TerminalInputPayload {
-    TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}:{event}~").into_bytes())
+fn kkp_csi_tilde_event(s8c1t: S8c1t, code: u8, modifier: u16, event: u8) -> TerminalInputPayload {
+    owned_sequence(
+        Introducer::Csi,
+        s8c1t,
+        format_args!("{code};{modifier}:{event}~"),
+    )
 }
 
-/// Build an xterm `modifyOtherKeys` level 2 sequence: `ESC [ 27 ; <mod> ; <code> ~`.
+/// Build an xterm `modifyOtherKeys` level 2 sequence: `CSI 27 ; <mod> ; <code> ~`.
 ///
 /// The format uses 27 as a fixed identifier (chosen because decimal 27 was
 /// unused in the VT function-key numbering).  The modifier parameter follows
@@ -124,8 +216,12 @@ fn kkp_csi_tilde_event(code: u8, modifier: u16, event: u8) -> TerminalInputPaylo
 /// The code is the decimal ASCII/Unicode value of the key.
 ///
 /// Reference: xterm ctlseqs §`modifyOtherKeys`.
-fn modify_other_keys_encoding(modifier: u8, code: u32) -> TerminalInputPayload {
-    TerminalInputPayload::Owned(format!("\x1b[27;{modifier};{code}~").into_bytes())
+fn modify_other_keys_encoding(s8c1t: S8c1t, modifier: u8, code: u32) -> TerminalInputPayload {
+    owned_sequence(
+        Introducer::Csi,
+        s8c1t,
+        format_args!("27;{modifier};{code}~"),
+    )
 }
 
 /// KKP codepoint for F13 (kitty function-key extended range).
@@ -273,23 +369,29 @@ const fn us_qwerty_shifted(c: u8) -> Option<u32> {
     }
 }
 
-/// Collect a text string as a sequence of [`TerminalInput::Ascii`] values.
+/// Collect a text string as one input per character: an ASCII character as a
+/// [`TerminalInput::Ascii`], any other as a [`TerminalInput::NonAscii`], so a
+/// multi-byte character is never split across inputs.
 #[must_use]
 pub fn collect_text(text: &str) -> Cow<'static, [TerminalInput]> {
-    text.as_bytes()
-        .iter()
-        .map(|c| TerminalInput::Ascii(*c))
+    text.chars()
+        .map(TerminalInput::from_char)
         .collect::<Vec<_>>()
         .into()
 }
 
-/// Convert a raw byte slice into a sequence of [`TerminalInput::Ascii`] values.
+/// Collect text typed with Alt held as one [`TerminalInput::AltText`].
+///
+/// The caller decides whether the Alt prefix applies (`?1036`, the platform's
+/// Option setting); text that gets no prefix is collected with
+/// [`collect_text`] instead. Empty text yields no input at all, so it can
+/// never become a bare `ESC`.
 #[must_use]
-pub fn raw_ascii_bytes_to_terminal_input(buf: &[u8]) -> Cow<'static, [TerminalInput]> {
-    buf.iter()
-        .map(|c| TerminalInput::Ascii(*c))
-        .collect::<Vec<_>>()
-        .into()
+pub fn collect_alt_text(text: &str) -> Cow<'static, [TerminalInput]> {
+    if text.is_empty() {
+        return Cow::Borrowed(&[]);
+    }
+    vec![TerminalInput::AltText(text.into())].into()
 }
 
 /// Modifier key state for xterm-style modified key encoding.
@@ -421,8 +523,25 @@ pub enum TerminalInputPayload {
 pub enum TerminalInput {
     // Normal keypress
     Ascii(u8),
+    /// A character outside ASCII, typed as text.
+    ///
+    /// Encoded whole: as its UTF-8 bytes in the legacy encoding, and as one
+    /// key (`CSI codepoint u`) where the kitty keyboard protocol reports text
+    /// as keys. Never as one key per UTF-8 byte.
+    NonAscii(char),
     // Normal keypress with ctrl
     Ctrl(u8),
+    /// Text typed with Alt held, where Alt acts as the prefix key.
+    ///
+    /// In the legacy encoding it is sent as `ESC` followed by the text, one
+    /// `ESC` however many bytes the text has. While any kitty keyboard flag is
+    /// active the prefix is not added: the text encodes exactly as the same
+    /// characters typed without Alt, character by character, leaving Alt+text
+    /// to the kitty encoding.
+    ///
+    /// Built where the event is read, from the Alt state and `?1036` at that
+    /// point, never by rewriting bytes that were already encoded.
+    AltText(Box<str>),
     Enter,
     LineFeed,
     Backspace,
@@ -440,7 +559,6 @@ pub enum TerminalInput {
     Escape,
     InFocus,
     LostFocus,
-    KeyPad(u8),
     // Function keys F1–F35 (F1–F12 have legacy encodings; F13–F35 are
     // KKP-only, see `to_payload_kkp`'s `FunctionKey` arm).
     FunctionKey(u8, KeyModifiers),
@@ -474,12 +592,12 @@ impl TerminalInput {
     pub fn to_payload(
         &self,
         decckm_mode: Decckm,
-        keypad_mode: KeypadMode,
         modify_other_keys: u8,
         application_escape_key: ApplicationEscapeKey,
         backarrow_sends_bs: Decbkm,
         line_feed_mode: Lnm,
         kitty_keyboard_flags: u32,
+        s8c1t: S8c1t,
         meta: &KeyEventMeta,
     ) -> TerminalInputPayload {
         // KKP encoding is only activated when the flags that actually change
@@ -491,15 +609,24 @@ impl TerminalInput {
             return self.to_payload_kkp(
                 kitty_keyboard_flags,
                 decckm_mode,
-                keypad_mode,
                 backarrow_sends_bs,
                 line_feed_mode,
+                s8c1t,
                 meta,
             );
         }
 
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
+            Self::NonAscii(ch) => TerminalInputPayload::Owned(ch.to_string().into_bytes()),
+            Self::AltText(text) => {
+                let mut bytes = Vec::with_capacity(text.len() + 1);
+                if kitty_keyboard_flags == 0 {
+                    bytes.push(0x1b);
+                }
+                bytes.extend_from_slice(text.as_bytes());
+                TerminalInputPayload::Owned(bytes)
+            }
             Self::Ctrl(c) => {
                 // modifyOtherKeys level 2: encode Ctrl+key as
                 // `CSI 27 ; modifier ; code ~` so tmux and programs
@@ -514,7 +641,7 @@ impl TerminalInput {
                 if modify_other_keys >= 2 {
                     let code = u32::from(c.to_ascii_lowercase());
                     // Ctrl modifier param = 5 (1 + 4)
-                    modify_other_keys_encoding(5, code)
+                    modify_other_keys_encoding(s8c1t, 5, code)
                 } else {
                     TerminalInputPayload::Single(char_to_ctrl_code(*c))
                 }
@@ -552,7 +679,7 @@ impl TerminalInput {
                 // instead of bare ESC so tmux can instantly distinguish the
                 // Escape key from the start of an escape sequence.
                 if application_escape_key == ApplicationEscapeKey::Set {
-                    TerminalInputPayload::Owned(b"\x1b[27;1;27~".to_vec())
+                    owned_sequence(Introducer::Csi, s8c1t, format_args!("27;1;27~"))
                 } else {
                     TerminalInputPayload::Single(0x1b)
                 }
@@ -563,88 +690,58 @@ impl TerminalInput {
             // When modifiers are held, always use CSI form (not SS3) even in
             // DECCKM mode — xterm convention.
             Self::ArrowRight(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'C'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOC"),
-                None => TerminalInputPayload::Many(b"\x1b[C"),
+                Some(m) => modified_csi_final(s8c1t, m, b'C'),
+                None if decckm_mode == Decckm::Application => static_sequence!(ss3, s8c1t, "C"),
+                None => static_sequence!(csi, s8c1t, "C"),
             },
             Self::ArrowLeft(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'D'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOD"),
-                None => TerminalInputPayload::Many(b"\x1b[D"),
+                Some(m) => modified_csi_final(s8c1t, m, b'D'),
+                None if decckm_mode == Decckm::Application => static_sequence!(ss3, s8c1t, "D"),
+                None => static_sequence!(csi, s8c1t, "D"),
             },
             Self::ArrowUp(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'A'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOA"),
-                None => TerminalInputPayload::Many(b"\x1b[A"),
+                Some(m) => modified_csi_final(s8c1t, m, b'A'),
+                None if decckm_mode == Decckm::Application => static_sequence!(ss3, s8c1t, "A"),
+                None => static_sequence!(csi, s8c1t, "A"),
             },
             Self::ArrowDown(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'B'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOB"),
-                None => TerminalInputPayload::Many(b"\x1b[B"),
+                Some(m) => modified_csi_final(s8c1t, m, b'B'),
+                None if decckm_mode == Decckm::Application => static_sequence!(ss3, s8c1t, "B"),
+                None => static_sequence!(csi, s8c1t, "B"),
             },
             Self::Home(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'H'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOH"),
-                None => TerminalInputPayload::Many(b"\x1b[H"),
+                Some(m) => modified_csi_final(s8c1t, m, b'H'),
+                None if decckm_mode == Decckm::Application => static_sequence!(ss3, s8c1t, "H"),
+                None => static_sequence!(csi, s8c1t, "H"),
             },
             Self::End(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'F'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOF"),
-                None => TerminalInputPayload::Many(b"\x1b[F"),
+                Some(m) => modified_csi_final(s8c1t, m, b'F'),
+                None if decckm_mode == Decckm::Application => static_sequence!(ss3, s8c1t, "F"),
+                None => static_sequence!(csi, s8c1t, "F"),
             },
-            Self::KeyPad(c) => {
-                if keypad_mode == KeypadMode::Numeric {
-                    TerminalInputPayload::Single(*c)
-                } else {
-                    match c {
-                        0 => TerminalInputPayload::Many(b"\x1b[Op"),
-                        1 => TerminalInputPayload::Many(b"\x1b[Oq"),
-                        2 => TerminalInputPayload::Many(b"\x1b[Or"),
-                        3 => TerminalInputPayload::Many(b"\x1b[Os"),
-                        4 => TerminalInputPayload::Many(b"\x1b[Ot"),
-                        5 => TerminalInputPayload::Many(b"\x1b[Ou"),
-                        6 => TerminalInputPayload::Many(b"\x1b[Ov"),
-                        7 => TerminalInputPayload::Many(b"\x1b[Ow"),
-                        8 => TerminalInputPayload::Many(b"\x1b[Ox"),
-                        9 => TerminalInputPayload::Many(b"\x1b[Oy"),
-                        b'-' => TerminalInputPayload::Many(b"\x1b[Om"),
-                        b',' => TerminalInputPayload::Many(b"\x1b[Ol"),
-                        b'.' => TerminalInputPayload::Many(b"\x1b[On"),
-                        b'\n' => TerminalInputPayload::Many(b"\x1b[OM"),
-                        _ => {
-                            warn!("Unknown keypad key: {c}");
-                            TerminalInputPayload::Single(*c)
-                        }
-                    }
-                }
-            }
             Self::Tab => TerminalInputPayload::Single(char_to_ctrl_code(b'i')),
             // Why \e[3~? It seems like we are emulating the vt510. Other terminals do it, so we
             // can too
             // https://web.archive.org/web/20160304024035/http://www.vt100.net/docs/vt510-rm/chapter8
             // https://en.wikipedia.org/wiki/Delete_character
-            Self::Delete(mods) => mods
-                .modifier_param()
-                .map_or(TerminalInputPayload::Many(b"\x1b[3~"), |m| {
-                    modified_csi_tilde(3, m)
-                }),
-            Self::Insert(mods) => mods
-                .modifier_param()
-                .map_or(TerminalInputPayload::Many(b"\x1b[2~"), |m| {
-                    modified_csi_tilde(2, m)
-                }),
-            Self::PageUp(mods) => mods
-                .modifier_param()
-                .map_or(TerminalInputPayload::Many(b"\x1b[5~"), |m| {
-                    modified_csi_tilde(5, m)
-                }),
-            Self::PageDown(mods) => mods
-                .modifier_param()
-                .map_or(TerminalInputPayload::Many(b"\x1b[6~"), |m| {
-                    modified_csi_tilde(6, m)
-                }),
-            Self::LostFocus => TerminalInputPayload::Many(b"\x1b[O"),
-            Self::InFocus => TerminalInputPayload::Many(b"\x1b[I"),
+            Self::Delete(mods) => mods.modifier_param().map_or_else(
+                || static_sequence!(csi, s8c1t, "3~"),
+                |m| modified_csi_tilde(s8c1t, 3, m),
+            ),
+            Self::Insert(mods) => mods.modifier_param().map_or_else(
+                || static_sequence!(csi, s8c1t, "2~"),
+                |m| modified_csi_tilde(s8c1t, 2, m),
+            ),
+            Self::PageUp(mods) => mods.modifier_param().map_or_else(
+                || static_sequence!(csi, s8c1t, "5~"),
+                |m| modified_csi_tilde(s8c1t, 5, m),
+            ),
+            Self::PageDown(mods) => mods.modifier_param().map_or_else(
+                || static_sequence!(csi, s8c1t, "6~"),
+                |m| modified_csi_tilde(s8c1t, 6, m),
+            ),
+            Self::LostFocus => static_sequence!(csi, s8c1t, "O"),
+            Self::InFocus => static_sequence!(csi, s8c1t, "I"),
             // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-PC-Style-Function-Keys
             //
             // F1–F4 use SS3 form without modifiers, CSI form with modifiers.
@@ -653,33 +750,33 @@ impl TerminalInput {
                 let mod_param = mods.modifier_param();
                 match (n, mod_param) {
                     // F1–F4 with modifiers: CSI 1;Nm P/Q/R/S
-                    (1, Some(m)) => modified_csi_final(m, b'P'),
-                    (2, Some(m)) => modified_csi_final(m, b'Q'),
-                    (3, Some(m)) => modified_csi_final(m, b'R'),
-                    (4, Some(m)) => modified_csi_final(m, b'S'),
+                    (1, Some(m)) => modified_csi_final(s8c1t, m, b'P'),
+                    (2, Some(m)) => modified_csi_final(s8c1t, m, b'Q'),
+                    (3, Some(m)) => modified_csi_final(s8c1t, m, b'R'),
+                    (4, Some(m)) => modified_csi_final(s8c1t, m, b'S'),
                     // F1–F4 without modifiers: SS3 P/Q/R/S
-                    (1, None) => TerminalInputPayload::Many(b"\x1bOP"),
-                    (2, None) => TerminalInputPayload::Many(b"\x1bOQ"),
-                    (3, None) => TerminalInputPayload::Many(b"\x1bOR"),
-                    (4, None) => TerminalInputPayload::Many(b"\x1bOS"),
+                    (1, None) => static_sequence!(ss3, s8c1t, "P"),
+                    (2, None) => static_sequence!(ss3, s8c1t, "Q"),
+                    (3, None) => static_sequence!(ss3, s8c1t, "R"),
+                    (4, None) => static_sequence!(ss3, s8c1t, "S"),
                     // F5–F12 with modifiers: CSI code;Nm ~
-                    (5, Some(m)) => modified_csi_tilde(15, m),
-                    (6, Some(m)) => modified_csi_tilde(17, m),
-                    (7, Some(m)) => modified_csi_tilde(18, m),
-                    (8, Some(m)) => modified_csi_tilde(19, m),
-                    (9, Some(m)) => modified_csi_tilde(20, m),
-                    (10, Some(m)) => modified_csi_tilde(21, m),
-                    (11, Some(m)) => modified_csi_tilde(23, m),
-                    (12, Some(m)) => modified_csi_tilde(24, m),
+                    (5, Some(m)) => modified_csi_tilde(s8c1t, 15, m),
+                    (6, Some(m)) => modified_csi_tilde(s8c1t, 17, m),
+                    (7, Some(m)) => modified_csi_tilde(s8c1t, 18, m),
+                    (8, Some(m)) => modified_csi_tilde(s8c1t, 19, m),
+                    (9, Some(m)) => modified_csi_tilde(s8c1t, 20, m),
+                    (10, Some(m)) => modified_csi_tilde(s8c1t, 21, m),
+                    (11, Some(m)) => modified_csi_tilde(s8c1t, 23, m),
+                    (12, Some(m)) => modified_csi_tilde(s8c1t, 24, m),
                     // F5–F12 without modifiers
-                    (5, None) => TerminalInputPayload::Many(b"\x1b[15~"),
-                    (6, None) => TerminalInputPayload::Many(b"\x1b[17~"),
-                    (7, None) => TerminalInputPayload::Many(b"\x1b[18~"),
-                    (8, None) => TerminalInputPayload::Many(b"\x1b[19~"),
-                    (9, None) => TerminalInputPayload::Many(b"\x1b[20~"),
-                    (10, None) => TerminalInputPayload::Many(b"\x1b[21~"),
-                    (11, None) => TerminalInputPayload::Many(b"\x1b[23~"),
-                    (12, None) => TerminalInputPayload::Many(b"\x1b[24~"),
+                    (5, None) => static_sequence!(csi, s8c1t, "15~"),
+                    (6, None) => static_sequence!(csi, s8c1t, "17~"),
+                    (7, None) => static_sequence!(csi, s8c1t, "18~"),
+                    (8, None) => static_sequence!(csi, s8c1t, "19~"),
+                    (9, None) => static_sequence!(csi, s8c1t, "20~"),
+                    (10, None) => static_sequence!(csi, s8c1t, "21~"),
+                    (11, None) => static_sequence!(csi, s8c1t, "23~"),
+                    (12, None) => static_sequence!(csi, s8c1t, "24~"),
                     // F13–F35 and any out-of-range value: no legacy encoding
                     // exists for F13–F35 (KKP-only, see `to_payload_kkp`),
                     // so both fall through to the same empty fallback.
@@ -707,6 +804,15 @@ impl TerminalInput {
         }
     }
 
+    /// The input for one typed text character: [`Self::Ascii`] for an ASCII
+    /// character, [`Self::NonAscii`] for any other.
+    fn from_char(ch: char) -> Self {
+        match u8::try_from(ch) {
+            Ok(byte) if byte.is_ascii() => Self::Ascii(byte),
+            _ => Self::NonAscii(ch),
+        }
+    }
+
     /// Build a CSI u KKP sequence with optional metadata fields.
     ///
     /// Full KKP CSI u format:
@@ -716,6 +822,7 @@ impl TerminalInput {
     ///
     /// Trailing default fields and sub-fields are omitted.
     fn build_csi_u(
+        s8c1t: S8c1t,
         codepoint: u32,
         modifier_param: Option<u16>,
         flags: u32,
@@ -733,11 +840,15 @@ impl TerminalInput {
 
         // Build the codepoint field: `codepoint[:shifted[:base]]`
         let codepoint_field = if report_alt {
-            // Only ASCII codepoints have meaningful shifted forms in US QWERTY.
+            // Only ASCII codepoints have meaningful shifted forms in US QWERTY,
+            // and the protocol reports the shifted key only when Shift is among
+            // the modifiers (the parameter is `1 + modifier bits`, Shift is
+            // bit 0).
             // The `u8::try_from` is guaranteed to succeed under `codepoint <= 127`;
             // the `ok()` + `and_then` pattern avoids any `unwrap`/`expect` in
             // production code per the workspace policy.
-            let shifted = if codepoint <= 127 {
+            let shift_held = modifier_param.is_some_and(|m| m.saturating_sub(1) & 1 != 0);
+            let shifted = if shift_held && codepoint <= 127 {
                 u8::try_from(codepoint).ok().and_then(us_qwerty_shifted)
             } else {
                 None
@@ -774,7 +885,7 @@ impl TerminalInput {
         // (to avoid ambiguous omission of the second param).
         let needs_mod = has_modifier || has_event || has_text;
 
-        let mut seq = format!("\x1b[{codepoint_field}");
+        let mut seq = codepoint_field;
 
         if needs_mod {
             let mod_val = modifier_param.unwrap_or(1); // 1 = no modifiers
@@ -795,7 +906,7 @@ impl TerminalInput {
         }
 
         seq.push('u');
-        TerminalInputPayload::Owned(seq.into_bytes())
+        TerminalInputPayload::Owned(Introducer::Csi.frame(s8c1t, seq.as_bytes()))
     }
 
     /// Kitty Keyboard Protocol encoding path.
@@ -822,7 +933,8 @@ impl TerminalInput {
     /// - Flag 2 (report event types): appends `:event-type` to the modifier
     ///   parameter.
     /// - Flag 4 (alternate keys): appends `:shifted-key:base-layout-key` to the
-    ///   codepoint field. Best-effort US QWERTY only.
+    ///   codepoint field, only when Shift is among the modifiers. Best-effort
+    ///   US QWERTY only.
     /// - Flag 16 (associated text): appends `;text-as-codepoints` as a third
     ///   parameter.
     // The KKP encoding path is inherently large: it must cover every variant
@@ -832,9 +944,9 @@ impl TerminalInput {
         &self,
         flags: u32,
         decckm_mode: Decckm,
-        keypad_mode: KeypadMode,
         backarrow_sends_bs: Decbkm,
         line_feed_mode: Lnm,
+        s8c1t: S8c1t,
         meta: &KeyEventMeta,
     ) -> TerminalInputPayload {
         let report_all = flags & 8 != 0;
@@ -867,10 +979,10 @@ impl TerminalInput {
                     // with Shift modifier.
                     if c.is_ascii_uppercase() {
                         let lower = u32::from(c.to_ascii_lowercase());
-                        Self::build_csi_u(lower, Some(2), flags, meta)
+                        Self::build_csi_u(s8c1t, lower, Some(2), flags, meta)
                     } else {
                         let code = u32::from(*c);
-                        Self::build_csi_u(code, None, flags, meta)
+                        Self::build_csi_u(s8c1t, code, None, flags, meta)
                     }
                 } else if meta.event_type != KeyEventType::Press {
                     // Flag 2 without flag 8: plain ASCII normally uses legacy
@@ -879,10 +991,10 @@ impl TerminalInput {
                     // byte for a release would duplicate the key press.
                     if c.is_ascii_uppercase() {
                         let lower = u32::from(c.to_ascii_lowercase());
-                        Self::build_csi_u(lower, Some(2), flags, meta)
+                        Self::build_csi_u(s8c1t, lower, Some(2), flags, meta)
                     } else {
                         let code = u32::from(*c);
-                        Self::build_csi_u(code, None, flags, meta)
+                        Self::build_csi_u(s8c1t, code, None, flags, meta)
                     }
                 } else {
                     // Flags 1/2/4/16 alone don't affect plain ASCII presses.
@@ -890,12 +1002,60 @@ impl TerminalInput {
                 }
             }
 
+            // ── Non-ASCII text ──────────────────────────────────────────
+            //
+            // A key when the protocol reports text as keys (flag 8) or this
+            // is a release/repeat, which must not be sent as text (it would
+            // be typed twice); otherwise the character as typed.
+            Self::NonAscii(ch) => {
+                if report_all || meta.event_type != KeyEventType::Press {
+                    // A letter with a single-character lowercase form is
+                    // reported as that lowercase codepoint with Shift, as for
+                    // ASCII uppercase.
+                    let mut lower = ch.to_lowercase();
+                    let (code, modifier) = match (lower.next(), lower.next()) {
+                        (Some(l), None) if l != *ch => (l, Some(2)),
+                        _ => (*ch, None),
+                    };
+                    Self::build_csi_u(s8c1t, u32::from(code), modifier, flags, meta)
+                } else {
+                    TerminalInputPayload::Owned(ch.to_string().into_bytes())
+                }
+            }
+
+            // ── Alt+text ────────────────────────────────────────────────
+            //
+            // No Alt prefix under KKP: the text encodes as the bytes typed
+            // without Alt would, which is what it did before `AltText` existed.
+            //
+            // The text is encoded per character, as the same characters typed
+            // without Alt would be (see `NonAscii`), never per UTF-8 byte.
+            Self::AltText(text) => {
+                let mut bytes = Vec::with_capacity(text.len());
+                for ch in text.chars() {
+                    let payload = Self::from_char(ch).to_payload_kkp(
+                        flags,
+                        decckm_mode,
+                        backarrow_sends_bs,
+                        line_feed_mode,
+                        s8c1t,
+                        meta,
+                    );
+                    match payload {
+                        TerminalInputPayload::Single(b) => bytes.push(b),
+                        TerminalInputPayload::Many(bs) => bytes.extend_from_slice(bs),
+                        TerminalInputPayload::Owned(bs) => bytes.extend_from_slice(&bs),
+                    }
+                }
+                TerminalInputPayload::Owned(bytes)
+            }
+
             // ── Ctrl+letter ─────────────────────────────────────────────
             Self::Ctrl(c) => {
                 if disambiguate || report_all {
                     // KKP: Ctrl+letter → CSI lowercase_code ; 5 u
                     let code = u32::from(c.to_ascii_lowercase());
-                    Self::build_csi_u(code, Some(5), flags, meta)
+                    Self::build_csi_u(s8c1t, code, Some(5), flags, meta)
                 } else {
                     // Flags 2/4/16 alone: legacy C0 encoding.
                     TerminalInputPayload::Single(char_to_ctrl_code(*c))
@@ -907,7 +1067,7 @@ impl TerminalInput {
                 if report_all || meta.event_type != KeyEventType::Press {
                     // Flag 8, or release/repeat: use CSI u so event type is
                     // included and legacy bytes aren't duplicated on release.
-                    Self::build_csi_u(13, None, flags, meta)
+                    Self::build_csi_u(s8c1t, 13, None, flags, meta)
                 } else {
                     // Flag 1 exception: Enter press still sends legacy bytes.
                     if line_feed_mode == Lnm::NewLine {
@@ -926,7 +1086,7 @@ impl TerminalInput {
                 if report_all || meta.event_type != KeyEventType::Press {
                     // Flag 8, or release/repeat: use CSI u so event type is
                     // included and legacy bytes aren't duplicated on release.
-                    Self::build_csi_u(127, None, flags, meta)
+                    Self::build_csi_u(s8c1t, 127, None, flags, meta)
                 } else {
                     // Flag 1 exception: Backspace press still sends legacy bytes.
                     if backarrow_sends_bs == Decbkm::BackarrowSendsBs {
@@ -942,7 +1102,7 @@ impl TerminalInput {
                 if report_all || meta.event_type != KeyEventType::Press {
                     // Flag 8, or release/repeat: use CSI u so event type is
                     // included and legacy bytes aren't duplicated on release.
-                    Self::build_csi_u(9, None, flags, meta)
+                    Self::build_csi_u(s8c1t, 9, None, flags, meta)
                 } else {
                     // Flag 1 exception: Tab press still sends legacy byte.
                     TerminalInputPayload::Single(char_to_ctrl_code(b'i'))
@@ -953,7 +1113,7 @@ impl TerminalInput {
             Self::Escape => {
                 if disambiguate || report_all {
                     // KKP: Escape is disambiguated as CSI 27 u.
-                    Self::build_csi_u(27, None, flags, meta)
+                    Self::build_csi_u(s8c1t, 27, None, flags, meta)
                 } else {
                     // Flags 2/4/16 alone: legacy bare ESC byte.
                     TerminalInputPayload::Single(b'\x1b')
@@ -974,101 +1134,75 @@ impl TerminalInput {
             // application would treat it as a fresh press, duplicating the
             // key.
             Self::ArrowRight(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'C'),
-                (None, Some(m)) => modified_csi_final(m, b'C'),
+                (Some(ev), m) => kkp_csi_final_event(s8c1t, m.unwrap_or(1), ev, b'C'),
+                (None, Some(m)) => modified_csi_final(s8c1t, m, b'C'),
                 (None, None) if decckm_mode == Decckm::Application => {
-                    TerminalInputPayload::Many(b"\x1bOC")
+                    static_sequence!(ss3, s8c1t, "C")
                 }
-                (None, None) => TerminalInputPayload::Many(b"\x1b[C"),
+                (None, None) => static_sequence!(csi, s8c1t, "C"),
             },
             Self::ArrowLeft(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'D'),
-                (None, Some(m)) => modified_csi_final(m, b'D'),
+                (Some(ev), m) => kkp_csi_final_event(s8c1t, m.unwrap_or(1), ev, b'D'),
+                (None, Some(m)) => modified_csi_final(s8c1t, m, b'D'),
                 (None, None) if decckm_mode == Decckm::Application => {
-                    TerminalInputPayload::Many(b"\x1bOD")
+                    static_sequence!(ss3, s8c1t, "D")
                 }
-                (None, None) => TerminalInputPayload::Many(b"\x1b[D"),
+                (None, None) => static_sequence!(csi, s8c1t, "D"),
             },
             Self::ArrowUp(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'A'),
-                (None, Some(m)) => modified_csi_final(m, b'A'),
+                (Some(ev), m) => kkp_csi_final_event(s8c1t, m.unwrap_or(1), ev, b'A'),
+                (None, Some(m)) => modified_csi_final(s8c1t, m, b'A'),
                 (None, None) if decckm_mode == Decckm::Application => {
-                    TerminalInputPayload::Many(b"\x1bOA")
+                    static_sequence!(ss3, s8c1t, "A")
                 }
-                (None, None) => TerminalInputPayload::Many(b"\x1b[A"),
+                (None, None) => static_sequence!(csi, s8c1t, "A"),
             },
             Self::ArrowDown(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'B'),
-                (None, Some(m)) => modified_csi_final(m, b'B'),
+                (Some(ev), m) => kkp_csi_final_event(s8c1t, m.unwrap_or(1), ev, b'B'),
+                (None, Some(m)) => modified_csi_final(s8c1t, m, b'B'),
                 (None, None) if decckm_mode == Decckm::Application => {
-                    TerminalInputPayload::Many(b"\x1bOB")
+                    static_sequence!(ss3, s8c1t, "B")
                 }
-                (None, None) => TerminalInputPayload::Many(b"\x1b[B"),
+                (None, None) => static_sequence!(csi, s8c1t, "B"),
             },
             Self::Home(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'H'),
-                (None, Some(m)) => modified_csi_final(m, b'H'),
+                (Some(ev), m) => kkp_csi_final_event(s8c1t, m.unwrap_or(1), ev, b'H'),
+                (None, Some(m)) => modified_csi_final(s8c1t, m, b'H'),
                 (None, None) if decckm_mode == Decckm::Application => {
-                    TerminalInputPayload::Many(b"\x1bOH")
+                    static_sequence!(ss3, s8c1t, "H")
                 }
-                (None, None) => TerminalInputPayload::Many(b"\x1b[H"),
+                (None, None) => static_sequence!(csi, s8c1t, "H"),
             },
             Self::End(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'F'),
-                (None, Some(m)) => modified_csi_final(m, b'F'),
+                (Some(ev), m) => kkp_csi_final_event(s8c1t, m.unwrap_or(1), ev, b'F'),
+                (None, Some(m)) => modified_csi_final(s8c1t, m, b'F'),
                 (None, None) if decckm_mode == Decckm::Application => {
-                    TerminalInputPayload::Many(b"\x1bOF")
+                    static_sequence!(ss3, s8c1t, "F")
                 }
-                (None, None) => TerminalInputPayload::Many(b"\x1b[F"),
+                (None, None) => static_sequence!(csi, s8c1t, "F"),
             },
             Self::Delete(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_tilde_event(3, m.unwrap_or(1), ev),
-                (None, Some(m)) => modified_csi_tilde(3, m),
-                (None, None) => TerminalInputPayload::Many(b"\x1b[3~"),
+                (Some(ev), m) => kkp_csi_tilde_event(s8c1t, 3, m.unwrap_or(1), ev),
+                (None, Some(m)) => modified_csi_tilde(s8c1t, 3, m),
+                (None, None) => static_sequence!(csi, s8c1t, "3~"),
             },
             Self::Insert(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_tilde_event(2, m.unwrap_or(1), ev),
-                (None, Some(m)) => modified_csi_tilde(2, m),
-                (None, None) => TerminalInputPayload::Many(b"\x1b[2~"),
+                (Some(ev), m) => kkp_csi_tilde_event(s8c1t, 2, m.unwrap_or(1), ev),
+                (None, Some(m)) => modified_csi_tilde(s8c1t, 2, m),
+                (None, None) => static_sequence!(csi, s8c1t, "2~"),
             },
             Self::PageUp(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_tilde_event(5, m.unwrap_or(1), ev),
-                (None, Some(m)) => modified_csi_tilde(5, m),
-                (None, None) => TerminalInputPayload::Many(b"\x1b[5~"),
+                (Some(ev), m) => kkp_csi_tilde_event(s8c1t, 5, m.unwrap_or(1), ev),
+                (None, Some(m)) => modified_csi_tilde(s8c1t, 5, m),
+                (None, None) => static_sequence!(csi, s8c1t, "5~"),
             },
             Self::PageDown(mods) => match (functional_event_code, mods.modifier_param()) {
-                (Some(ev), m) => kkp_csi_tilde_event(6, m.unwrap_or(1), ev),
-                (None, Some(m)) => modified_csi_tilde(6, m),
-                (None, None) => TerminalInputPayload::Many(b"\x1b[6~"),
+                (Some(ev), m) => kkp_csi_tilde_event(s8c1t, 6, m.unwrap_or(1), ev),
+                (None, Some(m)) => modified_csi_tilde(s8c1t, 6, m),
+                (None, None) => static_sequence!(csi, s8c1t, "6~"),
             },
-            Self::KeyPad(c) => {
-                if keypad_mode == KeypadMode::Numeric {
-                    TerminalInputPayload::Single(*c)
-                } else {
-                    match c {
-                        0 => TerminalInputPayload::Many(b"\x1b[Op"),
-                        1 => TerminalInputPayload::Many(b"\x1b[Oq"),
-                        2 => TerminalInputPayload::Many(b"\x1b[Or"),
-                        3 => TerminalInputPayload::Many(b"\x1b[Os"),
-                        4 => TerminalInputPayload::Many(b"\x1b[Ot"),
-                        5 => TerminalInputPayload::Many(b"\x1b[Ou"),
-                        6 => TerminalInputPayload::Many(b"\x1b[Ov"),
-                        7 => TerminalInputPayload::Many(b"\x1b[Ow"),
-                        8 => TerminalInputPayload::Many(b"\x1b[Ox"),
-                        9 => TerminalInputPayload::Many(b"\x1b[Oy"),
-                        b'-' => TerminalInputPayload::Many(b"\x1b[Om"),
-                        b',' => TerminalInputPayload::Many(b"\x1b[Ol"),
-                        b'.' => TerminalInputPayload::Many(b"\x1b[On"),
-                        b'\n' => TerminalInputPayload::Many(b"\x1b[OM"),
-                        _ => {
-                            warn!("Unknown keypad key: {c}");
-                            TerminalInputPayload::Single(*c)
-                        }
-                    }
-                }
-            }
-            Self::LostFocus => TerminalInputPayload::Many(b"\x1b[O"),
-            Self::InFocus => TerminalInputPayload::Many(b"\x1b[I"),
+            Self::LostFocus => static_sequence!(csi, s8c1t, "O"),
+            Self::InFocus => static_sequence!(csi, s8c1t, "I"),
             Self::FunctionKey(n, mods) => {
                 let mod_param = mods.modifier_param();
                 // F1, F2, F4 use the CSI-final form (P/Q/S); F5–F12 use the
@@ -1081,39 +1215,41 @@ impl TerminalInput {
                 // `CSI R` collides with the Cursor Position Report (CPR)
                 // response — see `f_tilde(13, ...)` below.
                 let f_final = |b: u8| match (functional_event_code, mod_param) {
-                    (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b),
-                    (None, Some(m)) => modified_csi_final(m, b),
+                    (Some(ev), m) => kkp_csi_final_event(s8c1t, m.unwrap_or(1), ev, b),
+                    (None, Some(m)) => modified_csi_final(s8c1t, m, b),
                     (None, None) => match b {
-                        b'P' => TerminalInputPayload::Many(b"\x1bOP"),
-                        b'Q' => TerminalInputPayload::Many(b"\x1bOQ"),
-                        _ => TerminalInputPayload::Many(b"\x1bOS"),
+                        b'P' => static_sequence!(ss3, s8c1t, "P"),
+                        b'Q' => static_sequence!(ss3, s8c1t, "Q"),
+                        _ => static_sequence!(ss3, s8c1t, "S"),
                     },
                 };
-                let f_tilde =
-                    |code: u8, legacy: &'static [u8]| match (functional_event_code, mod_param) {
-                        (Some(ev), m) => kkp_csi_tilde_event(code, m.unwrap_or(1), ev),
-                        (None, Some(m)) => modified_csi_tilde(code, m),
-                        (None, None) => TerminalInputPayload::Many(legacy),
-                    };
+                let f_tilde = |code: u8, legacy: fn(S8c1t) -> TerminalInputPayload| match (
+                    functional_event_code,
+                    mod_param,
+                ) {
+                    (Some(ev), m) => kkp_csi_tilde_event(s8c1t, code, m.unwrap_or(1), ev),
+                    (None, Some(m)) => modified_csi_tilde(s8c1t, code, m),
+                    (None, None) => legacy(s8c1t),
+                };
                 match n {
                     1 => f_final(b'P'),
                     2 => f_final(b'Q'),
-                    3 => f_tilde(13, b"\x1b[13~"),
+                    3 => f_tilde(13, |mode| static_sequence!(csi, mode, "13~")),
                     4 => f_final(b'S'),
-                    5 => f_tilde(15, b"\x1b[15~"),
-                    6 => f_tilde(17, b"\x1b[17~"),
-                    7 => f_tilde(18, b"\x1b[18~"),
-                    8 => f_tilde(19, b"\x1b[19~"),
-                    9 => f_tilde(20, b"\x1b[20~"),
-                    10 => f_tilde(21, b"\x1b[21~"),
-                    11 => f_tilde(23, b"\x1b[23~"),
-                    12 => f_tilde(24, b"\x1b[24~"),
+                    5 => f_tilde(15, |mode| static_sequence!(csi, mode, "15~")),
+                    6 => f_tilde(17, |mode| static_sequence!(csi, mode, "17~")),
+                    7 => f_tilde(18, |mode| static_sequence!(csi, mode, "18~")),
+                    8 => f_tilde(19, |mode| static_sequence!(csi, mode, "19~")),
+                    9 => f_tilde(20, |mode| static_sequence!(csi, mode, "20~")),
+                    10 => f_tilde(21, |mode| static_sequence!(csi, mode, "21~")),
+                    11 => f_tilde(23, |mode| static_sequence!(csi, mode, "23~")),
+                    12 => f_tilde(24, |mode| static_sequence!(csi, mode, "24~")),
                     // F13–F35: KKP-only, no legacy/functional-event form —
                     // always plain `CSI <codepoint> u` (event type, if any,
                     // is embedded by `build_csi_u` itself via `flags`/`meta`).
                     13..=35 => {
                         let codepoint = KKP_F13_CODEPOINT + u32::from(*n - 13);
-                        Self::build_csi_u(codepoint, mod_param, flags, meta)
+                        Self::build_csi_u(s8c1t, codepoint, mod_param, flags, meta)
                     }
                     _ => {
                         warn!("Unhandled function key: F{n}");
@@ -1130,7 +1266,13 @@ impl TerminalInput {
             // encoding: outside flag 8 these produce no bytes.
             Self::ShiftLeft(mods) => {
                 if report_all {
-                    Self::build_csi_u(KKP_LEFT_SHIFT_CODEPOINT, mods.modifier_param(), flags, meta)
+                    Self::build_csi_u(
+                        s8c1t,
+                        KKP_LEFT_SHIFT_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
                 } else {
                     TerminalInputPayload::Many(b"")
                 }
@@ -1138,6 +1280,7 @@ impl TerminalInput {
             Self::ShiftRight(mods) => {
                 if report_all {
                     Self::build_csi_u(
+                        s8c1t,
                         KKP_RIGHT_SHIFT_CODEPOINT,
                         mods.modifier_param(),
                         flags,
@@ -1150,6 +1293,7 @@ impl TerminalInput {
             Self::ControlLeft(mods) => {
                 if report_all {
                     Self::build_csi_u(
+                        s8c1t,
                         KKP_LEFT_CONTROL_CODEPOINT,
                         mods.modifier_param(),
                         flags,
@@ -1162,6 +1306,7 @@ impl TerminalInput {
             Self::ControlRight(mods) => {
                 if report_all {
                     Self::build_csi_u(
+                        s8c1t,
                         KKP_RIGHT_CONTROL_CODEPOINT,
                         mods.modifier_param(),
                         flags,
@@ -1173,21 +1318,39 @@ impl TerminalInput {
             }
             Self::AltLeft(mods) => {
                 if report_all {
-                    Self::build_csi_u(KKP_LEFT_ALT_CODEPOINT, mods.modifier_param(), flags, meta)
+                    Self::build_csi_u(
+                        s8c1t,
+                        KKP_LEFT_ALT_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
                 } else {
                     TerminalInputPayload::Many(b"")
                 }
             }
             Self::AltRight(mods) => {
                 if report_all {
-                    Self::build_csi_u(KKP_RIGHT_ALT_CODEPOINT, mods.modifier_param(), flags, meta)
+                    Self::build_csi_u(
+                        s8c1t,
+                        KKP_RIGHT_ALT_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
                 } else {
                     TerminalInputPayload::Many(b"")
                 }
             }
             Self::SuperLeft(mods) => {
                 if report_all {
-                    Self::build_csi_u(KKP_LEFT_SUPER_CODEPOINT, mods.modifier_param(), flags, meta)
+                    Self::build_csi_u(
+                        s8c1t,
+                        KKP_LEFT_SUPER_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
                 } else {
                     TerminalInputPayload::Many(b"")
                 }
@@ -1195,6 +1358,7 @@ impl TerminalInput {
             Self::SuperRight(mods) => {
                 if report_all {
                     Self::build_csi_u(
+                        s8c1t,
                         KKP_RIGHT_SUPER_CODEPOINT,
                         mods.modifier_param(),
                         flags,
@@ -1212,7 +1376,7 @@ impl TerminalInput {
             // any, is embedded by `build_csi_u` itself via `flags`/`meta`),
             // mirroring the F13–F35 arm above.
             Self::KittyFunctional { codepoint, mods } => {
-                Self::build_csi_u(*codepoint, mods.modifier_param(), flags, meta)
+                Self::build_csi_u(s8c1t, *codepoint, mods.modifier_param(), flags, meta)
             }
         }
     }
@@ -1222,20 +1386,20 @@ impl TerminalInput {
 mod tests {
     use super::*;
     use freminal_common::buffer_states::modes::{
-        application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-        keypad::KeypadMode, lnm::Lnm,
+        application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm, lnm::Lnm,
+        s8c1t::S8c1t,
     };
 
     /// Convenience: call `to_payload` with all-default modes and zero KKP flags.
     fn to_payload_defaults(input: &TerminalInput) -> TerminalInputPayload {
         input.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         )
     }
@@ -1244,12 +1408,12 @@ mod tests {
     fn to_payload_kkp(input: &TerminalInput, flags: u32) -> TerminalInputPayload {
         input.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             flags,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         )
     }
@@ -1267,14 +1431,131 @@ mod tests {
         };
         input.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             flags,
+            S8c1t::SevenBit,
             &meta,
         )
+    }
+
+    // ── AltText (Task 147.24) ───────────────────────────────────────────────
+
+    fn alt_text(text: &str) -> TerminalInput {
+        TerminalInput::AltText(text.into())
+    }
+
+    #[test]
+    fn alt_text_legacy_is_one_escape_then_the_text() {
+        assert_eq!(
+            to_payload_defaults(&alt_text("b")),
+            TerminalInputPayload::Owned(b"\x1bb".to_vec())
+        );
+        assert_eq!(
+            to_payload_defaults(&alt_text("\u{e9}\u{1f600}")),
+            TerminalInputPayload::Owned("\u{1b}\u{e9}\u{1f600}".as_bytes().to_vec()),
+            "multi-byte text gets exactly one prefix"
+        );
+    }
+
+    #[test]
+    fn alt_text_prefix_is_a_plain_escape_in_either_c1_mode() {
+        // Alt+`[` and Alt+`O` are an Alt prefix plus a character, never an
+        // introducer, so S8C1T must not touch them.
+        for mode in [S8c1t::SevenBit, S8c1t::EightBit] {
+            for text in ["[", "O"] {
+                let payload = alt_text(text).to_payload(
+                    Decckm::Ansi,
+                    0,
+                    ApplicationEscapeKey::Reset,
+                    Decbkm::BackarrowSendsDel,
+                    Lnm::LineFeed,
+                    0,
+                    mode,
+                    &KeyEventMeta::PRESS,
+                );
+                assert_eq!(
+                    payload,
+                    TerminalInputPayload::Owned([b"\x1b", text.as_bytes()].concat()),
+                    "{mode:?} Alt+{text}"
+                );
+            }
+        }
+    }
+
+    /// Every expectation below is a literal, worked out from the kitty
+    /// keyboard protocol (`CSI unicode-key-code[:shifted:base] ; modifiers
+    /// [:event-type] u`, the key code being the lowercase codepoint of the
+    /// character), never derived by running the code under test.
+    fn assert_alt_text_kkp(flags: u32, text: &str, expected: &[u8]) {
+        assert_eq!(
+            to_payload_kkp(&alt_text(text), flags),
+            TerminalInputPayload::Owned(expected.to_vec()),
+            "text {text:?}, kitty flags {flags}"
+        );
+    }
+
+    #[test]
+    fn alt_text_without_report_all_is_the_typed_bytes() {
+        for flags in [1_u32, 2, 4, 16, 1 | 2, 2 | 4 | 16] {
+            assert_alt_text_kkp(flags, "b", b"b");
+            assert_alt_text_kkp(flags, "B", b"B");
+            assert_alt_text_kkp(flags, "ab", b"ab");
+            assert_alt_text_kkp(flags, "\u{e9}", b"\xc3\xa9");
+            assert_alt_text_kkp(flags, "\u{1f600}", b"\xf0\x9f\x98\x80");
+        }
+    }
+
+    #[test]
+    fn alt_text_with_report_all_is_one_csi_u_per_character() {
+        assert_alt_text_kkp(8, "b", b"\x1b[98u");
+        assert_alt_text_kkp(8, "B", b"\x1b[98;2u");
+        assert_alt_text_kkp(8, "ab", b"\x1b[97u\x1b[98u");
+        // U+00E9 is 233: one key, not the two UTF-8 bytes 195 and 169.
+        assert_alt_text_kkp(8, "\u{e9}", b"\x1b[233u");
+        // U+00C9 is the shifted form of U+00E9.
+        assert_alt_text_kkp(8, "\u{c9}", b"\x1b[233;2u");
+        // U+1F600 is 128512, with no case.
+        assert_alt_text_kkp(8, "\u{1f600}", b"\x1b[128512u");
+        assert_alt_text_kkp(8, "a\u{e9}b", b"\x1b[97u\x1b[233u\x1b[98u");
+        assert_alt_text_kkp(1 | 8, "\u{e9}", b"\x1b[233u");
+    }
+
+    #[test]
+    fn alt_text_with_all_kitty_flags_reports_alternates_for_ascii_only() {
+        // Flag 4 adds `:shifted:base` for ASCII (US QWERTY) when Shift is part
+        // of the modifiers: not for a plain `b`, which has no shifted form to
+        // report. A non-ASCII key has no shifted form here.
+        assert_alt_text_kkp(31, "b", b"\x1b[98u");
+        assert_alt_text_kkp(31, "B", b"\x1b[98:66:98;2u");
+        assert_alt_text_kkp(31, "\u{e9}", b"\x1b[233u");
+    }
+
+    #[test]
+    fn alt_text_release_event_reports_each_character_as_a_key() {
+        let release =
+            |flags, text: &str| to_payload_kkp_event(&alt_text(text), flags, KeyEventType::Release);
+        // A release must not be sent as text, which would type it twice.
+        assert_eq!(
+            release(1 | 2, "\u{e9}"),
+            TerminalInputPayload::Owned(b"\x1b[233;1:3u".to_vec())
+        );
+        assert_eq!(
+            release(1 | 2, "\u{c9}"),
+            TerminalInputPayload::Owned(b"\x1b[233;2:3u".to_vec())
+        );
+        assert_eq!(
+            release(1 | 2, "a\u{e9}"),
+            TerminalInputPayload::Owned(b"\x1b[97;1:3u\x1b[233;1:3u".to_vec())
+        );
+    }
+
+    #[test]
+    fn collect_alt_text_is_one_input_and_empty_text_is_none() {
+        assert_eq!(collect_alt_text("abc").len(), 1);
+        assert!(collect_alt_text("").is_empty());
     }
 
     // ── us_qwerty_shifted ────────────────────────────────────────────────────
@@ -1336,12 +1617,12 @@ mod tests {
     fn arrow_right_application_mode() {
         let p = TerminalInput::ArrowRight(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Many(b"\x1bOC"));
@@ -1390,12 +1671,12 @@ mod tests {
     fn arrow_left_application_mode() {
         let p = TerminalInput::ArrowLeft(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Many(b"\x1bOD"));
@@ -1411,12 +1692,12 @@ mod tests {
     fn arrow_up_application_mode() {
         let p = TerminalInput::ArrowUp(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Many(b"\x1bOA"));
@@ -1432,12 +1713,12 @@ mod tests {
     fn arrow_down_application_mode() {
         let p = TerminalInput::ArrowDown(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Many(b"\x1bOB"));
@@ -1455,12 +1736,12 @@ mod tests {
     fn home_application_mode() {
         let p = TerminalInput::Home(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Many(b"\x1bOH"));
@@ -1486,12 +1767,12 @@ mod tests {
     fn end_application_mode() {
         let p = TerminalInput::End(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Many(b"\x1bOF"));
@@ -1673,85 +1954,6 @@ mod tests {
         assert_eq!(p, TerminalInputPayload::Many(b""));
     }
 
-    // ── to_payload: KeyPad ───────────────────────────────────────────────────
-
-    #[test]
-    fn keypad_numeric_mode_sends_raw_byte() {
-        let p = TerminalInput::KeyPad(b'5').to_payload(
-            Decckm::Ansi,
-            KeypadMode::Numeric,
-            0,
-            ApplicationEscapeKey::Reset,
-            Decbkm::BackarrowSendsDel,
-            Lnm::LineFeed,
-            0,
-            &KeyEventMeta::PRESS,
-        );
-        assert_eq!(p, TerminalInputPayload::Single(b'5'));
-    }
-
-    #[test]
-    fn keypad_application_mode_digits() {
-        let payload_for = |c: u8| -> TerminalInputPayload {
-            TerminalInput::KeyPad(c).to_payload(
-                Decckm::Ansi,
-                KeypadMode::Application,
-                0,
-                ApplicationEscapeKey::Reset,
-                Decbkm::BackarrowSendsDel,
-                Lnm::LineFeed,
-                0,
-                &KeyEventMeta::PRESS,
-            )
-        };
-        assert_eq!(payload_for(0), TerminalInputPayload::Many(b"\x1b[Op"));
-        assert_eq!(payload_for(1), TerminalInputPayload::Many(b"\x1b[Oq"));
-        assert_eq!(payload_for(2), TerminalInputPayload::Many(b"\x1b[Or"));
-        assert_eq!(payload_for(3), TerminalInputPayload::Many(b"\x1b[Os"));
-        assert_eq!(payload_for(4), TerminalInputPayload::Many(b"\x1b[Ot"));
-        assert_eq!(payload_for(5), TerminalInputPayload::Many(b"\x1b[Ou"));
-        assert_eq!(payload_for(6), TerminalInputPayload::Many(b"\x1b[Ov"));
-        assert_eq!(payload_for(7), TerminalInputPayload::Many(b"\x1b[Ow"));
-        assert_eq!(payload_for(8), TerminalInputPayload::Many(b"\x1b[Ox"));
-        assert_eq!(payload_for(9), TerminalInputPayload::Many(b"\x1b[Oy"));
-    }
-
-    #[test]
-    fn keypad_application_mode_special_keys() {
-        let payload_for = |c: u8| -> TerminalInputPayload {
-            TerminalInput::KeyPad(c).to_payload(
-                Decckm::Ansi,
-                KeypadMode::Application,
-                0,
-                ApplicationEscapeKey::Reset,
-                Decbkm::BackarrowSendsDel,
-                Lnm::LineFeed,
-                0,
-                &KeyEventMeta::PRESS,
-            )
-        };
-        assert_eq!(payload_for(b'-'), TerminalInputPayload::Many(b"\x1b[Om"));
-        assert_eq!(payload_for(b','), TerminalInputPayload::Many(b"\x1b[Ol"));
-        assert_eq!(payload_for(b'.'), TerminalInputPayload::Many(b"\x1b[On"));
-        assert_eq!(payload_for(b'\n'), TerminalInputPayload::Many(b"\x1b[OM"));
-    }
-
-    #[test]
-    fn keypad_application_mode_unknown_key_fallback() {
-        // A byte not in the match → fallback to Single
-        let p = TerminalInput::KeyPad(b'!').to_payload(
-            Decckm::Ansi,
-            KeypadMode::Application,
-            0,
-            ApplicationEscapeKey::Reset,
-            Decbkm::BackarrowSendsDel,
-            Lnm::LineFeed,
-            0,
-            &KeyEventMeta::PRESS,
-        );
-        assert_eq!(p, TerminalInputPayload::Single(b'!'));
-    }
-
     // ── to_payload: Enter with LNM ───────────────────────────────────────────
 
     #[test]
@@ -1764,12 +1966,12 @@ mod tests {
     fn enter_lnm_newline_sends_crlf() {
         let p = TerminalInput::Enter.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::NewLine,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Many(b"\x0d\x0a"));
@@ -1793,12 +1995,12 @@ mod tests {
         assert_eq!(Decbkm::default(), Decbkm::BackarrowSendsDel);
         let p = TerminalInput::Backspace.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::default(),
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Single(0x7F));
@@ -1808,12 +2010,12 @@ mod tests {
     fn backspace_decbkm_bs_sends_bs() {
         let p = TerminalInput::Backspace.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsBs,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Single(0x08));
@@ -1831,12 +2033,12 @@ mod tests {
     fn escape_application_escape_key_sends_csi_sequence() {
         let p = TerminalInput::Escape.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Set,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[27;1;27~".to_vec()));
@@ -1856,12 +2058,12 @@ mod tests {
     fn ctrl_c_level0_sends_etx() {
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0, // modifyOtherKeys=0 → legacy
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Single(0x03)); // 'c' & 0x1F
@@ -1871,12 +2073,12 @@ mod tests {
     fn ctrl_c_level2_sends_csi27_sequence() {
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             2, // modifyOtherKeys=2
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             0,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         // CSI 27 ; 5 ; 99 ~ (ctrl modifier = 5, 'c' = 99)
@@ -1925,12 +2127,13 @@ mod tests {
     fn kkp_enter_disambiguate_only_lnm_newline_sends_crlf() {
         let p = TerminalInput::Enter.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::NewLine,
-            1, // flag 1 only
+            1,
+            S8c1t::SevenBit,
+            // flag 1 only
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Many(b"\x0d\x0a"));
@@ -1955,12 +2158,13 @@ mod tests {
     fn kkp_backspace_disambiguate_only_decbkm_bs() {
         let p = TerminalInput::Backspace.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsBs,
             Lnm::LineFeed,
-            1, // flag 1 only
+            1,
+            S8c1t::SevenBit,
+            // flag 1 only
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Single(0x08));
@@ -2007,12 +2211,12 @@ mod tests {
     fn kkp_arrow_right_application_mode() {
         let p = TerminalInput::ArrowRight(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             1,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         );
         assert_eq!(p, TerminalInputPayload::Many(b"\x1bOC"));
@@ -2318,38 +2522,6 @@ mod tests {
         assert_eq!(p, TerminalInputPayload::Many(b""));
     }
 
-    // ── to_payload_kkp: KeyPad ───────────────────────────────────────────────
-
-    #[test]
-    fn kkp_keypad_numeric_mode() {
-        let p = TerminalInput::KeyPad(b'5').to_payload(
-            Decckm::Ansi,
-            KeypadMode::Numeric,
-            0,
-            ApplicationEscapeKey::Reset,
-            Decbkm::BackarrowSendsDel,
-            Lnm::LineFeed,
-            1,
-            &KeyEventMeta::PRESS,
-        );
-        assert_eq!(p, TerminalInputPayload::Single(b'5'));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode() {
-        let p = TerminalInput::KeyPad(0).to_payload(
-            Decckm::Ansi,
-            KeypadMode::Application,
-            0,
-            ApplicationEscapeKey::Reset,
-            Decbkm::BackarrowSendsDel,
-            Lnm::LineFeed,
-            1,
-            &KeyEventMeta::PRESS,
-        );
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[Op"));
-    }
-
     // ── to_payload_kkp: ASCII plain (report_all flag) ────────────────────────
 
     #[test]
@@ -2381,12 +2553,13 @@ mod tests {
         // Actually Press has no code so it is omitted; the modifier is just 5.
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
-            1 | 2, // DISAMBIGUATE + REPORT_EVENT_TYPE
+            1 | 2,
+            S8c1t::SevenBit,
+            // DISAMBIGUATE + REPORT_EVENT_TYPE
             &KeyEventMeta::PRESS,
         );
         // Press event code is None so modifier field stays "5" without ":1"
@@ -2401,12 +2574,12 @@ mod tests {
         };
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             1 | 2,
+            S8c1t::SevenBit,
             &meta,
         );
         // Repeat event code = 2: modifier field is "5:2"
@@ -2423,12 +2596,13 @@ mod tests {
         };
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
-            1 | 16, // DISAMBIGUATE + ASSOCIATED_TEXT
+            1 | 16,
+            S8c1t::SevenBit,
+            // DISAMBIGUATE + ASSOCIATED_TEXT
             &meta,
         );
         // Third param is "97" (codepoint of 'a')
@@ -2443,12 +2617,12 @@ mod tests {
         };
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             1 | 16,
+            S8c1t::SevenBit,
             &meta,
         );
         // Empty associated text is omitted
@@ -2681,12 +2855,12 @@ mod tests {
     fn to_payload_kkp_app(input: &TerminalInput, flags: u32) -> TerminalInputPayload {
         input.to_payload(
             Decckm::Application,
-            KeypadMode::Application,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
             Lnm::LineFeed,
             flags,
+            S8c1t::SevenBit,
             &KeyEventMeta::PRESS,
         )
     }
@@ -2825,69 +2999,6 @@ mod tests {
     fn kkp_pagedown_with_modifier() {
         let p = to_payload_kkp(&TerminalInput::PageDown(SHIFT), 1);
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[6;2~".to_vec()));
-    }
-
-    // ── KKP: keypad in application mode ──────────────────────────────────────
-
-    #[test]
-    fn kkp_keypad_application_mode_digits() {
-        let expected_suffixes = b"pqrstuvwxy";
-        for (digit, suffix) in (0u8..=9).zip(expected_suffixes.iter()) {
-            let p = to_payload_kkp_app(&TerminalInput::KeyPad(digit), 1);
-            let expected = [0x1b, b'[', b'O', *suffix];
-            assert_eq!(
-                p,
-                TerminalInputPayload::Many(
-                    // The Many variant holds a &'static [u8]; match the exact expected
-                    match digit {
-                        0 => b"\x1b[Op",
-                        1 => b"\x1b[Oq",
-                        2 => b"\x1b[Or",
-                        3 => b"\x1b[Os",
-                        4 => b"\x1b[Ot",
-                        5 => b"\x1b[Ou",
-                        6 => b"\x1b[Ov",
-                        7 => b"\x1b[Ow",
-                        8 => b"\x1b[Ox",
-                        9 => b"\x1b[Oy",
-                        _ => unreachable!(),
-                    }
-                ),
-                "keypad {digit} in app mode should produce ESC[O{}",
-                expected[3] as char
-            );
-        }
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_minus() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'-'), 1);
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[Om"));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_comma() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b','), 1);
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[Ol"));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_dot() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'.'), 1);
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[On"));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_enter() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'\n'), 1);
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[OM"));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_unknown() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'?'), 1);
-        // Unknown keypad key in app mode should fallback to Single
-        assert_eq!(p, TerminalInputPayload::Single(b'?'));
     }
 
     // ── KKP: function keys ──────────────────────────────────────────────────
@@ -3409,19 +3520,13 @@ mod tests {
     /// encoded as the two-byte sequence [0xC3, 0xA9] in UTF-8.
     #[test]
     fn collect_text_non_ascii_utf8_encoding() {
-        // 'é' = U+00E9, UTF-8: [0xC3, 0xA9]
         let inputs = collect_text("é");
-        let bytes: Vec<u8> = inputs
-            .iter()
-            .filter_map(|i| {
-                if let TerminalInput::Ascii(b) = i {
-                    Some(*b)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(bytes, "é".as_bytes(), "é must encode as its UTF-8 bytes");
+        assert_eq!(inputs.len(), 1, "one input per character");
+        assert_eq!(
+            to_payload_defaults(&inputs[0]),
+            TerminalInputPayload::Owned(vec![0xC3, 0xA9]),
+            "é must encode as its UTF-8 bytes"
+        );
     }
 
     /// `collect_text` must handle multi-codepoint strings correctly.
@@ -3429,14 +3534,13 @@ mod tests {
     fn collect_text_mixed_ascii_and_non_ascii() {
         // "aé" = 'a' (0x61) + 'é' (0xC3 0xA9) = 3 bytes total
         let inputs = collect_text("aé");
+        assert_eq!(inputs.len(), 2, "one input per character");
         let bytes: Vec<u8> = inputs
             .iter()
-            .filter_map(|i| {
-                if let TerminalInput::Ascii(b) = i {
-                    Some(*b)
-                } else {
-                    None
-                }
+            .flat_map(|i| match to_payload_defaults(i) {
+                TerminalInputPayload::Single(b) => vec![b],
+                TerminalInputPayload::Many(bs) => bs.to_vec(),
+                TerminalInputPayload::Owned(bs) => bs,
             })
             .collect();
         assert_eq!(
@@ -3444,6 +3548,56 @@ mod tests {
             "aé".as_bytes(),
             "mixed ASCII+non-ASCII must encode as UTF-8"
         );
+    }
+
+    /// Plain typed text under kitty flag 8 is one key per character: `é` is
+    /// `CSI 233 u`, not one key per UTF-8 byte (`CSI 195 u CSI 169 u`).
+    #[test]
+    fn collect_text_non_ascii_under_report_all_is_one_key_per_character() {
+        let encode = |text: &str, flags: u32| -> Vec<u8> {
+            collect_text(text)
+                .iter()
+                .flat_map(|i| match to_payload_kkp(i, flags) {
+                    TerminalInputPayload::Single(b) => vec![b],
+                    TerminalInputPayload::Many(bs) => bs.to_vec(),
+                    TerminalInputPayload::Owned(bs) => bs,
+                })
+                .collect()
+        };
+        assert_eq!(encode("\u{e9}", 8), b"\x1b[233u");
+        assert_eq!(encode("\u{c9}", 8), b"\x1b[233;2u");
+        assert_eq!(encode("a\u{1f600}", 8), b"\x1b[97u\x1b[128512u");
+        // Without flag 8 the character is typed as it is.
+        assert_eq!(encode("\u{e9}", 1), b"\xc3\xa9");
+    }
+
+    /// The protocol reports the shifted key only when Shift is among the
+    /// modifiers. Each literal below is worked out from the spec, with the
+    /// modifier parameter `1 + shift(1) + alt(2) + ctrl(4)`.
+    #[test]
+    fn build_csi_u_reports_the_shifted_key_only_when_shift_is_held() {
+        let csi_u = |codepoint, modifier| {
+            let payload = TerminalInput::build_csi_u(
+                S8c1t::SevenBit,
+                codepoint,
+                modifier,
+                4,
+                &KeyEventMeta::PRESS,
+            );
+            let TerminalInputPayload::Owned(bytes) = payload else {
+                panic!("expected an owned payload, got {payload:?}");
+            };
+            bytes
+        };
+        // No modifiers, Alt only and Ctrl only: no Shift, no shifted key.
+        assert_eq!(csi_u(98, None), b"\x1b[98u");
+        assert_eq!(csi_u(98, Some(3)), b"\x1b[98;3u");
+        assert_eq!(csi_u(98, Some(5)), b"\x1b[98;5u");
+        assert_eq!(csi_u(49, None), b"\x1b[49u");
+        // Shift, alone or with other modifiers: the shifted key is reported.
+        assert_eq!(csi_u(98, Some(2)), b"\x1b[98:66:98;2u");
+        assert_eq!(csi_u(98, Some(6)), b"\x1b[98:66:98;6u");
+        assert_eq!(csi_u(49, Some(2)), b"\x1b[49:33:49;2u");
     }
 
     /// The `u8::try_from(codepoint)` conversion inside `build_csi_u` is only
@@ -3454,8 +3608,562 @@ mod tests {
     fn build_csi_u_report_alt_ascii_boundary() {
         let meta = KeyEventMeta::PRESS;
         // codepoint 127 (DEL) is the highest ASCII value — must not panic.
-        let p = TerminalInput::build_csi_u(127, None, 4, &meta);
+        let p = TerminalInput::build_csi_u(S8c1t::SevenBit, 127, None, 4, &meta);
         // We just verify it produces some Owned payload without panic.
         assert!(matches!(p, TerminalInputPayload::Owned(_)));
+    }
+}
+
+/// Task 147.4: every generated CSI / SS3 introducer follows S8C1T.
+///
+/// The 8-bit column is written out in full, not derived from the 7-bit one,
+/// so a table row fails if an encoder forgets to route its introducer.
+#[cfg(test)]
+mod s8c1t_tests {
+    use super::*;
+
+    const NONE: KeyModifiers = KeyModifiers::NONE;
+    const SHIFT: KeyModifiers = KeyModifiers {
+        shift: true,
+        ..KeyModifiers::NONE
+    };
+
+    /// One encoder case: the key, the mode inputs that select the encoder,
+    /// and the exact bytes expected in each framing.
+    struct Row {
+        name: &'static str,
+        key: TerminalInput,
+        decckm: Decckm,
+        modify_other_keys: u8,
+        application_escape_key: ApplicationEscapeKey,
+        kitty_flags: u32,
+        seven_bit: &'static [u8],
+        eight_bit: &'static [u8],
+    }
+
+    fn row(
+        name: &'static str,
+        key: TerminalInput,
+        seven_bit: &'static [u8],
+        eight_bit: &'static [u8],
+    ) -> Row {
+        Row {
+            name,
+            key,
+            decckm: Decckm::Ansi,
+            modify_other_keys: 0,
+            application_escape_key: ApplicationEscapeKey::Reset,
+            kitty_flags: 0,
+            seven_bit,
+            eight_bit,
+        }
+    }
+
+    fn encode(row: &Row, s8c1t: S8c1t, meta: &KeyEventMeta) -> Vec<u8> {
+        match row.key.to_payload(
+            row.decckm,
+            row.modify_other_keys,
+            row.application_escape_key,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            row.kitty_flags,
+            s8c1t,
+            meta,
+        ) {
+            TerminalInputPayload::Single(b) => vec![b],
+            TerminalInputPayload::Many(bs) => bs.to_vec(),
+            TerminalInputPayload::Owned(bs) => bs,
+        }
+    }
+
+    fn assert_rows(rows: &[Row]) {
+        for r in rows {
+            assert_eq!(
+                encode(r, S8c1t::SevenBit, &KeyEventMeta::PRESS),
+                r.seven_bit,
+                "{}: 7-bit",
+                r.name
+            );
+            assert_eq!(
+                encode(r, S8c1t::EightBit, &KeyEventMeta::PRESS),
+                r.eight_bit,
+                "{}: 8-bit",
+                r.name
+            );
+        }
+    }
+
+    #[test]
+    fn introducer_bytes_table() {
+        let cases = [
+            (Introducer::Csi, S8c1t::SevenBit, &b"\x1b["[..]),
+            (Introducer::Csi, S8c1t::EightBit, b"\x9b"),
+            (Introducer::Ss3, S8c1t::SevenBit, b"\x1bO"),
+            (Introducer::Ss3, S8c1t::EightBit, b"\x8f"),
+        ];
+        for (intro, mode, expected) in cases {
+            assert_eq!(intro.bytes(mode), expected, "{intro:?} {mode:?}");
+            assert_eq!(
+                intro.frame(mode, b"1;2A"),
+                [expected, b"1;2A"].concat(),
+                "{intro:?} {mode:?} frame"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_cursor_and_navigation_keys() {
+        let app = |mut r: Row| {
+            r.decckm = Decckm::Application;
+            r
+        };
+        assert_rows(&[
+            row("up", TerminalInput::ArrowUp(NONE), b"\x1b[A", b"\x9bA"),
+            row("down", TerminalInput::ArrowDown(NONE), b"\x1b[B", b"\x9bB"),
+            row(
+                "right",
+                TerminalInput::ArrowRight(NONE),
+                b"\x1b[C",
+                b"\x9bC",
+            ),
+            row("left", TerminalInput::ArrowLeft(NONE), b"\x1b[D", b"\x9bD"),
+            row("home", TerminalInput::Home(NONE), b"\x1b[H", b"\x9bH"),
+            row("end", TerminalInput::End(NONE), b"\x1b[F", b"\x9bF"),
+            app(row(
+                "up, DECCKM",
+                TerminalInput::ArrowUp(NONE),
+                b"\x1bOA",
+                b"\x8fA",
+            )),
+            app(row(
+                "down, DECCKM",
+                TerminalInput::ArrowDown(NONE),
+                b"\x1bOB",
+                b"\x8fB",
+            )),
+            app(row(
+                "right, DECCKM",
+                TerminalInput::ArrowRight(NONE),
+                b"\x1bOC",
+                b"\x8fC",
+            )),
+            app(row(
+                "left, DECCKM",
+                TerminalInput::ArrowLeft(NONE),
+                b"\x1bOD",
+                b"\x8fD",
+            )),
+            app(row(
+                "home, DECCKM",
+                TerminalInput::Home(NONE),
+                b"\x1bOH",
+                b"\x8fH",
+            )),
+            app(row(
+                "end, DECCKM",
+                TerminalInput::End(NONE),
+                b"\x1bOF",
+                b"\x8fF",
+            )),
+            // A modifier forces the CSI form even under DECCKM.
+            app(row(
+                "shift+up, DECCKM",
+                TerminalInput::ArrowUp(SHIFT),
+                b"\x1b[1;2A",
+                b"\x9b1;2A",
+            )),
+            row(
+                "shift+home",
+                TerminalInput::Home(SHIFT),
+                b"\x1b[1;2H",
+                b"\x9b1;2H",
+            ),
+            row("delete", TerminalInput::Delete(NONE), b"\x1b[3~", b"\x9b3~"),
+            row("insert", TerminalInput::Insert(NONE), b"\x1b[2~", b"\x9b2~"),
+            row(
+                "page up",
+                TerminalInput::PageUp(NONE),
+                b"\x1b[5~",
+                b"\x9b5~",
+            ),
+            row(
+                "page down",
+                TerminalInput::PageDown(NONE),
+                b"\x1b[6~",
+                b"\x9b6~",
+            ),
+            row(
+                "shift+delete",
+                TerminalInput::Delete(SHIFT),
+                b"\x1b[3;2~",
+                b"\x9b3;2~",
+            ),
+            row(
+                "shift+page down",
+                TerminalInput::PageDown(SHIFT),
+                b"\x1b[6;2~",
+                b"\x9b6;2~",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn legacy_function_keys() {
+        assert_rows(&[
+            row(
+                "F1 (SS3)",
+                TerminalInput::FunctionKey(1, NONE),
+                b"\x1bOP",
+                b"\x8fP",
+            ),
+            row(
+                "F2 (SS3)",
+                TerminalInput::FunctionKey(2, NONE),
+                b"\x1bOQ",
+                b"\x8fQ",
+            ),
+            row(
+                "F3 (SS3)",
+                TerminalInput::FunctionKey(3, NONE),
+                b"\x1bOR",
+                b"\x8fR",
+            ),
+            row(
+                "F4 (SS3)",
+                TerminalInput::FunctionKey(4, NONE),
+                b"\x1bOS",
+                b"\x8fS",
+            ),
+            row(
+                "F5 (CSI ~)",
+                TerminalInput::FunctionKey(5, NONE),
+                b"\x1b[15~",
+                b"\x9b15~",
+            ),
+            row(
+                "F12 (CSI ~)",
+                TerminalInput::FunctionKey(12, NONE),
+                b"\x1b[24~",
+                b"\x9b24~",
+            ),
+            row(
+                "shift+F1 (CSI)",
+                TerminalInput::FunctionKey(1, SHIFT),
+                b"\x1b[1;2P",
+                b"\x9b1;2P",
+            ),
+            row(
+                "shift+F5 (CSI ~)",
+                TerminalInput::FunctionKey(5, SHIFT),
+                b"\x1b[15;2~",
+                b"\x9b15;2~",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn legacy_focus_reports() {
+        assert_rows(&[
+            row("focus in", TerminalInput::InFocus, b"\x1b[I", b"\x9bI"),
+            row("focus out", TerminalInput::LostFocus, b"\x1b[O", b"\x9bO"),
+        ]);
+    }
+
+    #[test]
+    fn modify_other_keys_and_application_escape() {
+        let mut ctrl = row(
+            "modifyOtherKeys 2 ctrl+a",
+            TerminalInput::Ctrl(b'a'),
+            b"\x1b[27;5;97~",
+            b"\x9b27;5;97~",
+        );
+        ctrl.modify_other_keys = 2;
+        let mut esc = row(
+            "application escape key",
+            TerminalInput::Escape,
+            b"\x1b[27;1;27~",
+            b"\x9b27;1;27~",
+        );
+        esc.application_escape_key = ApplicationEscapeKey::Set;
+        assert_rows(&[ctrl, esc]);
+    }
+
+    #[test]
+    fn kitty_csi_u_encodings() {
+        let kkp = |mut r: Row, flags: u32| {
+            r.kitty_flags = flags;
+            r
+        };
+        assert_rows(&[
+            kkp(
+                row(
+                    "disambiguate ctrl+a",
+                    TerminalInput::Ctrl(b'a'),
+                    b"\x1b[97;5u",
+                    b"\x9b97;5u",
+                ),
+                1,
+            ),
+            kkp(
+                row(
+                    "disambiguate escape",
+                    TerminalInput::Escape,
+                    b"\x1b[27u",
+                    b"\x9b27u",
+                ),
+                1,
+            ),
+            kkp(
+                row(
+                    "report-all enter",
+                    TerminalInput::Enter,
+                    b"\x1b[13u",
+                    b"\x9b13u",
+                ),
+                8,
+            ),
+            kkp(
+                row(
+                    "report-all text key",
+                    TerminalInput::Ascii(b'a'),
+                    b"\x1b[97u",
+                    b"\x9b97u",
+                ),
+                8,
+            ),
+            kkp(
+                row(
+                    "F13",
+                    TerminalInput::FunctionKey(13, NONE),
+                    b"\x1b[57376u",
+                    b"\x9b57376u",
+                ),
+                1,
+            ),
+            kkp(
+                row(
+                    "modifier key as key",
+                    TerminalInput::ShiftLeft(NONE),
+                    b"\x1b[57441u",
+                    b"\x9b57441u",
+                ),
+                8,
+            ),
+            kkp(
+                row(
+                    "kitty functional",
+                    TerminalInput::KittyFunctional {
+                        codepoint: KKP_KP_0_CODEPOINT,
+                        mods: SHIFT,
+                    },
+                    b"\x1b[57399;2u",
+                    b"\x9b57399;2u",
+                ),
+                1,
+            ),
+        ]);
+    }
+
+    #[test]
+    fn kitty_mode_press_of_functional_keys_keeps_legacy_form() {
+        let kkp = |mut r: Row| {
+            r.kitty_flags = 1;
+            r
+        };
+        assert_rows(&[
+            kkp(row(
+                "up press",
+                TerminalInput::ArrowUp(NONE),
+                b"\x1b[A",
+                b"\x9bA",
+            )),
+            kkp({
+                let mut r = row(
+                    "up press, DECCKM",
+                    TerminalInput::ArrowUp(NONE),
+                    b"\x1bOA",
+                    b"\x8fA",
+                );
+                r.decckm = Decckm::Application;
+                r
+            }),
+            kkp(row(
+                "shift+end press",
+                TerminalInput::End(SHIFT),
+                b"\x1b[1;2F",
+                b"\x9b1;2F",
+            )),
+            kkp(row(
+                "F1 press",
+                TerminalInput::FunctionKey(1, NONE),
+                b"\x1bOP",
+                b"\x8fP",
+            )),
+            kkp(row(
+                "F3 press (tilde form)",
+                TerminalInput::FunctionKey(3, NONE),
+                b"\x1b[13~",
+                b"\x9b13~",
+            )),
+            kkp(row(
+                "F5 press",
+                TerminalInput::FunctionKey(5, NONE),
+                b"\x1b[15~",
+                b"\x9b15~",
+            )),
+            kkp(row(
+                "delete press",
+                TerminalInput::Delete(NONE),
+                b"\x1b[3~",
+                b"\x9b3~",
+            )),
+            kkp(row("focus in", TerminalInput::InFocus, b"\x1b[I", b"\x9bI")),
+            kkp(row(
+                "focus out",
+                TerminalInput::LostFocus,
+                b"\x1b[O",
+                b"\x9bO",
+            )),
+        ]);
+    }
+
+    #[test]
+    fn kitty_event_type_encodings() {
+        // Flags 1 | 2: repeat and release must carry `:<event>`.
+        let release = KeyEventMeta {
+            event_type: KeyEventType::Release,
+            associated_text: None,
+        };
+        let cases: [(&str, TerminalInput, &[u8], &[u8]); 6] = [
+            (
+                "up release",
+                TerminalInput::ArrowUp(NONE),
+                b"\x1b[1;1:3A",
+                b"\x9b1;1:3A",
+            ),
+            (
+                "home release",
+                TerminalInput::Home(SHIFT),
+                b"\x1b[1;2:3H",
+                b"\x9b1;2:3H",
+            ),
+            (
+                "F1 release",
+                TerminalInput::FunctionKey(1, NONE),
+                b"\x1b[1;1:3P",
+                b"\x9b1;1:3P",
+            ),
+            (
+                "F5 release",
+                TerminalInput::FunctionKey(5, NONE),
+                b"\x1b[15;1:3~",
+                b"\x9b15;1:3~",
+            ),
+            (
+                "delete release",
+                TerminalInput::Delete(NONE),
+                b"\x1b[3;1:3~",
+                b"\x9b3;1:3~",
+            ),
+            (
+                "text release",
+                TerminalInput::Ascii(b'a'),
+                b"\x1b[97;1:3u",
+                b"\x9b97;1:3u",
+            ),
+        ];
+        for (name, key, seven_bit, eight_bit) in cases {
+            let mut r = row(name, key, seven_bit, eight_bit);
+            r.kitty_flags = 3;
+            assert_eq!(
+                encode(&r, S8c1t::SevenBit, &release),
+                seven_bit,
+                "{name}: 7-bit"
+            );
+            assert_eq!(
+                encode(&r, S8c1t::EightBit, &release),
+                eight_bit,
+                "{name}: 8-bit"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_associated_text_field_is_framed() {
+        let mut r = row(
+            "associated text",
+            TerminalInput::Ascii(b'a'),
+            b"\x1b[97;1;97u",
+            b"\x9b97;1;97u",
+        );
+        r.kitty_flags = 8 | 16;
+        let meta = KeyEventMeta {
+            event_type: KeyEventType::Press,
+            associated_text: Some("a".to_owned()),
+        };
+        assert_eq!(encode(&r, S8c1t::SevenBit, &meta), r.seven_bit);
+        assert_eq!(encode(&r, S8c1t::EightBit, &meta), r.eight_bit);
+    }
+
+    /// Keys that never carry an introducer are identical in both modes.
+    #[test]
+    fn introducer_free_keys_are_mode_independent() {
+        assert_rows(&[
+            row("text", TerminalInput::Ascii(b'a'), b"a", b"a"),
+            row("ctrl+c", TerminalInput::Ctrl(b'c'), b"\x03", b"\x03"),
+            row("enter", TerminalInput::Enter, b"\r", b"\r"),
+            row("tab", TerminalInput::Tab, b"\t", b"\t"),
+            row("backspace", TerminalInput::Backspace, b"\x7f", b"\x7f"),
+            row("escape", TerminalInput::Escape, b"\x1b", b"\x1b"),
+        ]);
+    }
+
+    /// An Alt-prefixed `[` or `O` is `ESC` plus a character, not an
+    /// introducer, so S8C1T must leave it alone.
+    #[test]
+    fn alt_prefixed_bracket_and_o_are_not_rewritten() {
+        for text in *b"[O" {
+            let inputs = [TerminalInput::Ascii(0x1b), TerminalInput::Ascii(text)];
+            for mode in [S8c1t::SevenBit, S8c1t::EightBit] {
+                let bytes: Vec<u8> = inputs
+                    .iter()
+                    .flat_map(|input| {
+                        match input.to_payload(
+                            Decckm::Ansi,
+                            0,
+                            ApplicationEscapeKey::Reset,
+                            Decbkm::BackarrowSendsDel,
+                            Lnm::LineFeed,
+                            0,
+                            mode,
+                            &KeyEventMeta::PRESS,
+                        ) {
+                            TerminalInputPayload::Single(b) => vec![b],
+                            TerminalInputPayload::Many(bs) => bs.to_vec(),
+                            TerminalInputPayload::Owned(bs) => bs,
+                        }
+                    })
+                    .collect();
+                assert_eq!(bytes, [0x1b, text], "{mode:?}");
+            }
+        }
+    }
+
+    /// 7-bit static keys stay borrowed slices, so the common path does not
+    /// allocate.
+    #[test]
+    fn seven_bit_fixed_sequences_stay_borrowed() {
+        let r = row("up", TerminalInput::ArrowUp(NONE), b"", b"");
+        let payload = r.key.to_payload(
+            r.decckm,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            0,
+            S8c1t::SevenBit,
+            &KeyEventMeta::PRESS,
+        );
+        assert_eq!(payload, TerminalInputPayload::Many(b"\x1b[A"));
     }
 }

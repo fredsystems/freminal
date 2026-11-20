@@ -668,6 +668,31 @@ fn inner_8bit_csi_set_in_the_same_read_matches_direct_delivery() {
 }
 
 #[test]
+fn payload_is_seeded_with_the_mode_at_its_position_not_the_end_of_the_read() {
+    // The payload comes before the S8C1T in the same read, so the 0x9B inside
+    // it is text.  The outer parser ends the read in 8-bit mode, so seeding
+    // the payload parser from it would wrongly execute the CSI.
+    let mut wire = tmux_wrap(INNER_WITH_8BIT_CSI);
+    wire.extend_from_slice(b"\x1b G");
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(&wire);
+
+    assert_eq!(replies(&rx), Vec::<Vec<u8>>::new());
+}
+
+#[test]
+fn s8c1t_inside_a_payload_governs_the_following_read() {
+    // The outer parser never emits an S8C1T that arrived inside a tmux
+    // payload, yet the terminal is in 8-bit mode afterwards, so the next
+    // read's 0x9B is a CSI.
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(&tmux_wrap(b"\x1b G"));
+    state.handle_incoming_data(b"\x9b5n");
+
+    assert_eq!(replies(&rx), vec![b"\x9b0n".to_vec()]);
+}
+
+#[test]
 fn inner_da1_reply_is_8bit_framed_after_s8c1t() {
     let (mut state, rx) = make_state();
     state.handle_incoming_data(b"\x1b G");
@@ -685,20 +710,18 @@ fn inner_da1_reply_is_8bit_framed_after_s8c1t() {
 
 #[test]
 fn inner_vt52_sequence_matches_direct_delivery() {
-    // The outer parser cannot carry a DCS while in VT52 mode (VT52 has no
-    // DCS), and ANSI -> VT52 only takes effect after a read has been parsed.
-    // So the way to reach a VT52 payload is a read holding two payloads: the
-    // first enters VT52, the second is a VT52 sequence.  The fresh parser
-    // that handles the second must be seeded with VT52 mode.
+    // One payload enters VT52 and then carries a VT52 sequence. (A second
+    // wrapper after the VT52 entry is not a case: the outer parser is in VT52
+    // mode by then, which has no DCS, so it is not a wrapper any more.)
     //
     // `ESC Y` is direct cursor addressing: row 2, column 5 (zero-based) are
     // sent as byte + 0x20.
     let vt52_cup: &[u8] = b"\x1bY\"%";
-    let mut wire = tmux_wrap(b"\x1b[?2l");
-    wire.extend_from_slice(&tmux_wrap(vt52_cup));
+    let mut payload = b"\x1b[?2l".to_vec();
+    payload.extend_from_slice(vt52_cup);
     let (mut wrapped, wrapped_rx) = make_state();
     feed_setup(&mut wrapped);
-    wrapped.handle_incoming_data(&wire);
+    wrapped.handle_incoming_data(&tmux_wrap(&payload));
 
     let (mut direct, direct_rx) = make_state();
     feed_setup(&mut direct);
@@ -713,6 +736,126 @@ fn inner_vt52_sequence_matches_direct_delivery() {
     assert_eq!(cursor(&wrapped), cursor(&direct));
     assert_eq!(screen_text(&wrapped), screen_text(&direct));
     assert_eq!(replies(&wrapped_rx), replies(&direct_rx));
+}
+
+// ─── a mode change in a payload governs the outer bytes after it ────────────
+
+/// An outer DSR: answered `CSI 0 n` in 8-bit framing only while S8C1T is in
+/// force, because `0x9B` is a CSI only then (and text otherwise).
+const OUTER_8BIT_DSR: &[u8] = b"\x9b5n";
+
+/// The reply to `OUTER_8BIT_DSR` once S8C1T is on, with the S8C1T sent
+/// directly and the DSR in a separate read.
+fn direct_s8c1t_dsr_reply() -> Vec<Vec<u8>> {
+    let (mut direct, rx) = make_state();
+    direct.handle_incoming_data(b"\x1b G");
+    direct.handle_incoming_data(OUTER_8BIT_DSR);
+    replies(&rx)
+}
+
+#[test]
+fn s8c1t_in_a_payload_governs_outer_bytes_in_the_same_read() {
+    let expected = direct_s8c1t_dsr_reply();
+    assert_eq!(expected, vec![b"\x9b0n".to_vec()]);
+
+    // The wrapper and the bytes after it share a read: the outer parser used to
+    // parse them as 7-bit, printing the 0x9B as text.
+    let mut wire = tmux_wrap(b"\x1b G");
+    wire.extend_from_slice(OUTER_8BIT_DSR);
+    let (mut same_read, rx) = make_state();
+    same_read.handle_incoming_data(&wire);
+    assert_eq!(replies(&rx), expected);
+    assert!(
+        screen_text(&same_read).iter().all(String::is_empty),
+        "the 8-bit CSI must not be printed as text"
+    );
+}
+
+#[test]
+fn s8c1t_in_a_payload_governs_outer_bytes_in_the_next_read() {
+    let (mut split, rx) = make_state();
+    split.handle_incoming_data(&tmux_wrap(b"\x1b G"));
+    split.handle_incoming_data(OUTER_8BIT_DSR);
+    assert_eq!(replies(&rx), direct_s8c1t_dsr_reply());
+}
+
+#[test]
+fn s8c1t_without_a_wrapper_governs_outer_bytes_in_the_same_read() {
+    let mut wire = b"\x1b G".to_vec();
+    wire.extend_from_slice(OUTER_8BIT_DSR);
+    let (mut unwrapped, rx) = make_state();
+    unwrapped.handle_incoming_data(&wire);
+    assert_eq!(replies(&rx), direct_s8c1t_dsr_reply());
+}
+
+#[test]
+fn s8c1t_in_a_payload_governs_a_later_payload_and_outer_bytes_of_the_same_read() {
+    // Two wrappers and a direct sequence in one read, each depending on the
+    // S8C1T the first wrapper carries.
+    let mut wire = tmux_wrap(b"\x1b G");
+    wire.extend_from_slice(&tmux_wrap(INNER_WITH_8BIT_CSI));
+    wire.extend_from_slice(OUTER_8BIT_DSR);
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(&wire);
+    assert_eq!(replies(&rx), vec![b"\x9b0n".to_vec(), b"\x9b0n".to_vec()]);
+}
+
+#[test]
+fn s8c1t_after_a_nested_wrapper_governs_the_rest_of_the_payload() {
+    // The mode change is in the inner wrapper; the 0x9B after it is in the
+    // outer payload, and must be a CSI.
+    let mut payload = tmux_wrap(b"\x1b G");
+    payload.extend_from_slice(OUTER_8BIT_DSR);
+    // The handler requires the payload to start with ESC: lead with a no-op.
+    let mut inner = b"\x1b[H".to_vec();
+    inner.extend_from_slice(&payload);
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(&tmux_wrap(&inner));
+    assert_eq!(replies(&rx), vec![b"\x9b0n".to_vec()]);
+}
+
+#[test]
+fn vt52_in_a_payload_governs_outer_bytes_in_the_same_read() {
+    let vt52_cup: &[u8] = b"\x1bY\"%";
+    let mut wire = tmux_wrap(b"\x1b[?2l");
+    wire.extend_from_slice(vt52_cup);
+    let (mut wrapped, _rx) = make_state();
+    feed_setup(&mut wrapped);
+    wrapped.handle_incoming_data(&wire);
+
+    let (mut direct, _direct_rx) = make_state();
+    feed_setup(&mut direct);
+    direct.handle_incoming_data(b"\x1b[?2l");
+    direct.handle_incoming_data(vt52_cup);
+
+    assert_eq!(
+        cursor(&wrapped),
+        (5, 2),
+        "ESC Y must address row 2, column 5"
+    );
+    assert_eq!(screen_text(&wrapped), screen_text(&direct));
+}
+
+#[test]
+fn ris_after_a_vt52_payload_matches_direct_delivery() {
+    // `ESC c` is not a VT52 command, so after a payload leaves the terminal in
+    // VT52 mode it is ignored, exactly as when `CSI ? 2 l` is sent directly:
+    // the parser and the handler must agree on the mode afterwards. `ESC <`
+    // returns to ANSI, and the CUP after it must then be a CUP.
+    let tail: &[u8] = b"\x1bc\x1b<\x1b[2;3HX";
+    let mut wire = tmux_wrap(b"\x1b[?2l");
+    wire.extend_from_slice(tail);
+    let (mut wrapped, _rx) = make_state();
+    wrapped.handle_incoming_data(&wire);
+
+    let (mut direct, _direct_rx) = make_state();
+    let mut direct_wire = b"\x1b[?2l".to_vec();
+    direct_wire.extend_from_slice(tail);
+    direct.handle_incoming_data(&direct_wire);
+
+    assert_eq!(screen_text(&wrapped), screen_text(&direct));
+    assert_eq!(cursor(&wrapped), cursor(&direct));
+    assert_eq!(screen_text(&wrapped)[1], "  X");
 }
 
 // ─── malformed payloads ─────────────────────────────────────────────────────
@@ -735,4 +878,44 @@ fn malformed_tmux_payloads_have_no_effect() {
         );
         assert_eq!(replies(&rx), Vec::<Vec<u8>>::new());
     }
+}
+
+/// A `DCS tmux;` wrapper ended by a bare ESC (not ESC `\`) whose payload
+/// switches to VT52: the escape the bare ESC starts is read under VT52, so
+/// `ESC A` moves the cursor up (PR #589 review R28).
+fn bare_esc_vt52_wrapper() -> Vec<u8> {
+    let mut wire = tmux_wrap(b"\x1b[?2l");
+    // Replace the closing `ESC \` with a bare ESC that starts `ESC A`.
+    wire.truncate(wire.len() - 1);
+    wire.push(b'A');
+    wire
+}
+
+#[test]
+fn a_bare_esc_after_a_vt52_payload_starts_a_vt52_escape_in_the_same_read() {
+    let (mut state, _rx) = make_state();
+    feed_setup(&mut state);
+    let before = cursor(&state);
+    state.handle_incoming_data(&bare_esc_vt52_wrapper());
+    assert_eq!(
+        cursor(&state),
+        (before.0, before.1 - 1),
+        "VT52 ESC A is cursor up"
+    );
+}
+
+#[test]
+fn a_bare_esc_after_a_vt52_payload_starts_a_vt52_escape_across_a_split() {
+    let (mut state, _rx) = make_state();
+    feed_setup(&mut state);
+    let before = cursor(&state);
+    let wire = bare_esc_vt52_wrapper();
+    let (head, tail) = wire.split_at(wire.len() - 1);
+    state.handle_incoming_data(head);
+    state.handle_incoming_data(tail);
+    assert_eq!(
+        cursor(&state),
+        (before.0, before.1 - 1),
+        "VT52 ESC A is cursor up"
+    );
 }

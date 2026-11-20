@@ -64,6 +64,20 @@ pub(super) fn extract_root_leaf(
     }
 }
 
+/// Send a layout startup command to a pane as typed input: the command
+/// text followed by a newline, in one `InputEvent::Key`.
+fn send_startup_command(
+    input_tx: &crossbeam_channel::Sender<InputEvent>,
+    pane_id: panes::PaneId,
+    command: &str,
+) {
+    let mut payload = command.as_bytes().to_owned();
+    payload.push(b'\n');
+    if let Err(e) = input_tx.send(InputEvent::Key(payload)) {
+        error!("layout: failed to inject command into pane {pane_id:?}: {e}");
+    }
+}
+
 impl FreminalGui {
     /// Insert all panes from `node` as the `second` child of a split on
     /// `target_id`.  Returns the ID of the deepest leaf inserted.
@@ -238,13 +252,20 @@ impl FreminalGui {
     /// Inject startup commands into panes after layout application.
     ///
     /// Each `(pane_id, command)` pair was collected during layout application;
-    /// the command is sent to the pane's PTY immediately followed by a newline.
-    /// The shell receives the text as if the user typed it.
+    /// the command is sent to the pane's input channel as an
+    /// `InputEvent::Key` immediately followed by a newline.  The shell
+    /// receives the text as if the user typed it, and the PTY consumer
+    /// orders it with all other input.
+    ///
+    /// Because it travels as `InputEvent::Key`, a layout startup command is
+    /// recorded to FREC as `PtyInput` exactly like typed input: its text is
+    /// redacted only while the pane's echo is off (a password prompt), and is
+    /// otherwise in the recording verbatim. Layout files should not carry
+    /// secrets in `command`.
     pub(super) fn inject_layout_commands(&self, commands: &[(panes::PaneId, String)]) {
         if commands.is_empty() {
             return;
         }
-        // Build a flat map of pane_id → pty_write_tx across all windows.
         for (pane_id, command) in commands {
             let found = self.windows.values().find_map(|win| {
                 win.tabs.iter().find_map(|tab| {
@@ -252,19 +273,12 @@ impl FreminalGui {
                         panes
                             .into_iter()
                             .find(|p| p.id == *pane_id)
-                            .map(|p| p.pty_write_tx.clone())
+                            .map(|p| p.input_tx.clone())
                     })
                 })
             });
             if let Some(tx) = found {
-                let mut payload = command.as_bytes().to_owned();
-                payload.push(b'\n');
-                if let Err(e) = tx.send(freminal_common::pty_write::PtyWrite::Write(payload)) {
-                    error!(
-                        "layout: failed to inject command into pane {:?}: {e}",
-                        pane_id
-                    );
-                }
+                send_startup_command(&tx, *pane_id, command);
             } else {
                 debug!("layout: pane {:?} not found for command injection", pane_id);
             }
@@ -774,7 +788,42 @@ impl FreminalGui {
 
 #[cfg(test)]
 mod tests {
-    use super::FreminalGui;
+    use super::{FreminalGui, send_startup_command};
+    use crate::gui::panes::PaneId;
+    use crate::gui::test_support::gui_with_windows;
+    use freminal_common::config::Config;
+    use freminal_terminal_emulator::io::InputEvent;
+
+    /// A startup command reaches the pane's input channel as a single
+    /// `InputEvent::Key` carrying the exact bytes plus a trailing newline.
+    /// The PTY consumer records every `Key` as `PtyInput` (see the
+    /// `echo_off` redaction tests in `pty.rs`), so startup commands are
+    /// recorded and ordered with all other input.
+    #[test]
+    fn startup_command_arrives_as_key_event_with_newline() {
+        let (tx, rx) = crossbeam_channel::unbounded::<InputEvent>();
+
+        send_startup_command(&tx, PaneId::first(), "echo hi");
+
+        match rx.try_recv() {
+            Ok(InputEvent::Key(bytes)) => assert_eq!(bytes, b"echo hi\n".to_vec()),
+            other => panic!("expected InputEvent::Key(b\"echo hi\\n\"), got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "exactly one event expected");
+    }
+
+    /// Startup commands are ordered with other input already queued on the
+    /// channel: they land after it, not on a side channel.
+    #[test]
+    fn startup_command_is_ordered_with_queued_input() {
+        let (tx, rx) = crossbeam_channel::unbounded::<InputEvent>();
+        tx.send(InputEvent::Key(b"a".to_vec())).expect("send");
+
+        send_startup_command(&tx, PaneId::first(), "ls");
+
+        assert!(matches!(rx.try_recv(), Ok(InputEvent::Key(b)) if b == b"a"));
+        assert!(matches!(rx.try_recv(), Ok(InputEvent::Key(b)) if b == b"ls\n"));
+    }
 
     /// `atomic_write` creates the destination with the given contents.
     #[test]
@@ -836,5 +885,47 @@ mod tests {
             result.is_err(),
             "expected error writing into missing parent"
         );
+    }
+
+    /// The command for each pane lands on that pane's own input channel, in
+    /// whichever window and tab the pane lives, as one `InputEvent::Key`.
+    #[test]
+    fn inject_layout_commands_reaches_the_right_pane_in_any_window() {
+        let (gui, windows) = gui_with_windows(&Config::default(), &[2, 1]);
+        let panes: Vec<_> = windows.iter().flatten().collect();
+        assert_eq!(panes.len(), 3, "setup: three panes");
+        let (second_window_pane, _) = panes[2];
+        let (second_tab_pane, _) = panes[1];
+
+        gui.inject_layout_commands(&[
+            (*second_window_pane, "echo one".to_owned()),
+            (*second_tab_pane, "echo two".to_owned()),
+        ]);
+
+        let received = |rx: &crossbeam_channel::Receiver<InputEvent>| -> Vec<Vec<u8>> {
+            rx.try_iter()
+                .map(|event| match event {
+                    InputEvent::Key(bytes) => bytes,
+                    other => panic!("expected InputEvent::Key, got {other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(received(&panes[0].1), Vec::<Vec<u8>>::new(), "untouched");
+        assert_eq!(received(&panes[1].1), vec![b"echo two\n".to_vec()]);
+        assert_eq!(received(&panes[2].1), vec![b"echo one\n".to_vec()]);
+    }
+
+    /// A command for a pane that no longer exists is dropped; the other
+    /// commands still go out.
+    #[test]
+    fn inject_layout_commands_skips_an_unknown_pane_and_continues() {
+        let (gui, windows) = gui_with_windows(&Config::default(), &[1]);
+        let (pane, rx) = &windows[0][0];
+        let unknown = crate::gui::panes::PaneIdGenerator::new(9_999).next_id();
+
+        gui.inject_layout_commands(&[(unknown, "gone".to_owned()), (*pane, "ls".to_owned())]);
+
+        assert!(matches!(rx.try_recv(), Ok(InputEvent::Key(b)) if b == b"ls\n"));
+        assert!(rx.try_recv().is_err(), "exactly one event expected");
     }
 }

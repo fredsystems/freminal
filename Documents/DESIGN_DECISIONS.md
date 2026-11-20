@@ -196,10 +196,11 @@ Every vttest menu was classified for automation potential:
 | `[V]`    | Visual only                                                    |
 | `[SKIP]` | Not relevant (hardware, unimplemented features)                |
 
-**Automatable:** Menus 1 (cursor), 2 (screen), 3 (G0 charsets), 6 (reports), 7 (VT52),
+**Automatable:** Menus 1 (cursor), 2 (screen), 3 (G0 to G3 charsets), 6 (reports), 7 (VT52),
 8 (insert/delete), 9 (VT100 bugs), 10.1 (RIS), 11 (non-VT100 extensions).
 
-**Skipped:** Menu 3 G1+/NRC/ISO Latin (not implemented), Menu 4 DECDWL/DECDHL (renderer not
+**Skipped:** Menu 3 NRC sets other than UK and ISO Latin (not implemented; G0 to G3,
+SO/SI and the single shifts are, since Task 147.20), Menu 4 DECDWL/DECDHL (renderer not
 implemented), Menu 5 keyboard (requires GUI key input), Menu 9 Bug A (smooth scroll), Menu 9
 Bugs C-L (visual-only), Menu 10.2 DECTST (hardware), Menu 11 BCE/mouse/window (not implemented
 or requires GUI).
@@ -584,7 +585,6 @@ struct Pane {
     id: PaneId,
     emulator_handle: Arc<ArcSwap<TerminalSnapshot>>,
     input_tx: Sender<InputEvent>,
-    pty_write_tx: Sender<PtyWrite>,
     view_state: ViewState,
     cols: u32,
     rows: u32,
@@ -1012,12 +1012,13 @@ structures required by each shell's standard startup-file discovery:
   return to bash mode, then sources `~/.bashrc` (or `~/.bash_profile`
   for login shells), then installs our hooks.
 - **zsh** treats `$ZDOTDIR` as a directory and looks for `.zshenv`,
-  `.zshrc`, etc. inside it. Our `.zshenv` does the Ghostty-derived dance:
-  restore the user's original `$ZDOTDIR` from `$__FREMINAL_ZSH_ZDOTDIR`
-  (a sentinel env var we set before spawn), source the user's real
-  `.zshenv`, then source our `freminal-integration` script. The
-  `+X` parameter expansion is used to distinguish "user had `$ZDOTDIR`
-  set even if empty" from "user did not have `$ZDOTDIR` set at all".
+  `.zshrc`, etc. inside it. Our `.zshenv` (written independently; the
+  same restore-then-chain sequence Ghostty and kitty use) restores the
+  user's original `$ZDOTDIR` from `$__FREMINAL_ZSH_ZDOTDIR` (a sentinel
+  env var we set before spawn), sources the user's real `.zshenv`, then
+  sources our `freminal-integration` script. zsh's `${+name}` test
+  distinguishes "user had `$ZDOTDIR` set even if empty" from "user did
+  not have `$ZDOTDIR` set at all".
 - **fish** auto-loads files matching `<XDG_DATA_DIR>/fish/vendor_conf.d/*.fish`
   on startup. We prepend our resources dir to `$XDG_DATA_DIRS`, and fish
   finds `freminal.fish` via standard discovery. No `$ZDOTDIR`-style

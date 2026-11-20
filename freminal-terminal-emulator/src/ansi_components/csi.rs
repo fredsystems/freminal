@@ -18,6 +18,12 @@ pub(crate) enum AnsiCsiParserState {
     Finished(u8),
     Invalid,
     InvalidFinished,
+    /// The sequence went over [`MAX_CSI_BYTES`] while in the parameter bytes;
+    /// its buffers were released and the rest is discarded through its final
+    /// byte.
+    OverflowParams,
+    /// As [`Self::OverflowParams`], after the first intermediate byte.
+    OverflowIntermediates,
 }
 /// Which Control Sequence Introducer began this CSI sequence.
 ///
@@ -44,6 +50,92 @@ impl CsiIntroducer {
     }
 }
 
+/// Maximum size of a CSI sequence's body, in bytes (parameters, intermediates
+/// and final byte, excluding the introducer).
+///
+/// A CSI sequence is short: real ones are well under a kilobyte (xterm keeps
+/// at most 30 parameters). The cap exists because an open sequence otherwise
+/// grows its buffers for as long as the stream sends parameter bytes. One more
+/// byte than this and the buffers are released; the sequence is then discarded
+/// through its final byte (or an aborting ESC) without being dispatched.
+pub const MAX_CSI_BYTES: usize = 64 * 1024;
+
+/// Initial capacity of the parameter buffer.
+const PARAMS_CAPACITY: usize = 8;
+/// Initial capacity of the intermediate-byte buffer.
+const INTERMEDIATES_CAPACITY: usize = 4;
+/// Initial capacity of the whole-body buffer.
+const SEQUENCE_CAPACITY: usize = 16;
+/// Capacity a recycled buffer is shrunk back to when a sequence left it
+/// larger than [`RETAINED_CAPACITY_MAX`]. A pathological sequence (a
+/// megabyte of parameter bytes) must not pin that memory for the life of the
+/// parser; ordinary CSI sequences are well under 64 bytes.
+pub(crate) const RETAINED_CAPACITY_MAX: usize = 1024;
+
+/// The three per-sequence byte buffers of a CSI parser.
+///
+/// The top-level parser owns one set and lends it to each CSI sub-parser as
+/// the sequence starts, taking it back when the sequence ends, so a stream of
+/// short sequences (an SGR-heavy TUI) allocates nothing per sequence. A
+/// recycled set is always empty.
+#[derive(Eq, PartialEq, Debug, Default)]
+pub(crate) struct CsiBuffers {
+    params: Vec<u8>,
+    intermediates: Vec<u8>,
+    sequence: Vec<u8>,
+}
+
+impl CsiBuffers {
+    pub(crate) const fn new() -> Self {
+        Self {
+            params: Vec::new(),
+            intermediates: Vec::new(),
+            sequence: Vec::new(),
+        }
+    }
+
+    /// True when no buffer holds a byte.
+    #[cfg(test)]
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.params.is_empty() && self.intermediates.is_empty() && self.sequence.is_empty()
+    }
+
+    /// The largest capacity of the three buffers.
+    #[cfg(test)]
+    pub(crate) fn max_capacity(&self) -> usize {
+        self.params
+            .capacity()
+            .max(self.intermediates.capacity())
+            .max(self.sequence.capacity())
+    }
+
+    /// Empty every buffer and release the excess if one grew past
+    /// [`RETAINED_CAPACITY_MAX`].
+    fn recycle(&mut self) {
+        for (buf, initial) in [
+            (&mut self.params, PARAMS_CAPACITY),
+            (&mut self.intermediates, INTERMEDIATES_CAPACITY),
+            (&mut self.sequence, SEQUENCE_CAPACITY),
+        ] {
+            buf.clear();
+            if buf.capacity() > RETAINED_CAPACITY_MAX {
+                buf.shrink_to(initial);
+            }
+        }
+    }
+
+    /// A set pre-sized for one ordinary sequence, for a parser built outside
+    /// the top-level parser. The top-level parser's own spare set starts
+    /// empty and simply keeps whatever capacity its first sequence grows.
+    fn with_initial_capacity() -> Self {
+        Self {
+            params: Vec::with_capacity(PARAMS_CAPACITY),
+            intermediates: Vec::with_capacity(INTERMEDIATES_CAPACITY),
+            sequence: Vec::with_capacity(SEQUENCE_CAPACITY),
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Debug, Default)]
 pub struct AnsiCsiParser {
     pub(crate) state: AnsiCsiParserState,
@@ -58,24 +150,47 @@ impl AnsiCsiParser {
     /// Construct a parser for a 7-bit (`ESC [`) CSI sequence.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_introducer(CsiIntroducer::SevenBit)
+        Self::with_introducer(CsiIntroducer::SevenBit, CsiBuffers::with_initial_capacity())
     }
 
     /// Construct a parser for an 8-bit (`0x9B`, C1) CSI sequence.
     #[must_use]
     pub fn new_c1() -> Self {
-        Self::with_introducer(CsiIntroducer::EightBit)
+        Self::with_introducer(CsiIntroducer::EightBit, CsiBuffers::with_initial_capacity())
+    }
+
+    /// Construct a parser for a sequence started by `introducer`, reusing the
+    /// recycled `buffers` handed back by [`Self::take_buffers`].
+    #[must_use]
+    pub(crate) fn from_buffers(introducer: CsiIntroducer, buffers: CsiBuffers) -> Self {
+        Self::with_introducer(introducer, buffers)
     }
 
     #[must_use]
-    fn with_introducer(introducer: CsiIntroducer) -> Self {
+    fn with_introducer(introducer: CsiIntroducer, buffers: CsiBuffers) -> Self {
         Self {
             state: AnsiCsiParserState::Params,
-            params: Vec::with_capacity(8),
-            intermediates: Vec::with_capacity(4),
-            sequence: Vec::with_capacity(16),
+            params: buffers.params,
+            intermediates: buffers.intermediates,
+            sequence: buffers.sequence,
             introducer,
         }
+    }
+
+    /// Take the byte buffers out of this parser, emptied and with any
+    /// oversized capacity released, ready to start the next sequence.
+    ///
+    /// Every exit from the CSI state (finish, invalid, abort on ESC) hands
+    /// the buffers back through here, so no byte of a previous sequence can
+    /// reach the next one.
+    pub(crate) fn take_buffers(&mut self) -> CsiBuffers {
+        let mut buffers = CsiBuffers {
+            params: std::mem::take(&mut self.params),
+            intermediates: std::mem::take(&mut self.intermediates),
+            sequence: std::mem::take(&mut self.sequence),
+        };
+        buffers.recycle();
+        buffers
     }
 
     /// Expose the current sequence for testing and diagnostics.
@@ -111,8 +226,21 @@ impl AnsiCsiParser {
     /// Will return an error if the parser is in a finished state
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn push(&mut self, b: u8) -> ParserOutcome {
-        if let AnsiCsiParserState::Finished(_) | AnsiCsiParserState::InvalidFinished = &self.state {
-            return ParserOutcome::Invalid("Parser pushed to once finished".to_string());
+        match self.state {
+            AnsiCsiParserState::Finished(_) | AnsiCsiParserState::InvalidFinished => {
+                return ParserOutcome::Invalid("Parser pushed to once finished".to_string());
+            }
+            AnsiCsiParserState::OverflowParams | AnsiCsiParserState::OverflowIntermediates => {
+                return self.push_overflowed(b);
+            }
+            AnsiCsiParserState::Params
+            | AnsiCsiParserState::Intermediates
+            | AnsiCsiParserState::Invalid => {}
+        }
+
+        if self.sequence.len() >= MAX_CSI_BYTES {
+            self.overflow();
+            return self.push_overflowed(b);
         }
 
         self.sequence.push(b);
@@ -159,11 +287,47 @@ impl AnsiCsiParser {
 
                 ParserOutcome::Invalid("Invalid CSI sequence".to_string())
             }
-            AnsiCsiParserState::Finished(_) | AnsiCsiParserState::InvalidFinished => {
+            AnsiCsiParserState::Finished(_)
+            | AnsiCsiParserState::InvalidFinished
+            | AnsiCsiParserState::OverflowParams
+            | AnsiCsiParserState::OverflowIntermediates => {
                 // Guarded by the caller, but surface explicitly as an invalid
                 // outcome rather than panicking if the invariant ever breaks.
                 ParserOutcome::Invalid("CSI parser received byte after termination".to_string())
             }
+        }
+    }
+
+    /// The sequence just went over [`MAX_CSI_BYTES`]: release its buffers and
+    /// switch to discarding. One warning (the cap, never the payload) is
+    /// logged.
+    fn overflow(&mut self) {
+        tracing::warn!("CSI sequence over the {MAX_CSI_BYTES}-byte cap dropped");
+        self.params = Vec::new();
+        self.intermediates = Vec::new();
+        self.sequence = Vec::new();
+        self.state = match self.state {
+            AnsiCsiParserState::Intermediates => AnsiCsiParserState::OverflowIntermediates,
+            _ => AnsiCsiParserState::OverflowParams,
+        };
+    }
+
+    /// Consume one byte of an overflowed sequence, with the same grammar as
+    /// [`Self::push`]: the final byte ends it (with nothing dispatched), and a
+    /// byte that cannot be part of a CSI sequence is invalid.
+    fn push_overflowed(&mut self, b: u8) -> ParserOutcome {
+        let after_intermediate = self.state == AnsiCsiParserState::OverflowIntermediates;
+        if is_csi_terminator(b) {
+            self.state = AnsiCsiParserState::InvalidFinished;
+            ParserOutcome::Finished
+        } else if is_csi_intermediate(b) {
+            self.state = AnsiCsiParserState::OverflowIntermediates;
+            ParserOutcome::Continue
+        } else if is_csi_param(b) && !after_intermediate {
+            ParserOutcome::Continue
+        } else {
+            self.state = AnsiCsiParserState::Invalid;
+            ParserOutcome::Invalid("Invalid CSI sequence".to_string())
         }
     }
 
@@ -549,5 +713,75 @@ mod tests {
         assert_eq!(output, []);
         assert_eq!(parser.sequence, b"1;2W");
         assert_eq!(parser.format_raw_csi(), "\\x1b[1;2W");
+    }
+
+    // ── Buffer reuse (147.15) ───────────────────────────────────────────────
+
+    #[test]
+    fn take_buffers_returns_empty_buffers_and_leaves_parser_empty() {
+        let mut parser = AnsiCsiParser::new();
+        let mut output = Vec::new();
+        for &b in b"1;2 " {
+            let _ = parser.ansiparser_inner_csi(b, &mut output);
+        }
+        assert_ne!(parser.params.len(), 0);
+        assert_ne!(parser.intermediates.len(), 0);
+        assert_ne!(parser.sequence.len(), 0);
+
+        let buffers = parser.take_buffers();
+        assert!(buffers.is_empty());
+        assert_eq!(parser.params.len(), 0);
+        assert_eq!(parser.intermediates.len(), 0);
+        assert_eq!(parser.sequence.len(), 0);
+    }
+
+    #[test]
+    fn recycled_buffers_keep_modest_capacity() {
+        let mut parser = AnsiCsiParser::new();
+        let mut output = Vec::new();
+        for &b in b"1;2;3m" {
+            let _ = parser.ansiparser_inner_csi(b, &mut output);
+        }
+        let capacity = parser.sequence.capacity();
+        let buffers = parser.take_buffers();
+        assert_eq!(buffers.sequence.capacity(), capacity);
+        assert!(buffers.max_capacity() <= RETAINED_CAPACITY_MAX);
+    }
+
+    #[test]
+    fn oversized_buffers_are_shrunk_on_recycle() {
+        let mut parser = AnsiCsiParser::new();
+        let mut output = Vec::new();
+        for _ in 0..50_000 {
+            let _ = parser.ansiparser_inner_csi(b'1', &mut output);
+        }
+        assert!(parser.params.capacity() > RETAINED_CAPACITY_MAX);
+        let buffers = parser.take_buffers();
+        assert!(buffers.is_empty());
+        assert!(
+            buffers.max_capacity() <= RETAINED_CAPACITY_MAX,
+            "capacity {} should have been released",
+            buffers.max_capacity()
+        );
+    }
+
+    #[test]
+    fn parser_built_from_recycled_buffers_parses_like_a_fresh_one() {
+        let mut first = AnsiCsiParser::new();
+        let mut scratch = Vec::new();
+        for &b in b"?1049;2004h" {
+            let _ = first.ansiparser_inner_csi(b, &mut scratch);
+        }
+        let buffers = first.take_buffers();
+
+        let mut reused = AnsiCsiParser::from_buffers(CsiIntroducer::SevenBit, buffers);
+        let mut reused_out = Vec::new();
+        for &b in b"5;10H" {
+            let _ = reused.ansiparser_inner_csi(b, &mut reused_out);
+        }
+        assert_eq!(reused_out, parse_csi_sequence(b"5;10H"));
+        assert_eq!(reused.sequence, b"5;10H");
+        assert_eq!(reused.params, b"5;10");
+        assert_eq!(reused.intermediates.len(), 0);
     }
 }

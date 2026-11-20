@@ -37,6 +37,10 @@ toml.workspace = true
 
 [features]
 default = []
+# `test-utils` exposes `terminfo_source` (the `res/freminal.ti` text and its
+# parser) to downstream crates' table-of-truth tests; production builds never
+# enable it.
+test-utils = []
 
 [lints]
 workspace = true

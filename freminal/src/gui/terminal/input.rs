@@ -19,14 +19,14 @@ use egui::{Event, InputState, Key, Modifiers, PointerButton, Rect};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack,
+    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, s8c1t::S8c1t,
 };
 use freminal_common::buffer_states::row_number::RowNumber;
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::{
     input::{
-        KKP_KP_0_CODEPOINT, KKP_KP_1_CODEPOINT, KKP_KP_2_CODEPOINT, KKP_KP_3_CODEPOINT,
+        Introducer, KKP_KP_0_CODEPOINT, KKP_KP_1_CODEPOINT, KKP_KP_2_CODEPOINT, KKP_KP_3_CODEPOINT,
         KKP_KP_4_CODEPOINT, KKP_KP_5_CODEPOINT, KKP_KP_6_CODEPOINT, KKP_KP_7_CODEPOINT,
         KKP_KP_8_CODEPOINT, KKP_KP_9_CODEPOINT, KKP_KP_ADD_CODEPOINT, KKP_KP_DECIMAL_CODEPOINT,
         KKP_KP_DIVIDE_CODEPOINT, KKP_KP_ENTER_CODEPOINT, KKP_KP_EQUAL_CODEPOINT,
@@ -35,7 +35,7 @@ use freminal_terminal_emulator::{
         KKP_MEDIA_TRACK_NEXT_CODEPOINT, KKP_MEDIA_TRACK_PREVIOUS_CODEPOINT, KKP_MENU_CODEPOINT,
         KKP_MUTE_VOLUME_CODEPOINT, KKP_PAUSE_CODEPOINT, KKP_PRINT_SCREEN_CODEPOINT,
         KKP_RAISE_VOLUME_CODEPOINT, KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput,
-        TerminalInputPayload, collect_text,
+        TerminalInputPayload,
     },
     io::InputEvent,
     recording::{EventPayload, RecordingContext},
@@ -43,6 +43,7 @@ use freminal_terminal_emulator::{
 };
 use std::borrow::Cow;
 
+use super::alt_text::{HostPlatform, text_inputs};
 use super::coords::{
     cursor_buffer_row, encode_egui_mouse_pos, visible_window_start, visible_window_start_for,
 };
@@ -256,16 +257,18 @@ pub const fn kitty_keycode_to_codepoint(key: winit::keyboard::KeyCode) -> Option
     }
 }
 
-/// Legacy (non-KKP) byte encoding for an egui-blocked keypad key.
+/// Legacy (non-KKP) byte encoding for an egui-blocked keypad key in numeric
+/// keypad mode (DECKPNM).
 ///
 /// The `is_blocked_key` intercept in `freminal-windowing` removes keypad
 /// digits/operators/Enter from egui unconditionally and routes them through
 /// the raw-key path, which normally emits `KittyFunctional` bytes. When the
 /// active screen has **no** relevant `kitty_keyboard_flags` bit set, that
 /// KKP encoding is empty and these keys would silently become no-ops. This
-/// provides the plain-terminal fallback (keypad numeric mode) so keypad
-/// input still reaches the PTY, matching xterm/kitty behaviour when the
-/// progressive keyboard protocol is disabled.
+/// provides the plain-terminal fallback so keypad input still reaches the
+/// PTY, matching xterm/kitty behaviour when the progressive keyboard
+/// protocol is disabled. Application keypad mode is handled by
+/// [`legacy_keypad_bytes`].
 ///
 /// Returns `None` for keys that have no legacy encoding (media,
 /// print/pause/menu) — those correctly stay no-ops without KKP.
@@ -291,6 +294,53 @@ const fn legacy_keypad_byte(key: winit::keyboard::KeyCode) -> Option<u8> {
         KeyCode::NumpadEqual => Some(b'='),
         KeyCode::NumpadEnter => Some(b'\r'),
         _ => None,
+    }
+}
+
+/// Final byte of the VT220 application-keypad `SS3` sequence for a keypad key
+/// (xterm `ctlseqs`, "VT220-style function keys" keypad table).
+///
+/// `None` for keys that are not on the keypad table (media, print/pause/menu).
+const fn application_keypad_final(key: winit::keyboard::KeyCode) -> Option<u8> {
+    use winit::keyboard::KeyCode;
+    match key {
+        KeyCode::Numpad0 => Some(b'p'),
+        KeyCode::Numpad1 => Some(b'q'),
+        KeyCode::Numpad2 => Some(b'r'),
+        KeyCode::Numpad3 => Some(b's'),
+        KeyCode::Numpad4 => Some(b't'),
+        KeyCode::Numpad5 => Some(b'u'),
+        KeyCode::Numpad6 => Some(b'v'),
+        KeyCode::Numpad7 => Some(b'w'),
+        KeyCode::Numpad8 => Some(b'x'),
+        KeyCode::Numpad9 => Some(b'y'),
+        KeyCode::NumpadDivide => Some(b'o'),
+        KeyCode::NumpadMultiply | KeyCode::NumpadStar => Some(b'j'),
+        KeyCode::NumpadSubtract => Some(b'm'),
+        KeyCode::NumpadAdd => Some(b'k'),
+        KeyCode::NumpadDecimal => Some(b'n'),
+        KeyCode::NumpadComma => Some(b'l'),
+        KeyCode::NumpadEqual => Some(b'X'),
+        KeyCode::NumpadEnter => Some(b'M'),
+        _ => None,
+    }
+}
+
+/// Legacy (non-KKP) bytes for an egui-blocked keypad key, honouring DECKPAM.
+///
+/// Numeric keypad mode sends the plain byte ([`legacy_keypad_byte`]).
+/// Application keypad mode sends the VT220 `SS3 <final>` form
+/// ([`application_keypad_final`]), with the `SS3` introducer chosen by S8C1T.
+fn legacy_keypad_bytes(
+    key: winit::keyboard::KeyCode,
+    keypad_mode: KeypadMode,
+    s8c1t: S8c1t,
+) -> Option<Vec<u8>> {
+    match keypad_mode {
+        KeypadMode::Numeric => legacy_keypad_byte(key).map(|b| vec![b]),
+        KeypadMode::Application => {
+            application_keypad_final(key).map(|f| Introducer::Ss3.frame(s8c1t, &[f]))
+        }
     }
 }
 
@@ -371,10 +421,11 @@ pub const fn raw_mods_to_key_modifiers(
 /// `TerminalInput::KittyFunctional`'s `to_payload` produces the KKP `CSI u`
 /// encoding. When KKP is off, that encoding is empty; for keypad
 /// digits/operators/Enter this function then falls back to their plain
-/// legacy byte (see [`legacy_keypad_byte`]) so keypad input still reaches
-/// the PTY (the windowing intercept already removed them from egui, so
-/// without this they would be dropped entirely). Media/print/pause/menu keys
-/// have no legacy encoding and correctly stay no-ops without KKP.
+/// legacy encoding (see [`legacy_keypad_bytes`], which honours DECKPAM) so
+/// keypad input still reaches the PTY (the windowing intercept already
+/// removed them from egui, so without this they would be dropped entirely).
+/// Media/print/pause/menu keys have no legacy encoding and correctly stay
+/// no-ops without KKP.
 ///
 /// ## Input suppression
 ///
@@ -460,8 +511,7 @@ pub fn drain_pending_raw_keys(
         // input still reaches the PTY. Releases have no legacy encoding.
         let bytes = if bytes.is_empty() {
             if event.pressed {
-                legacy_keypad_byte(event.key_code)
-                    .map(|b| vec![b])
+                legacy_keypad_bytes(event.key_code, modes.keypad_app_mode, modes.s8c1t)
                     .unwrap_or_default()
             } else {
                 Vec::new()
@@ -1110,6 +1160,7 @@ pub(super) struct InputModes {
     application_escape_key: ApplicationEscapeKey,
     backarrow_sends_bs: Decbkm,
     line_feed_mode: Lnm,
+    s8c1t: S8c1t,
     kitty_keyboard_flags: u32,
 }
 
@@ -1123,6 +1174,7 @@ impl InputModes {
             application_escape_key: snap.application_escape_key,
             backarrow_sends_bs: snap.backarrow_sends_bs,
             line_feed_mode: snap.line_feed_mode,
+            s8c1t: snap.s8c1t,
             kitty_keyboard_flags: snap.kitty_keyboard_flags,
         }
     }
@@ -1133,10 +1185,11 @@ impl InputModes {
 /// consumer thread.
 ///
 /// Sending all bytes in a single message is critical for multi-byte
-/// sequences such as mouse reports (`\x1b[<0;5;3M`) — if each byte were
-/// sent as a separate `InputEvent` the PTY application would receive them
-/// as individual characters rather than as literal typed text, causing
-/// them to be interpreted as individual typed characters.
+/// sequences — if each byte were sent as a separate `InputEvent` the PTY
+/// application would receive them as individual characters.
+///
+/// Key events only: mouse reports are not keys and are sent raw with
+/// [`send_mouse_report`].
 ///
 /// Encode terminal inputs into raw bytes using the given mode flags.
 ///
@@ -1152,12 +1205,12 @@ fn encode_terminal_inputs(
         .flat_map(|input| {
             match input.to_payload(
                 modes.cursor_key_app_mode,
-                modes.keypad_app_mode,
                 modes.modify_other_keys,
                 modes.application_escape_key,
                 modes.backarrow_sends_bs,
                 modes.line_feed_mode,
                 modes.kitty_keyboard_flags,
+                modes.s8c1t,
                 meta,
             ) {
                 TerminalInputPayload::Single(b) => vec![b],
@@ -1188,6 +1241,22 @@ pub(super) fn send_terminal_inputs(
         input_tx,
         InputEvent::Key(bytes),
         "Failed to send key input to PTY consumer"
+    );
+}
+
+/// Send an already-framed mouse report to the PTY consumer thread, raw.
+///
+/// A mouse report is not a key event, so it must not go through the key
+/// encoder: with kitty keyboard flag 8 (report all keys as escape codes)
+/// that would turn every byte of the report into its own `CSI u`.
+pub(super) fn send_mouse_report(bytes: Vec<u8>, input_tx: &Sender<InputEvent>) {
+    if bytes.is_empty() {
+        return;
+    }
+    send_or_log!(
+        input_tx,
+        InputEvent::Key(bytes),
+        "Failed to send mouse report to PTY consumer"
     );
 }
 
@@ -1415,6 +1484,7 @@ pub enum PaneFocus {
 /// | `previous_key`            | `previous_key`                   |
 /// | `scroll_amount`           | `previous_scroll_amount`          |
 /// | `super_state`             | `super_state`                    |
+/// | `text_modifiers`          | `text_modifiers`                 |
 ///
 /// Grouping them into one struct — appearing in both the params and result
 /// types under the same name — states that invariant in the type rather
@@ -1434,6 +1504,11 @@ pub(super) struct InputCarryState {
     /// Physical Super/Command hold-state, tracked per side across frames
     /// (Task 101.2 — see [`SuperKeyState`]).
     pub(super) super_state: SuperKeyState,
+    /// The modifiers in effect for typed text that arrives with no key event
+    /// before it in the batch: the frame's final modifiers, as of the last
+    /// call. Within a batch the modifiers of the preceding `Event::Key` win
+    /// (Task 147 PR review R18).
+    pub(super) text_modifiers: Modifiers,
 }
 
 /// Parameters for [`write_input_to_terminal`].
@@ -1607,6 +1682,7 @@ fn finalize_selection_drag(
 /// - `carry.previous_key` — last pressed key (used for key-repeat deduplication).
 /// - `carry.scroll_amount` — accumulated fractional scroll pixels not yet converted to full line units.
 /// - `carry.super_state` — updated physical Super/Command hold-state for the next call.
+/// - `carry.text_modifiers` — this frame's final modifiers, for text with no key event before it in the next call's batch.
 /// - `left_mouse_button_pressed` — true if a primary left-click was pressed inside this pane's rect this frame (used for click-to-focus by the caller).
 /// - `clipboard_pending` — true if a selection-copy was queued; the caller reads the clipboard channel.
 /// - `deferred_actions` — [`KeyAction`]s dispatched by the binding map this frame that the caller must still apply (e.g. actions that need state outside this function's scope).
@@ -1647,6 +1723,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                 previous_key,
                 scroll_amount,
                 super_state,
+                text_modifiers,
             },
     } = params;
 
@@ -1657,6 +1734,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                 previous_key,
                 scroll_amount,
                 super_state,
+                text_modifiers: input.modifiers,
             },
             left_mouse_button_pressed: false,
             clipboard_pending: false,
@@ -1681,6 +1759,11 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
     // `super_pressed` is the derived "any side down" value consumed below.
     let mut super_state = super_state;
     let mut super_pressed = super_state.any();
+    // The modifiers `Event::Text` is typed with. The text carries none of its
+    // own, and the frame's final modifiers can differ from the ones held when
+    // the key went down (Alt released, or pressed, later in the same frame),
+    // so they follow the `Event::Key` events as they are read.
+    let mut text_modifiers = text_modifiers;
 
     // Derive the terminal origin from the rect.  Pointer events whose
     // position falls outside `terminal_rect` are ignored — they belong to
@@ -1698,6 +1781,13 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
     };
 
     let mouse_encoding = &snap.mouse_encoding;
+
+    // Set when the binding pre-check consumes a key press made with Alt held.
+    // egui-winit delivers such a press as `Event::Key` *and* an `Event::Text`
+    // for the same keystroke, so the text of a bound Alt+<letter> must not
+    // fall through to the PTY (as `ESC <letter>`). Cleared by the next key
+    // press, which starts a new keystroke.
+    let mut bound_alt_key_text_pending = false;
 
     for event in &input.raw.events {
         // `trace`, not `info`: `Event::Text` / `Event::Paste` carry typed
@@ -1749,8 +1839,15 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             super_pressed = super_state.any();
         }
 
+        if let Event::Key { modifiers, .. } = event {
+            text_modifiers = *modifiers;
+        }
+
         if let Event::Key { pressed: false, .. } = event {
             previous_key = None;
+        }
+        if let Event::Key { pressed: true, .. } = event {
+            bound_alt_key_text_pending = false;
         }
 
         // ── KKP flag 2: forward key release events ───────────────────────
@@ -1817,8 +1914,13 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     &mut deferred_actions,
                 );
                 state_changed = true;
+                bound_alt_key_text_pending = modifiers.alt;
                 continue;
             }
+        }
+        if bound_alt_key_text_pending && matches!(event, Event::Text(_)) {
+            bound_alt_key_text_pending = false;
+            continue;
         }
         // Event::Copy is the synthetic event fired by egui-winit for
         // Ctrl+C (and Ctrl+Shift+C).  Reconstruct the key combo so the
@@ -1875,6 +1977,10 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             _ => KeyEventMeta::PRESS,
         };
 
+        // A finished mouse report (`Event::PointerButton`), sent as-is rather
+        // than encoded as keys.
+        let mut raw_report: Option<Vec<u8>> = None;
+
         let inputs: Cow<'static, [TerminalInput]> = match event {
             // LIMITATION (egui#3653): egui unifies numpad and main-row keys.
             // Application keypad mode cannot distinguish them until egui exposes
@@ -1882,7 +1988,16 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             Event::Text(text)
                 if repeat_characters == Decarm::RepeatKey || previous_key.is_none() =>
             {
-                collect_text(text)
+                // Alt is read from the modifiers of the key event this text
+                // belongs to (`text_modifiers`): `Event::Text` carries none
+                // of its own. The prefix is built here, from `?1036` as it
+                // is now, never added to encoded bytes.
+                text_inputs(
+                    text,
+                    text_modifiers,
+                    HostPlatform::CURRENT,
+                    snap.meta_sends_escape,
+                )
             }
             Event::Text(_) => continue,
             Event::Key {
@@ -2552,10 +2667,11 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                         &new_mouse_position,
                         effective_mouse_tracking,
                         mouse_encoding,
+                        snap.s8c1t,
                     )
                 };
 
-                last_reported_mouse_pos = Some(new_mouse_position.clone());
+                last_reported_mouse_pos = Some(new_mouse_position);
 
                 // Record mouse button event.
                 if let Some(ctx) = recording_ctx {
@@ -2590,8 +2706,11 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     continue;
                 }
 
-                if let Some(response) = response {
-                    response
+                if let Some(report) = response {
+                    // Not a key event: carried to the send below as raw
+                    // bytes so the key encoder never sees it.
+                    raw_report = Some(report);
+                    Cow::Borrowed(&[])
                 } else {
                     // Mouse tracking is off (or overridden by Shift) — handle
                     // text selection and right-click context menu.
@@ -2791,6 +2910,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                         last_mouse_position,
                         effective_mouse_tracking,
                         mouse_encoding,
+                        snap.s8c1t,
                     )
                     .is_some()
                     {
@@ -2802,13 +2922,9 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                                 last_mouse_position,
                                 effective_mouse_tracking,
                                 mouse_encoding,
+                                snap.s8c1t,
                             ) {
-                                send_terminal_inputs(
-                                    response.as_ref(),
-                                    input_tx,
-                                    &InputModes::from_snapshot(snap),
-                                    &KeyEventMeta::PRESS,
-                                );
+                                send_mouse_report(response, input_tx);
                             }
                         }
                         continue;
@@ -2831,12 +2947,14 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             }
         };
 
-        if !inputs.is_empty() {
+        if raw_report.is_some() || !inputs.is_empty() {
             state_changed = true;
 
             // Capture encoded bytes for recording before sending.
-            let modes = InputModes::from_snapshot(snap);
-            let encoded = encode_terminal_inputs(&inputs, &modes, &event_meta);
+            let encoded = raw_report.unwrap_or_else(|| {
+                let modes = InputModes::from_snapshot(snap);
+                encode_terminal_inputs(&inputs, &modes, &event_meta)
+            });
 
             if !encoded.is_empty()
                 && let Err(e) = input_tx.send(InputEvent::Key(encoded.clone()))
@@ -2892,6 +3010,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             previous_key,
             scroll_amount,
             super_state,
+            text_modifiers: input.modifiers,
         },
         left_mouse_button_pressed,
         clipboard_pending,
@@ -3493,6 +3612,131 @@ mod key_modifiers_tests {
 }
 
 #[cfg(test)]
+mod input_modes_s8c1t_tests {
+    //! Task 147.3: S8C1T reaches `InputModes` through the snapshot.
+
+    use super::*;
+    use freminal_common::buffer_states::modes::mouse::MouseEncoding;
+    use freminal_terminal_emulator::interface::TerminalEmulator;
+    use freminal_windowing::{RawKeyEvent, RawKeyMods};
+    use winit::keyboard::KeyCode;
+
+    #[test]
+    fn from_snapshot_carries_s8c1t_set_by_the_emulator() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        assert_eq!(
+            InputModes::from_snapshot(&emu.build_snapshot()).s8c1t,
+            S8c1t::SevenBit
+        );
+
+        emu.handle_incoming_data(b"\x1b G");
+        assert_eq!(
+            InputModes::from_snapshot(&emu.build_snapshot()).s8c1t,
+            S8c1t::EightBit
+        );
+
+        emu.handle_incoming_data(b"\x1b F");
+        assert_eq!(
+            InputModes::from_snapshot(&emu.build_snapshot()).s8c1t,
+            S8c1t::SevenBit
+        );
+    }
+
+    // Task 147.4: the encoders honour it, end to end from the snapshot.
+
+    fn snapshot_after(select_mode: &[u8]) -> TerminalSnapshot {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(select_mode);
+        emu.build_snapshot()
+    }
+
+    fn encode_for(snap: &TerminalSnapshot, inputs: &[TerminalInput]) -> Vec<u8> {
+        encode_terminal_inputs(
+            inputs,
+            &InputModes::from_snapshot(snap),
+            &KeyEventMeta::PRESS,
+        )
+    }
+
+    #[test]
+    fn keys_use_the_eight_bit_introducer_after_s8c1t() {
+        let seven = snapshot_after(b"\x1b F");
+        let eight = snapshot_after(b"\x1b G");
+        let up = [TerminalInput::ArrowUp(KeyModifiers::NONE)];
+        assert_eq!(encode_for(&seven, &up), b"\x1b[A");
+        assert_eq!(encode_for(&eight, &up), b"\x9bA");
+        let f1 = [TerminalInput::FunctionKey(1, KeyModifiers::NONE)];
+        assert_eq!(encode_for(&seven, &f1), b"\x1bOP");
+        assert_eq!(encode_for(&eight, &f1), b"\x8fP");
+    }
+
+    #[test]
+    fn alt_prefixed_bracket_is_not_an_introducer_in_either_mode() {
+        for select_mode in [&b"\x1b F"[..], b"\x1b G"] {
+            let snap = snapshot_after(select_mode);
+            for text in *b"[O" {
+                let alt_text = [TerminalInput::Ascii(0x1b), TerminalInput::Ascii(text)];
+                assert_eq!(
+                    encode_for(&snap, &alt_text),
+                    [0x1b, text],
+                    "{select_mode:?} Alt+{}",
+                    char::from(text)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_report_reaches_the_pty_with_the_eight_bit_introducer() {
+        use crate::gui::mouse::{FreminalMousePosition, PreviousMouseState, handle_pointer_button};
+
+        let state = PreviousMouseState::new(
+            PointerButton::Primary,
+            true,
+            FreminalMousePosition::new(4, 2),
+            Modifiers::default(),
+        );
+        for (select_mode, expected) in [
+            (&b"\x1b F"[..], &b"\x1b[<0;5;3M"[..]),
+            (b"\x1b G", b"\x9b<0;5;3M"),
+        ] {
+            let snap = snapshot_after(select_mode);
+            let report = handle_pointer_button(
+                PointerButton::Primary,
+                &state,
+                &MouseTrack::XtMseX11,
+                &MouseEncoding::Sgr,
+                snap.s8c1t,
+            )
+            .expect("button press is reported");
+            assert_eq!(report, expected);
+        }
+    }
+
+    #[test]
+    fn kitty_csi_u_follows_s8c1t_through_the_raw_key_path() {
+        let mut snap = snapshot_after(b"\x1b G");
+        snap.kitty_keyboard_flags = 1;
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: KeyCode::Numpad1,
+                pressed: true,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &[]);
+
+        let Ok(InputEvent::Key(bytes)) = rx.try_recv() else {
+            panic!("expected one key report");
+        };
+        assert_eq!(bytes, b"\x9b57400u");
+    }
+}
+
+#[cfg(test)]
 mod modifier_keys_as_keys_tests {
     //! Tests for the Task 101.3 KKP "modifier keys as keys" GUI-side wiring:
     //! [`egui_key_to_terminal_input`] must map the 8 physical modifier-key
@@ -3821,6 +4065,137 @@ mod raw_key_tests {
 }
 
 #[cfg(test)]
+mod application_keypad_tests {
+    //! Task 147.5: application keypad mode (DECKPAM) sends the VT220 `SS3`
+    //! form on the live raw-key path, honouring S8C1T.
+
+    use super::*;
+    use freminal_common::terminfo_source::{FREMINAL_TI, parse_terminfo_entry};
+    use freminal_terminal_emulator::interface::TerminalEmulator;
+    use freminal_windowing::{RawKeyEvent, RawKeyMods};
+    use winit::keyboard::KeyCode;
+
+    /// One press of `key` drained against `snap`; the bytes sent to the PTY.
+    fn press(snap: &TerminalSnapshot, key: KeyCode) -> Vec<u8> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: key,
+                pressed: true,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+        drain_pending_raw_keys(&mut pending, &tx, snap, false, &[]);
+        let mut sent = Vec::new();
+        while let Ok(InputEvent::Key(bytes)) = rx.try_recv() {
+            sent.extend(bytes);
+        }
+        sent
+    }
+
+    fn snapshot_after(input: &[u8]) -> TerminalSnapshot {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(input);
+        emu.build_snapshot()
+    }
+
+    /// Every keypad key with its numeric byte and its application `SS3` final.
+    const KEYS: [(KeyCode, u8, u8); 18] = [
+        (KeyCode::Numpad0, b'0', b'p'),
+        (KeyCode::Numpad1, b'1', b'q'),
+        (KeyCode::Numpad2, b'2', b'r'),
+        (KeyCode::Numpad3, b'3', b's'),
+        (KeyCode::Numpad4, b'4', b't'),
+        (KeyCode::Numpad5, b'5', b'u'),
+        (KeyCode::Numpad6, b'6', b'v'),
+        (KeyCode::Numpad7, b'7', b'w'),
+        (KeyCode::Numpad8, b'8', b'x'),
+        (KeyCode::Numpad9, b'9', b'y'),
+        (KeyCode::NumpadDecimal, b'.', b'n'),
+        (KeyCode::NumpadSubtract, b'-', b'm'),
+        (KeyCode::NumpadComma, b',', b'l'),
+        (KeyCode::NumpadAdd, b'+', b'k'),
+        (KeyCode::NumpadMultiply, b'*', b'j'),
+        (KeyCode::NumpadDivide, b'/', b'o'),
+        (KeyCode::NumpadEqual, b'=', b'X'),
+        (KeyCode::NumpadEnter, b'\r', b'M'),
+    ];
+
+    #[test]
+    fn application_mode_sends_ss3_for_every_keypad_key() {
+        let snap = snapshot_after(b"\x1b=");
+        for (key, _, fin) in KEYS {
+            assert_eq!(press(&snap, key), [0x1b, b'O', fin], "{key:?}");
+        }
+        // The other physical spelling of `*`.
+        assert_eq!(press(&snap, KeyCode::NumpadStar), b"\x1bOj");
+    }
+
+    #[test]
+    fn application_mode_uses_the_eight_bit_ss3_after_s8c1t() {
+        let snap = snapshot_after(b"\x1b G\x1b=");
+        for (key, _, fin) in KEYS {
+            assert_eq!(press(&snap, key), [0x8f, fin], "{key:?}");
+        }
+    }
+
+    #[test]
+    fn numeric_mode_is_unchanged() {
+        for snap in [snapshot_after(b""), snapshot_after(b"\x1b G")] {
+            for (key, byte, _) in KEYS {
+                assert_eq!(press(&snap, key), [byte], "{key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_mode_is_unchanged_in_application_mode() {
+        let mut snap = snapshot_after(b"\x1b=");
+        snap.kitty_keyboard_flags = 1;
+        assert_eq!(press(&snap, KeyCode::Numpad1), b"\x1b[57400u");
+        assert_eq!(press(&snap, KeyCode::NumpadEnter), b"\x1b[57414u");
+    }
+
+    #[test]
+    fn deckpam_then_deckpnm_switches_the_encoding() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        assert_eq!(press(&emu.build_snapshot(), KeyCode::Numpad5), b"5");
+
+        emu.handle_incoming_data(b"\x1b=");
+        assert_eq!(press(&emu.build_snapshot(), KeyCode::Numpad5), b"\x1bOu");
+
+        emu.handle_incoming_data(b"\x1b>");
+        assert_eq!(press(&emu.build_snapshot(), KeyCode::Numpad5), b"5");
+    }
+
+    /// The table-of-truth check for terminfo's `kent`: keypad Enter in
+    /// application keypad mode (non-kitty, 7-bit) must send exactly the value
+    /// `res/freminal.ti` declares. Compared against the parsed terminfo
+    /// source, not a literal, so a change to either side fails here. The
+    /// emulator crate's `terminfo_truth_tests` names this test in
+    /// `CHECKED_IN_GUI`.
+    #[test]
+    fn keypad_enter_matches_terminfo_kent() {
+        let (_, entry) = parse_terminfo_entry(FREMINAL_TI, "xterm-freminal");
+        let kent = entry
+            .get("kent")
+            .expect("res/freminal.ti declares kent for xterm-freminal");
+
+        let snap = snapshot_after(b"\x1b=");
+        assert_eq!(snap.kitty_keyboard_flags, 0, "legacy (non-kitty) encoding");
+        assert_eq!(press(&snap, KeyCode::NumpadEnter), kent.as_bytes());
+    }
+
+    #[test]
+    fn unmapped_key_sends_nothing_in_application_mode() {
+        let snap = snapshot_after(b"\x1b=");
+        assert_eq!(press(&snap, KeyCode::MediaPlayPause), Vec::<u8>::new());
+        assert_eq!(press(&snap, KeyCode::PrintScreen), Vec::<u8>::new());
+    }
+}
+
+#[cfg(test)]
 mod finalize_selection_drag_tests {
     //! Regression tests for [`finalize_selection_drag`] (Task 116.1 /
     //! 116.2) and [`SelectionState::finalize_interrupted_drag`] reachability
@@ -3999,6 +4374,7 @@ mod pointer_moved_frame_path_tests {
                 previous_key: None,
                 scroll_amount: 0.0,
                 super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
             },
         });
 
@@ -4066,6 +4442,7 @@ mod pointer_moved_frame_path_tests {
                 previous_key: None,
                 scroll_amount: 0.0,
                 super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
             },
         });
 
@@ -4124,6 +4501,7 @@ mod pointer_moved_frame_path_tests {
                 previous_key: None,
                 scroll_amount: 0.0,
                 super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
             },
         });
 
@@ -4164,6 +4542,554 @@ mod pointer_moved_frame_path_tests {
             "a pixel-granular position change under SgrPixels must be treated as \
              \"reportable\", so this arm must not fall through to extend the selection"
         );
+    }
+}
+
+/// Task 147.24: Alt+text reaches the PTY with its `ESC` prefix, through the
+/// real `Event::Text` path, from the `?1036` state the snapshot carries.
+#[cfg(test)]
+mod alt_text_tests {
+    use super::*;
+    use freminal_terminal_emulator::interface::TerminalEmulator;
+
+    const ALT: Modifiers = Modifiers {
+        alt: true,
+        ..Modifiers::NONE
+    };
+
+    fn snapshot_after(sequence: &[u8]) -> TerminalSnapshot {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(sequence);
+        emu.build_snapshot()
+    }
+
+    /// The bytes Alt contributes in front of its text on this host: the `ESC`
+    /// prefix everywhere but macOS, where Option composes and sends none
+    /// (Task 152).
+    fn alt_prefix() -> &'static [u8] {
+        match HostPlatform::CURRENT {
+            HostPlatform::MacOs => b"",
+            HostPlatform::Other => b"\x1b",
+        }
+    }
+
+    /// The bytes for `text` typed with Alt on this host.
+    fn alt_typed(text: &[u8]) -> Vec<u8> {
+        [alt_prefix(), text].concat()
+    }
+
+    fn key_press(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// Feed `events` with `mods` held for the whole frame and return each
+    /// message sent to the PTY.
+    fn drive(snap: &TerminalSnapshot, mods: Modifiers, events: Vec<Event>) -> Vec<Vec<u8>> {
+        drive_with(&BindingMap::default(), snap, mods, events)
+    }
+
+    fn drive_with(
+        binding_map: &BindingMap,
+        snap: &TerminalSnapshot,
+        mods: Modifiers,
+        events: Vec<Event>,
+    ) -> Vec<Vec<u8>> {
+        drive_carrying(binding_map, snap, mods, mods, events)
+    }
+
+    /// [`drive_with`] with `carried` as the modifiers left over from the
+    /// previous frame and `final_mods` as this frame's final modifiers.
+    fn drive_carrying(
+        binding_map: &BindingMap,
+        snap: &TerminalSnapshot,
+        carried: Modifiers,
+        final_mods: Modifiers,
+        events: Vec<Event>,
+    ) -> Vec<Vec<u8>> {
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+        let mut input_state = InputState::default();
+        input_state.raw.events.extend(events);
+        input_state.modifiers = final_mods;
+        let _ = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map,
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: InputCarryState {
+                last_reported_mouse_pos: None,
+                previous_key: None,
+                scroll_amount: 0.0,
+                super_state: SuperKeyState::default(),
+                text_modifiers: carried,
+            },
+        });
+        input_rx
+            .try_iter()
+            .map(|event| match event {
+                InputEvent::Key(bytes) => bytes,
+                other => panic!("unexpected input event: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn text(s: &str) -> Event {
+        Event::Text(s.to_owned())
+    }
+
+    #[test]
+    fn the_snapshot_carries_1036_and_it_defaults_to_set() {
+        use freminal_common::buffer_states::modes::meta_sends_escape::MetaSendsEscape;
+        assert_eq!(
+            snapshot_after(b"").meta_sends_escape,
+            MetaSendsEscape::Set,
+            "default"
+        );
+        assert_eq!(
+            snapshot_after(b"\x1b[?1036l").meta_sends_escape,
+            MetaSendsEscape::Reset
+        );
+        assert_eq!(
+            snapshot_after(b"\x1b[?1036l\x1b[?1036h").meta_sends_escape,
+            MetaSendsEscape::Set
+        );
+    }
+
+    #[test]
+    fn alt_b_sends_esc_b_while_1036_is_set_and_b_while_it_is_reset() {
+        assert_eq!(
+            drive(&snapshot_after(b""), ALT, vec![text("b")]),
+            vec![alt_typed(b"b")]
+        );
+        assert_eq!(
+            drive(&snapshot_after(b"\x1b[?1036l"), ALT, vec![text("b")]),
+            vec![b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn the_stray_alt_key_event_sends_nothing_so_the_text_is_sent_once() {
+        let events = vec![key_press(Key::B, ALT), text("b")];
+        assert_eq!(
+            drive(&snapshot_after(b""), ALT, events),
+            vec![alt_typed(b"b")]
+        );
+    }
+
+    fn alt_b_bound_to_next_tab() -> BindingMap {
+        let mut map = BindingMap::default();
+        let _ = map.bind(
+            KeyCombo::new(
+                BindingKey::B,
+                BindingModifiers {
+                    alt: true,
+                    ..BindingModifiers::NONE
+                },
+            ),
+            KeyAction::NextTab,
+        );
+        map
+    }
+
+    #[test]
+    fn a_bound_alt_letter_does_not_leak_its_text_to_the_pty() {
+        let map = alt_b_bound_to_next_tab();
+        let events = vec![key_press(Key::B, ALT), text("b")];
+        assert_eq!(
+            drive_with(&map, &snapshot_after(b""), ALT, events),
+            Vec::<Vec<u8>>::new()
+        );
+    }
+
+    #[test]
+    fn a_bound_alt_letter_suppresses_only_its_own_text() {
+        let map = alt_b_bound_to_next_tab();
+        // The bound press's text is dropped; the next keystroke is typed as usual.
+        let events = vec![
+            key_press(Key::B, ALT),
+            text("b"),
+            key_press(Key::C, ALT),
+            text("c"),
+        ];
+        assert_eq!(
+            drive_with(&map, &snapshot_after(b""), ALT, events),
+            vec![alt_typed(b"c")]
+        );
+    }
+
+    #[test]
+    fn an_unbound_alt_letter_still_sends_esc_letter() {
+        let map = alt_b_bound_to_next_tab();
+        let events = vec![key_press(Key::C, ALT), text("c")];
+        assert_eq!(
+            drive_with(&map, &snapshot_after(b""), ALT, events),
+            vec![alt_typed(b"c")]
+        );
+    }
+
+    #[test]
+    fn text_without_alt_is_plain() {
+        assert_eq!(
+            drive(&snapshot_after(b""), Modifiers::NONE, vec![text("b")]),
+            vec![b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn multi_byte_alt_text_gets_a_single_prefix() {
+        assert_eq!(
+            drive(&snapshot_after(b""), ALT, vec![text("\u{e9}")]),
+            vec![alt_typed("\u{e9}".as_bytes())]
+        );
+    }
+
+    #[test]
+    fn kitty_flags_leave_alt_text_as_it_was() {
+        for flags in [1_u32, 2, 8, 1 | 2 | 8] {
+            let mut snap = snapshot_after(b"");
+            snap.kitty_keyboard_flags = flags;
+            assert_eq!(
+                drive(&snap, ALT, vec![text("b")]),
+                drive(&snap, Modifiers::NONE, vec![text("b")]),
+                "kitty flags {flags}"
+            );
+        }
+    }
+
+    #[test]
+    fn altgr_as_ctrl_alt_is_never_prefixed() {
+        let ctrl_alt = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            drive(&snapshot_after(b""), ctrl_alt, vec![text("@")]),
+            vec![b"@".to_vec()]
+        );
+    }
+
+    #[test]
+    fn alt_prefixed_bracket_is_not_an_introducer_in_either_c1_mode() {
+        for select_mode in [&b"\x1b F"[..], b"\x1b G"] {
+            let snap = snapshot_after(select_mode);
+            for ch in ["[", "O"] {
+                assert_eq!(
+                    drive(&snap, ALT, vec![text(ch)]),
+                    vec![alt_typed(ch.as_bytes())],
+                    "{select_mode:?} Alt+{ch}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_alt_prefix_follows_the_modifiers_of_the_key_not_the_end_of_the_frame() {
+        // Alt+B, its text, then Alt released within the same frame: the text
+        // was typed with Alt held.
+        let events = vec![key_press(Key::B, ALT), text("b")];
+        assert_eq!(
+            drive_carrying(
+                &BindingMap::default(),
+                &snapshot_after(b""),
+                Modifiers::NONE,
+                Modifiers::NONE,
+                events,
+            ),
+            vec![alt_typed(b"b")]
+        );
+    }
+
+    #[test]
+    fn alt_pressed_after_a_plain_key_does_not_prefix_its_text() {
+        // A plain `b` and its text, then Alt pressed later in the frame: the
+        // text was typed without Alt.
+        let events = vec![key_press(Key::B, Modifiers::NONE), text("b")];
+        assert_eq!(
+            drive_carrying(
+                &BindingMap::default(),
+                &snapshot_after(b""),
+                Modifiers::NONE,
+                ALT,
+                events,
+            ),
+            vec![b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn an_alt_released_while_input_is_suppressed_does_not_prefix_later_text() {
+        use super::super::widget::PaneRenderCache;
+        let snap = snapshot_after(b"");
+        let map = BindingMap::default();
+        let mut cache = PaneRenderCache::new();
+        cache.text_modifiers = ALT;
+        // A modal is open while Alt is released.
+        cache.observe_suppressed_frame(Modifiers::NONE);
+        assert_eq!(
+            drive_carrying(
+                &map,
+                &snap,
+                cache.text_modifiers,
+                Modifiers::NONE,
+                vec![text("b")]
+            ),
+            vec![b"b".to_vec()]
+        );
+        // Alt still held when the modal closes keeps its prefix.
+        cache.observe_suppressed_frame(ALT);
+        assert_eq!(
+            drive_carrying(&map, &snap, cache.text_modifiers, ALT, vec![text("b")]),
+            vec![alt_typed(b"b")]
+        );
+    }
+
+    #[test]
+    fn text_without_a_key_event_uses_the_modifiers_carried_from_the_last_frame() {
+        let snap = snapshot_after(b"");
+        let map = BindingMap::default();
+        assert_eq!(
+            drive_carrying(&map, &snap, ALT, Modifiers::NONE, vec![text("b")]),
+            vec![alt_typed(b"b")]
+        );
+        assert_eq!(
+            drive_carrying(&map, &snap, Modifiers::NONE, ALT, vec![text("b")]),
+            vec![b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn the_frames_final_modifiers_are_carried_to_the_next_call() {
+        let (input_tx, _input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+        let mut input_state = InputState::default();
+        input_state.raw.events.push(text("b"));
+        input_state.modifiers = ALT;
+        let snap = snapshot_after(b"");
+        let result = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap: &snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &BindingMap::default(),
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: InputCarryState {
+                last_reported_mouse_pos: None,
+                previous_key: None,
+                scroll_amount: 0.0,
+                super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
+            },
+        });
+        assert_eq!(result.carry.text_modifiers, ALT);
+
+        // A frame with no events still records the modifiers (Alt released).
+        let idle = InputState::default();
+        let result = write_input_to_terminal(WriteInputParams {
+            input: &idle,
+            snap: &snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &BindingMap::default(),
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: result.carry,
+        });
+        assert_eq!(result.carry.text_modifiers, Modifiers::NONE);
+    }
+}
+
+/// Task 147.C1: mouse reports are not key events, so they reach the PTY as
+/// the exact report bytes whatever the kitty keyboard flags are. Under flag 8
+/// (report all keys as escape codes) the key encoder would otherwise turn each
+/// byte of a report into its own `CSI u`.
+#[cfg(test)]
+mod mouse_report_raw_path_tests {
+    use super::*;
+    use crate::gui::mouse::FreminalMousePosition;
+    use freminal_common::buffer_states::modes::mouse::MouseEncoding;
+
+    /// The flag combinations that make the key encoder rewrite plain bytes:
+    /// 8 alone, and 8 with press/repeat/release event types (1 | 2 | 8).
+    const REPORT_ALL_KEYS_FLAGS: [u32; 2] = [8, 1 | 2 | 8];
+
+    fn snapshot(encoding: MouseEncoding, kitty_flags: u32) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.mouse_tracking = MouseTrack::XtMseAny;
+        snap.mouse_encoding = encoding;
+        snap.kitty_keyboard_flags = kitty_flags;
+        snap.term_width = 80;
+        snap.term_height = 24;
+        snap.total_rows = 24;
+        snap
+    }
+
+    /// Cell (4, 2) at 8x16 px cells, aimed at its centre.
+    const CELL_4_2: egui::Pos2 = egui::pos2(36.0, 40.0);
+
+    fn drive(snap: &TerminalSnapshot, events: Vec<Event>, carry: InputCarryState) -> Vec<Vec<u8>> {
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+        let mut input_state = InputState::default();
+        input_state.raw.events.extend(events);
+        let binding_map = BindingMap::default();
+        let _ = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &binding_map,
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry,
+        });
+        input_rx
+            .try_iter()
+            .map(|event| match event {
+                InputEvent::Key(bytes) => bytes,
+                other => panic!("unexpected input event: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn fresh_carry() -> InputCarryState {
+        InputCarryState {
+            last_reported_mouse_pos: None,
+            previous_key: None,
+            scroll_amount: 0.0,
+            super_state: SuperKeyState::default(),
+            text_modifiers: Modifiers::NONE,
+        }
+    }
+
+    fn button(pressed: bool) -> Event {
+        Event::PointerButton {
+            pos: CELL_4_2,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn click_and_release_reports_are_sent_raw_under_report_all_keys() {
+        for flags in REPORT_ALL_KEYS_FLAGS {
+            for (encoding, press, release) in [
+                (
+                    MouseEncoding::Sgr,
+                    &b"\x1b[<0;5;3M"[..],
+                    &b"\x1b[<0;5;3m"[..],
+                ),
+                (MouseEncoding::X11, b"\x1b[M %#", b"\x1b[M#%#"),
+            ] {
+                let snap = snapshot(encoding.clone(), flags);
+                assert_eq!(
+                    drive(&snap, vec![button(true)], fresh_carry()),
+                    vec![press.to_vec()],
+                    "press, kitty flags {flags}, {encoding:?}"
+                );
+                assert_eq!(
+                    drive(&snap, vec![button(false)], fresh_carry()),
+                    vec![release.to_vec()],
+                    "release, kitty flags {flags}, {encoding:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wheel_reports_are_sent_raw_under_report_all_keys() {
+        for flags in REPORT_ALL_KEYS_FLAGS {
+            for (encoding, expected) in [
+                (MouseEncoding::Sgr, &b"\x1b[<64;5;3M"[..]),
+                (MouseEncoding::X11, b"\x1b[M`%#"),
+            ] {
+                let snap = snapshot(encoding.clone(), flags);
+                let carry = InputCarryState {
+                    last_reported_mouse_pos: Some(PreviousMouseState::new(
+                        PointerButton::Primary,
+                        false,
+                        FreminalMousePosition::new(4, 2),
+                        Modifiers::default(),
+                    )),
+                    ..fresh_carry()
+                };
+                let wheel = Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, 16.0),
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    modifiers: Modifiers::default(),
+                };
+                assert_eq!(
+                    drive(&snap, vec![wheel], carry),
+                    vec![expected.to_vec()],
+                    "wheel, kitty flags {flags}, {encoding:?}"
+                );
+            }
+        }
+    }
+
+    /// The alternate-screen wheel-to-arrow conversion sends cursor KEYS, so
+    /// it stays on the key encoder: it honours application cursor-key mode.
+    #[test]
+    fn alternate_scroll_arrows_still_go_through_the_key_encoder() {
+        let mut snap = snapshot(MouseEncoding::Sgr, 0);
+        snap.mouse_tracking = MouseTrack::NoTracking;
+        snap.is_alternate_screen = true;
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+
+        handle_scroll_fallback(16.0, 16.0, &snap, &input_tx, &mut view_state);
+        snap.cursor_key_app_mode = Decckm::Application;
+        handle_scroll_fallback(16.0, 16.0, &snap, &input_tx, &mut view_state);
+
+        let sent: Vec<Vec<u8>> = input_rx
+            .try_iter()
+            .map(|event| match event {
+                InputEvent::Key(bytes) => bytes,
+                other => panic!("unexpected input event: {other:?}"),
+            })
+            .collect();
+        assert_eq!(sent, vec![b"\x1b[A".to_vec(), b"\x1bOA".to_vec()]);
     }
 }
 
@@ -4228,6 +5154,7 @@ mod logical_row_seam_tests {
                 previous_key: None,
                 scroll_amount: 0.0,
                 super_state: SuperKeyState::default(),
+                text_modifiers: Modifiers::NONE,
             },
         });
         input_rx.try_iter().collect()

@@ -5,7 +5,7 @@
 
 //! Scrollback block compression (Task 119 — Scrollback Compression).
 //!
-//! Deep-cold scrollback rows (already Task-118 [`Row::is_compact`]) can be
+//! Deep-cold scrollback rows (already Task-118 [`Row::is_compact`](crate::row::Row::is_compact)) can be
 //! moved out of `Buffer::rows` entirely into an LZ4-compressed
 //! [`CompressedBlock`], via the explicit, test-driven
 //! [`Buffer::compress_scrollback_block`]. There is no idle-driven *policy*
@@ -103,7 +103,7 @@ impl Buffer {
     ///
     /// Only contiguous runs of scrollback rows (below the visible window,
     /// `0..visible_window_start(0)`) that are ALL currently
-    /// [`Row::is_compact`] and not already evicted into a block are
+    /// [`Row::is_compact`](crate::row::Row::is_compact) and not already evicted into a block are
     /// eligible. A `Live` (not-yet-compacted) row, an already-compressed
     /// row, or an image row (never compact) breaks the current run —
     /// those rows become eligible on a later tick once compaction (or a
@@ -182,7 +182,7 @@ impl Buffer {
     }
 
     /// `true` if scrollback row `idx` is eligible to be grouped into a
-    /// `compress_idle_scrollback` run: currently Task-118 [`Row::is_compact`]
+    /// `compress_idle_scrollback` run: currently Task-118 [`Row::is_compact`](crate::row::Row::is_compact)
     /// and not already evicted into a compressed block. Used only by the
     /// run scan in `compress_idle_scrollback`.
     fn row_is_compression_candidate(&self, idx: usize) -> bool {
@@ -201,7 +201,7 @@ impl Buffer {
     /// This is the explicit, test-driven entry point for Task 119.4 — there
     /// is no automatic policy yet deciding *when* to call this (Task 119.5).
     ///
-    /// Every row in the range must currently be Task-118 [`Row::is_compact`]
+    /// Every row in the range must currently be Task-118 [`Row::is_compact`](crate::row::Row::is_compact)
     /// and not already evicted, and the range must lie entirely below the
     /// visible window (`Buffer::visible_window_start(0)`): the live/visible
     /// region and any not-yet-compacted `Live` scrollback row are never

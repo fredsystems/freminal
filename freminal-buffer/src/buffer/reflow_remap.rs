@@ -76,6 +76,18 @@ impl ReflowStage {
     /// Translate a flat offset within logical line `line` to the post-reflow
     /// row index whose cell span contains it.
     fn offset_to_new_row(&self, line: usize, flat_offset: usize) -> Option<usize> {
+        self.offset_to_new_cell(line, flat_offset)
+            .map(|(new_idx, _)| new_idx)
+    }
+
+    /// Translate a flat offset within logical line `line` to the post-reflow
+    /// `(row index, column)` of the cell at that offset.
+    ///
+    /// An offset past the end of the line's content (a position in the blank
+    /// space after the text) lands on the line's last new row with the column
+    /// extended past that row's cells, as the live cursor's reflow does; the
+    /// caller clamps it to the new width.
+    fn offset_to_new_cell(&self, line: usize, flat_offset: usize) -> Option<(usize, usize)> {
         let line_start = *self.line_new_starts.get(line)?;
         // The line's new rows span [line_start, line_end).
         let line_end = self
@@ -89,13 +101,27 @@ impl ReflowStage {
             let cells = self.new_row_cells.get(new_idx).copied().unwrap_or(0);
             // A zero-width row (empty logical line) still anchors offset 0.
             if flat_offset < acc + cells.max(1) {
-                return Some(new_idx);
+                return Some((new_idx, flat_offset - acc));
             }
             acc += cells;
         }
         // Offset past the end of the line's content: clamp to the line's last
         // new row (the cursor remap uses the same fallback).
-        Some(line_end.saturating_sub(1).max(line_start))
+        let last = line_end.saturating_sub(1).max(line_start);
+        let last_cells = self.new_row_cells.get(last).copied().unwrap_or(0);
+        Some((last, flat_offset.saturating_sub(acc) + last_cells))
+    }
+
+    /// The post-reflow `(row, column)` of the cell at column `x` of the old
+    /// row numbered `row`.
+    fn map_cell(&self, row: RowNumber, x: usize) -> Option<(RowNumber, usize)> {
+        let meta = self.old_rows.get(self.old_index(row)?)?;
+        let (new_idx, new_x) = match meta.new_row {
+            // A verbatim row keeps its columns (clipped by the caller).
+            Some(verbatim) => (verbatim, x),
+            None => self.offset_to_new_cell(meta.line, meta.flat_start + x)?,
+        };
+        Some((self.new_base.saturating_add(new_idx), new_x))
     }
 
     fn map_start(&self, row: RowNumber) -> Option<RowNumber> {
@@ -180,6 +206,28 @@ impl ReflowRemap {
     #[must_use]
     pub fn map_end(&self, row: RowNumber) -> Option<RowNumber> {
         self.fold(row, ReflowStage::map_end)
+    }
+
+    /// Translate a cell reference, column `x` of the old row numbered `row`,
+    /// to the row and column the same cell has after the reflow.
+    ///
+    /// Unlike [`Self::map_start`] this follows the cell, not the row: a row
+    /// that re-wraps into several rows maps each of its cells to the piece
+    /// that now holds it. The column is not clamped to the new width. `None`
+    /// under the same conditions as [`Self::map_start`].
+    pub(in crate::buffer) fn map_cell(
+        &self,
+        row: RowNumber,
+        x: usize,
+    ) -> Option<(RowNumber, usize)> {
+        let mut current = (row, x);
+        for stage in &self.stages {
+            if !stage.covers_namespace(current.0) {
+                continue;
+            }
+            current = stage.map_cell(current.0, current.1)?;
+        }
+        Some(current)
     }
 
     fn fold(
@@ -297,6 +345,72 @@ mod tests {
         let alt = RowNumber::ALTERNATE_BASE.saturating_add(7);
         assert_eq!(remap.map_start(alt), Some(alt));
         assert_eq!(remap.map_end(alt), Some(alt));
+    }
+
+    #[test]
+    fn cell_follows_the_piece_of_the_old_row_that_holds_it() {
+        let remap = stage();
+        // Old row 0 (4 cells) re-wraps to 3 + 1 cells: column 2 stays on new
+        // row 0, column 3 moves to column 0 of new row 1.
+        assert_eq!(
+            remap.map_cell(RowNumber::new(100), 2),
+            Some((RowNumber::new(200), 2))
+        );
+        assert_eq!(
+            remap.map_cell(RowNumber::new(100), 3),
+            Some((RowNumber::new(201), 0))
+        );
+        // Old row 1 starts at flat offset 4: column 0 is new row 1 column 1,
+        // column 3 (flat 7) is new row 2 column 1.
+        assert_eq!(
+            remap.map_cell(RowNumber::new(101), 0),
+            Some((RowNumber::new(201), 1))
+        );
+        assert_eq!(
+            remap.map_cell(RowNumber::new(101), 3),
+            Some((RowNumber::new(202), 1))
+        );
+        assert_eq!(
+            remap.map_cell(RowNumber::new(102), 1),
+            Some((RowNumber::new(203), 1))
+        );
+    }
+
+    #[test]
+    fn cell_past_the_line_content_lands_past_the_last_new_row() {
+        let remap = stage();
+        // Old row 2 stores 2 cells; column 5 is blank space after them.
+        assert_eq!(
+            remap.map_cell(RowNumber::new(102), 5),
+            Some((RowNumber::new(203), 5))
+        );
+    }
+
+    #[test]
+    fn verbatim_row_cell_keeps_its_column() {
+        let remap = ReflowRemap::single(
+            RowNumber::new(0),
+            RowNumber::new(50),
+            vec![OldRowMeta {
+                line: 0,
+                flat_start: 0,
+                cells: 10,
+                new_row: Some(0),
+            }],
+            vec![0],
+            vec![3],
+        );
+        assert_eq!(
+            remap.map_cell(RowNumber::new(0), 2),
+            Some((RowNumber::new(50), 2))
+        );
+    }
+
+    #[test]
+    fn cell_outside_the_old_range_is_unmappable() {
+        let remap = stage();
+        assert_eq!(remap.map_cell(RowNumber::new(99), 0), None);
+        assert_eq!(remap.map_cell(RowNumber::new(103), 0), None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# freminal-shell-integration v4
+# freminal-shell-integration v5
 # shellcheck shell=bash
 #
 # Freminal bash integration — loaded automatically when Freminal spawns bash.

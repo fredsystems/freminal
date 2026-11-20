@@ -14,7 +14,7 @@
 use freminal_common::buffer_states::{row_number::RowNumber, tchar::TChar};
 
 use crate::{
-    buffer::{Buffer, PlaceImageResult},
+    buffer::{Buffer, ImagePlacementMode, PlaceImageRequest, PlaceImageResult},
     cell::Cell,
     image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
 };
@@ -72,13 +72,16 @@ fn place(buf: &mut Buffer, cols: usize, rows: usize) -> PlaceImageResult {
     buf.place_image(
         image(cols, rows),
         0,
-        ImageProtocol::Sixel,
-        None,
-        None,
-        0,
-        None,
-        1,
-        None,
+        PlaceImageRequest {
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
+            mode: ImagePlacementMode::Inline,
+        },
     )
 }
 
@@ -162,7 +165,9 @@ fn rows_keep_their_number_while_eviction_shifts_their_index() {
 // Task 125.C6: DECSC saves a *screen* position (xterm `CursorSave` stores
 // `screen->cur_row`; the VT510 manual defines it as "cursor position" on a
 // terminal without scrollback), so a restore never depends on which content
-// currently occupies the saved row, nor on eviction, scrolling or reflow.
+// currently occupies the saved row, nor on eviction or scrolling. A resize is
+// the exception (Task 147.18): the slot follows its cell through it, see
+// `saved_cursor_resize_tests.rs`.
 
 /// The first row of the visible (bottom-anchored) window.
 fn window_top(buf: &Buffer) -> usize {
@@ -312,7 +317,7 @@ fn decsc_restore_after_a_height_grow_keeps_the_screen_row() {
 }
 
 #[test]
-fn decsc_survives_reflow_as_a_screen_position() {
+fn decsc_after_reflow_restores_onto_the_saved_text() {
     let mut buf = Buffer::new(20, 8);
     line(&mut buf, "head");
     buf.insert_text(&text("0123456789ABCDEFGHIJ0123456789ABCDEFGHIJ"));
@@ -327,6 +332,11 @@ fn decsc_survives_reflow_as_a_screen_position() {
 
     let restored = buf.cursor_screen_pos();
     assert_eq!((restored.x, restored.y), (saved.x, saved.y));
+    assert_eq!(
+        buf.rows()[buf.cursor().pos.y].cells()[buf.cursor().pos.x].into_utf8(),
+        "3",
+        "the cursor is on the character it was saved on"
+    );
 }
 
 #[test]
@@ -742,14 +752,17 @@ fn reflow_renumbers_rows_and_remaps_every_holder() {
         end_text.ends_with('4'),
         "end_row must name the last output row, got {end_text:?}"
     );
-    // DECSC saves a *screen* position, not a row number, so it needs no
-    // remap: restoring after the reflow returns to the same screen row and
-    // column (clamped to the screen), wherever the content now sits.
+    // The saved cursor follows its cell through the reflow (Task 147.18): the
+    // live cursor was never moved after the save, so DECRC lands exactly
+    // where the reflow carried the live cursor. The screen position changed
+    // (the re-wrapped output is taller), which is the point.
+    let live_after_reflow = buf.cursor().pos;
+    assert_ne!(buf.cursor_screen_pos(), saved_screen_pos);
     buf.restore_cursor();
     assert_eq!(
-        buf.cursor_screen_pos(),
-        saved_screen_pos,
-        "DECRC returns to the screen position DECSC saved"
+        buf.cursor().pos,
+        live_after_reflow,
+        "DECRC returns to the cell DECSC saved"
     );
     assert!(buf.cursor().pos.y < buf.rows().len());
 }

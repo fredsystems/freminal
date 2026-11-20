@@ -1,4 +1,4 @@
-# freminal-shell-integration v4
+# freminal-shell-integration v5
 #
 # Freminal zsh `.zshenv` — loaded automatically when Freminal spawns zsh.
 #
@@ -19,8 +19,8 @@
 # variable `__FREMINAL_ZSH_ZDOTDIR` before invoking zsh.  We restore it here
 # and then chain to the user's real .zshenv if present.
 #
-# The `(+)` parameter-test syntax distinguishes "set to empty" from "unset",
-# matching the precision Ghostty uses in its own integration.
+# `${+name}` (zsh's documented set-vs-unset test) distinguishes "set to
+# empty" from "unset", so an empty ZDOTDIR is restored as empty.
 if (( ${+__FREMINAL_ZSH_ZDOTDIR} )); then
 	ZDOTDIR="${__FREMINAL_ZSH_ZDOTDIR}"
 	unset __FREMINAL_ZSH_ZDOTDIR

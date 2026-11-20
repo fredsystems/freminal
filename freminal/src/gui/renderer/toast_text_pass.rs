@@ -17,7 +17,7 @@
 //! separate from the terminal grid's atlas so toast text — which is
 //! typically rasterised at a different pixel size than the terminal's cell
 //! font — never evicts or is evicted by grid glyphs). It is driven by the
-//! toast overlay's `PaintCallback` in [`crate::gui::toast`] (see
+//! toast overlay's `PaintCallback` in `crate::gui::toast` (see
 //! `ToastStack::show` / `paint_toasts`): text is shaped and instance data
 //! built on the main thread, then [`ToastTextRenderer::upload_and_draw`] runs
 //! on the GL thread.
@@ -54,7 +54,7 @@
 //! reimplemented here because toast text is short and this simpler
 //! contract is sufficient and easier to test.
 //!
-//! The CPU-side per-glyph float packing ([`pack_glyph_instance`]) is a pure
+//! The CPU-side per-glyph float packing (`pack_glyph_instance`) is a pure
 //! function, fully testable without a GL context; GL calls are confined to
 //! [`ToastTextRenderer::init`], [`ToastTextRenderer::upload_and_draw`], and
 //! [`ToastTextRenderer::destroy`].
@@ -381,7 +381,7 @@ impl ToastTextRenderer {
     /// it takes `&mut FontManager` (glyph-face resolution populates a cache)
     /// and must never be touched from a `PaintCallback`.
     ///
-    /// Returns [`ToastTextMetrics::ZERO`] for empty text or a face that
+    /// Returns `ToastTextMetrics::ZERO` for empty text or a face that
     /// cannot be shaped/resolved.
     #[must_use]
     pub fn measure(

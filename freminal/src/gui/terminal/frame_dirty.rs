@@ -456,6 +456,10 @@ pub(super) struct FrameDirtyContext<'a> {
     pub(super) fold_epoch: u64,
     /// Command-block config, for the gutter hover-row test.
     pub(super) command_blocks_config: &'a freminal_common::config::CommandBlocksConfig,
+    /// The pane's background opacity (`0.0..=1.0`). It selects the pane base
+    /// colour that decides which cell backgrounds are baked, so a change
+    /// stales every vertex of the pane.
+    pub(super) bg_opacity: f32,
 }
 
 /// Pixel geometry [`evaluate_frame_dirty_state`] needs to translate the
@@ -534,6 +538,7 @@ pub(super) fn evaluate_frame_dirty_state(
         layout,
         fold_epoch,
         command_blocks_config,
+        bg_opacity,
     } = ctx;
     let FrameDirtyGeometry {
         pane_rect,
@@ -630,6 +635,18 @@ pub(super) fn evaluate_frame_dirty_state(
     // `full_pane_rebuild_damage_rect` (`widget.rs`), not
     // `PaneFrameDamage::Full`; siblings and chrome are unaffected.
     let screen_inversion_changed = cache.previous_screen_inversion != Some(snap.screen_inversion);
+    // The background opacity picks the pane base colour under DECSCNM
+    // (`pane_base_color`), which decides which cell backgrounds are baked
+    // into the instance buffer, so a change stales every vertex of THIS pane
+    // (147 PR review R16). Compared by bits: the value is copied from config,
+    // never computed, so equal means bit-identical.
+    //
+    // Damage classification (`freminal-damage-model`): BOUNDABLE-NOW at pane
+    // level, same shape as `screen_inversion_changed`: the pane full-rebuild
+    // path reports `PaneFrameDamage::Region(pane rect)`, never `Full`.
+    let bg_opacity_changed = cache
+        .previous_bg_opacity
+        .is_none_or(|previous| previous.to_bits() != bg_opacity.to_bits());
     // Detect terminal grid resize (cols or rows changed).  The cell
     // background and foreground instance VBOs hold per-cell vertices
     // that encode column indices and pixel positions based on the
@@ -653,6 +670,7 @@ pub(super) fn evaluate_frame_dirty_state(
     let content_changed = theme_changed
         || resolved_colors_changed
         || screen_inversion_changed
+        || bg_opacity_changed
         || dims_changed
         || folds_changed
         || rows_changed.any();
@@ -1045,6 +1063,7 @@ pub(super) fn evaluate_frame_dirty_state(
         && !theme_changed
         && !resolved_colors_changed
         && !screen_inversion_changed
+        && !bg_opacity_changed
         && !dims_changed
         && !folds_changed
         && !text_blink_changed
@@ -1166,6 +1185,7 @@ mod evaluate_frame_dirty_state_tests {
         cache.previous_theme = Some(snap.theme);
         cache.previous_resolved_colors = Some(Arc::clone(&snap.resolved_colors));
         cache.previous_screen_inversion = Some(snap.screen_inversion);
+        cache.previous_bg_opacity = Some(1.0);
         cache.previous_term_width = snap.term_width;
         cache.previous_term_height = snap.term_height;
         cache.previous_fold_epoch = 0;
@@ -1283,6 +1303,7 @@ mod evaluate_frame_dirty_state_tests {
                 layout: &layout,
                 fold_epoch: 0,
                 command_blocks_config: &command_blocks_config,
+                bg_opacity: 1.0,
             },
             view_state,
             FrameDirtyGeometry {
@@ -3035,6 +3056,65 @@ mod evaluate_frame_dirty_state_tests {
         cache.previous_screen_inversion = Some(ScreenInversion::Normal);
         cache.invalidate_theme_cache();
         assert!(cache.previous_screen_inversion.is_none());
+    }
+
+    #[test]
+    fn a_background_opacity_change_forces_full_rebuild() {
+        // Opacity picks the pane base colour under DECSCNM, which decides the
+        // baked cell backgrounds (147 PR review R16).
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, solid());
+        cache.previous_bg_opacity = Some(0.5);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
+
+        assert!(outcome.observations.content_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    #[test]
+    fn a_background_opacity_change_vetoes_bounded_rebuild() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, solid());
+        cache.previous_bg_opacity = Some(0.5);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_built_with_empty_deco_verts();
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    #[test]
+    fn missing_background_opacity_baseline_reports_changed() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, solid());
+        cache.previous_bg_opacity = None;
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
+
+        assert!(outcome.observations.content_changed);
+    }
+
+    #[test]
+    fn invalidate_theme_cache_clears_background_opacity_baseline() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, solid());
+        cache.invalidate_theme_cache();
+        assert!(cache.previous_bg_opacity.is_none());
     }
 
     #[test]

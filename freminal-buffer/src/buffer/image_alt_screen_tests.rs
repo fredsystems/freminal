@@ -16,7 +16,7 @@ use std::sync::Arc;
 use freminal_common::buffer_states::tchar::TChar;
 
 use crate::{
-    buffer::Buffer,
+    buffer::{Buffer, ImagePlacementMode, PlaceImageRequest},
     cell::Cell,
     image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
     row::Row,
@@ -44,7 +44,20 @@ fn place(buf: &mut Buffer, cols: usize, rows: usize) -> u64 {
         animation: AnimationControl::default(),
     };
     let id = image.id;
-    let _ = buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+    let _ = buf.place_image(
+        image,
+        0,
+        PlaceImageRequest {
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
+            mode: ImagePlacementMode::Inline,
+        },
+    );
     id
 }
 

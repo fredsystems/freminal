@@ -94,7 +94,7 @@ fn build_url_regex() -> Regex {
     })
 }
 
-/// The scheme literals matched by [`URL_REGEX`].
+/// The scheme literals matched by `URL_REGEX`.
 ///
 /// Kept in sync with `build_url_regex`'s `PATTERN` by hand (a unit test
 /// checks every entry is detected): the regex alternation and this list serve
@@ -131,7 +131,7 @@ const MIN_PARTIAL_SCHEME_LEN: usize = 3;
 /// this row (unlike a URL that wraps after the scheme is complete, which
 /// still produces a [`UrlMatch`] with [`UrlMatch::touches_buffer_end`] set).
 ///
-/// See [`MIN_PARTIAL_SCHEME_LEN`] for the false-positive/completeness
+/// See `MIN_PARTIAL_SCHEME_LEN` for the false-positive/completeness
 /// trade-off in how short a partial prefix is recognized.
 #[must_use]
 pub fn row_tail_could_be_wrapped_scheme(bytes: &[u8]) -> bool {

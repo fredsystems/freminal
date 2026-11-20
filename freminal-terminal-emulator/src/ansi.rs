@@ -7,8 +7,12 @@ use core::fmt;
 
 use crate::{
     ansi_components::{
-        apc::ApcParser, csi::AnsiCsiParser, dcs::DcsParser, osc::AnsiOscParser,
-        standard::StandardParser, tracer::SequenceTraceable,
+        apc::ApcParser,
+        csi::{AnsiCsiParser, CsiBuffers, CsiIntroducer},
+        dcs::DcsParser,
+        osc::AnsiOscParser,
+        standard::StandardParser,
+        tracer::SequenceTraceable,
     },
     error::ParserFailures,
 };
@@ -16,7 +20,10 @@ use crate::{
 use crate::ansi_components::tracer::SequenceTracer;
 use crate::error::AnsiParseError;
 use freminal_common::buffer_states::{
-    line_draw::DecSpecialGraphics, mode::Mode, modes::decanm::Decanm, modes::s8c1t::S8c1t,
+    charset::{CharacterSet, CharsetSlot},
+    mode::Mode,
+    modes::decanm::Decanm,
+    modes::s8c1t::S8c1t,
     terminal_output::TerminalOutput,
 };
 
@@ -29,6 +36,18 @@ pub enum ParserOutcome {
     /// least one `TerminalOutput`, but need not: a sequence that is recognised
     /// and ignored, or one dropped for exceeding its byte cap, produces none.
     Finished,
+    /// A string sequence (OSC, DCS or APC) ended because a bare ESC, one not
+    /// followed by `\`, preceded this byte. The sequence is complete: it was
+    /// dispatched (or dropped, if it was over its cap) exactly as if ST had
+    /// arrived. The byte just pushed was **not** consumed: it is the second byte
+    /// of a new escape sequence started by that ESC, and the top-level parser
+    /// must re-enter the escape state and feed it that byte.
+    ///
+    /// An ESC-intermediate sequence (`ESC (`, `ESC SP`, `ESC #`, ...) returns
+    /// it when the byte pushed is itself an ESC: the sequence is abandoned
+    /// with no output, and that ESC starts a new one (re-entering the escape
+    /// state with an ESC is just re-entering the escape state).
+    FinishedAtEsc,
     /// The byte resulted in an invalid sequence or parse error (error string provided).
     Invalid(String),
     InvalidParserFailure(ParserFailures),
@@ -39,6 +58,7 @@ impl fmt::Display for ParserOutcome {
         match self {
             Self::Continue => write!(f, "Continue"),
             Self::Finished => write!(f, "Finished"),
+            Self::FinishedAtEsc => write!(f, "FinishedAtEsc"),
             Self::Invalid(msg) => write!(f, "Invalid: {msg}"),
             Self::InvalidParserFailure(msg) => {
                 write!(f, "InvalidParserFailure: {msg:?}")
@@ -127,6 +147,86 @@ pub fn parse_param_as<T: std::str::FromStr>(
     )
 }
 
+/// The UTF-8 character in progress, tracked under S8C1T so that a byte in
+/// `0x80`–`0x9F` that continues a well-formed character is text, not an 8-bit
+/// C1 control. xterm decodes UTF-8 before it looks a byte up, so `Ŏ`
+/// (`C5 8E`) is a letter there, not SS2; freminal applies the same rule in
+/// the ground state and inside OSC, DCS and APC strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Utf8Tracker {
+    /// Continuation bytes the character in progress still expects.
+    pending: u8,
+    /// The lowest byte the next continuation may take: the second byte of an
+    /// `E0`, `ED`, `F0` or `F4` sequence has a narrower range (Unicode
+    /// Table 3-7, well-formed UTF-8 byte sequences).
+    lo: u8,
+    /// The highest byte the next continuation may take.
+    hi: u8,
+}
+
+impl Utf8Tracker {
+    /// No character in progress.
+    const NONE: Self = Self {
+        pending: 0,
+        lo: 0,
+        hi: 0,
+    };
+
+    /// Feed `b`; `true` when it is a valid continuation of the character in
+    /// progress. Otherwise `b` starts afresh: a lead byte opens a character,
+    /// anything else leaves none in progress.
+    #[inline]
+    fn continues(&mut self, b: u8) -> bool {
+        if self.pending > 0 && (self.lo..=self.hi).contains(&b) {
+            self.pending -= 1;
+            self.lo = 0x80;
+            self.hi = 0xBF;
+            return true;
+        }
+        let (pending, lo, hi) = match b {
+            0xC2..=0xDF => (1, 0x80, 0xBF),
+            0xE0 => (2, 0xA0, 0xBF),
+            0xED => (2, 0x80, 0x9F),
+            0xE1..=0xEC | 0xEE..=0xEF => (2, 0x80, 0xBF),
+            0xF0 => (3, 0x90, 0xBF),
+            0xF1..=0xF3 => (3, 0x80, 0xBF),
+            0xF4 => (3, 0x80, 0x8F),
+            _ => (0, 0, 0),
+        };
+        *self = Self { pending, lo, hi };
+        false
+    }
+
+    /// Whether `bytes` is a well-formed UTF-8 prefix that is not yet a whole
+    /// character: a valid lead byte followed only by continuations its
+    /// prefix allows (`F0 9F` is; `E0 84` is not, since `E0` needs `A0`-`BF`
+    /// next). Used to decide whether a read's tail is held back for the next
+    /// read or processed now.
+    pub(crate) fn is_incomplete_prefix(bytes: &[u8]) -> bool {
+        let Some((&lead, rest)) = bytes.split_first() else {
+            return false;
+        };
+        let mut tracker = Self::NONE;
+        let _ = tracker.continues(lead);
+        if tracker.pending == 0 {
+            return false;
+        }
+        rest.iter().all(|&b| tracker.continues(b)) && tracker.pending > 0
+    }
+
+    /// Whether `b`, the next byte of an open string, is the 8-bit C1 String
+    /// Terminator: `0x9C` with 8-bit C1 controls in force and not a valid
+    /// continuation of the character in progress (`C5 9C` is `Ŝ`; `E0 9C` is
+    /// ill-formed, so that `9C` is ST). Under S7C1T `0x9C` is an ordinary
+    /// body byte. This is the same S8C1T gate the ground state applies to
+    /// every other 8-bit C1 control. It must see every byte the string
+    /// consumes.
+    #[inline]
+    fn is_c1_st(&mut self, b: u8, s8c1t: S8c1t) -> bool {
+        s8c1t == S8c1t::EightBit && !self.continues(b) && b == 0x9C
+    }
+}
+
 fn push_data_if_non_empty(data: &mut Vec<u8>, output: &mut Vec<TerminalOutput>) {
     if !data.is_empty() {
         output.push(TerminalOutput::Data(std::mem::take(data)));
@@ -147,6 +247,114 @@ pub enum ParserInner {
     /// VT52: `ESC Y` cursor address — waiting for row and column bytes.
     /// First `Option` is the row byte (if received); second call fills column.
     Vt52CursorAddress(Option<u8>),
+    /// VT52: inside an `ESC (`, `ESC )`, `ESC *`, `ESC +`, `ESC SP` or
+    /// `ESC $` introducer, which VT52 has no meaning for. Mirrors xterm's
+    /// `vt52_ignore_table`: the sequence ends at (and swallows) the next byte
+    /// in 0x30-0x7E; 0x20-0x2F and DEL are swallowed and the state stays;
+    /// C0 controls execute and the state stays.
+    Vt52Ignore,
+    /// VT52: part-way through a non-ASCII character met while in
+    /// `Vt52Escape` or `Vt52Ignore`. The character is consumed whole; see
+    /// `FreminalAnsiParser::vt52_non_ascii_byte`.
+    Vt52NonAscii {
+        table: Vt52Table,
+        prefix: Utf8Prefix,
+    },
+}
+
+/// Which of xterm's VT52 tables a byte is looked up in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Vt52Table {
+    /// `vt52_esc_table`: the byte after ESC.
+    Escape,
+    /// `vt52_ignore_table`: inside an `ESC (`-style sequence.
+    Ignore,
+}
+
+impl Vt52Table {
+    const fn parser_state(self) -> ParserInner {
+        match self {
+            Self::Escape => ParserInner::Vt52Escape,
+            Self::Ignore => ParserInner::Vt52Ignore,
+        }
+    }
+}
+
+/// The bytes of a UTF-8 character received so far (at most four).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Utf8Prefix {
+    bytes: [u8; 4],
+    len: usize,
+}
+
+impl Utf8Prefix {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; 4],
+            len: 0,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.bytes.get(..self.len).unwrap_or_default()
+    }
+
+    /// Append `b`; `false` if the prefix is already full.
+    fn push(&mut self, b: u8) -> bool {
+        match self.bytes.get_mut(self.len) {
+            Some(slot) => {
+                *slot = b;
+                self.len += 1;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// How much of its input [`FreminalAnsiParser::push_to_limit`] parses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PushLimit {
+    /// All of it.
+    WholeInput,
+    /// Up to and including the byte that completes a `DCS tmux;` sequence.
+    ThroughTmuxPassthrough,
+}
+
+/// Whether `output` is a `DCS tmux;` passthrough sequence, whose payload the
+/// state replays.
+fn is_tmux_passthrough(output: &TerminalOutput) -> bool {
+    matches!(output, TerminalOutput::DeviceControlString(seq) if seq.starts_with(b"Ptmux;"))
+}
+
+/// Apply to `vt52_mode` / `s8c1t_mode` the change `output` makes to the
+/// parser's own mode, if any.
+///
+/// The parser calls this as it emits each output, so a mode change governs
+/// the very next byte of the same read.  `TerminalState` calls it again, in
+/// event order, to track the mode in force at each point of the byte stream
+/// (used to seed the tmux passthrough payload parser).
+pub(crate) const fn apply_parser_mode_change(
+    output: &TerminalOutput,
+    vt52_mode: &mut Decanm,
+    s8c1t_mode: &mut S8c1t,
+) {
+    match output {
+        TerminalOutput::EightBitControl => *s8c1t_mode = S8c1t::EightBit,
+        TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52)) => *vt52_mode = Decanm::Vt52,
+        TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)) => *vt52_mode = Decanm::Ansi,
+        TerminalOutput::SevenBitControl => *s8c1t_mode = S8c1t::SevenBit,
+        // The parser only emits RIS in ANSI mode (`ESC c` is ignored in VT52
+        // mode), so for it DECANM is already `Ansi`. `TerminalState` folds the
+        // outputs of tmux passthrough payloads through this function over its
+        // own copy of the modes, and RIS must reset that copy's DECANM as well
+        // so it never disagrees with the handler.
+        TerminalOutput::ResetDevice => {
+            *s8c1t_mode = S8c1t::SevenBit;
+            *vt52_mode = Decanm::Ansi;
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -155,6 +363,10 @@ pub struct FreminalAnsiParser {
     // Accumulates plain text between control sequences across chunk boundaries,
     // reducing per-call allocations and enabling coalesced Data emissions.
     pending_data: Vec<u8>,
+    /// Spare byte buffers lent to each CSI sub-parser for the length of one
+    /// sequence, so a CSI allocates nothing per sequence. Always empty while
+    /// lent out and between sequences.
+    csi_buffers: CsiBuffers,
     seq_trace: SequenceTracer,
     /// When set to `Decanm::Vt52`, the parser uses the reduced VT52 escape set
     /// instead of standard ANSI/VT100+ sequences.  Toggled by DECANM (`?2`).
@@ -163,6 +375,14 @@ pub struct FreminalAnsiParser {
     /// 8-bit C1 control introducers.  Toggled by `ESC SP G` (S8C1T) /
     /// `ESC SP F` (S7C1T).
     pub s8c1t_mode: S8c1t,
+    /// While a string (OSC, DCS, APC) is open under S8C1T: the UTF-8
+    /// character in progress, so that a `0x9C` continuation byte is not taken
+    /// for ST. Reset whenever the parser is not in a string state after a
+    /// byte, so a new string never inherits a character from an old one.
+    string_utf8: Utf8Tracker,
+    /// The UTF-8 character in progress in ground-state text under S8C1T, so
+    /// that a continuation byte in `0x80`–`0x9F` is text, not a C1 control.
+    ground_utf8: Utf8Tracker,
 }
 
 impl SequenceTraceable for FreminalAnsiParser {
@@ -188,9 +408,30 @@ impl FreminalAnsiParser {
         Self {
             inner: ParserInner::Empty,
             pending_data: Vec::new(),
+            csi_buffers: CsiBuffers::new(),
             seq_trace: SequenceTracer::new(),
             vt52_mode: Decanm::Ansi,
             s8c1t_mode: S8c1t::SevenBit,
+            string_utf8: Utf8Tracker::NONE,
+            ground_utf8: Utf8Tracker::NONE,
+        }
+    }
+
+    /// Enter the CSI state, lending the parser's spare buffers to the new
+    /// sub-parser.
+    fn start_csi(&mut self, introducer: CsiIntroducer) {
+        self.recycle_csi_buffers();
+        let buffers = std::mem::take(&mut self.csi_buffers);
+        self.inner = ParserInner::Csi(AnsiCsiParser::from_buffers(introducer, buffers));
+    }
+
+    /// If a CSI sub-parser is active, take its buffers back (emptied, with
+    /// oversized capacity released). Call this before `self.inner` stops
+    /// being `Csi` by any route; the sub-parser's own diagnostics are gone
+    /// afterwards, so log first.
+    fn recycle_csi_buffers(&mut self) {
+        if let ParserInner::Csi(parser) = &mut self.inner {
+            self.csi_buffers = parser.take_buffers();
         }
     }
 
@@ -200,6 +441,12 @@ impl FreminalAnsiParser {
         data_output: &mut Vec<u8>,
         output: &mut Vec<TerminalOutput>,
     ) -> Result<(), ()> {
+        // Under S8C1T every byte is fed to the UTF-8 tracker first, so a C0
+        // control or ESC between a lead byte and a `0x80`–`0x9F` byte breaks
+        // the character and the later byte is a C1 control again.
+        let continues_character =
+            self.s8c1t_mode == S8c1t::EightBit && self.ground_utf8.continues(b);
+
         if b == b'\x1b' {
             if self.vt52_mode == Decanm::Vt52 {
                 self.inner = ParserInner::Vt52Escape;
@@ -242,11 +489,17 @@ impl FreminalAnsiParser {
 
         // SI (0x0F) — Shift In: invoke G0 into GL.
         // SO (0x0E) — Shift Out: invoke G1 into GL.
-        // Silently consumed as control characters.  Freminal uses a simplified
-        // single-slot charset model — G0 is always the active GL set, so SI is
-        // a no-op and SO has no visible effect until full G0/G1 support is added.
+        // VT52 mode ignores both (xterm `vt52_table`: SO/SI are `CASE_IGNORE`).
         if b == 0x0F || b == 0x0E {
+            if self.vt52_mode == Decanm::Vt52 {
+                return Err(());
+            }
             push_data_if_non_empty(data_output, output);
+            output.push(TerminalOutput::InvokeGl(if b == 0x0F {
+                CharsetSlot::G0
+            } else {
+                CharsetSlot::G1
+            }));
             return Err(());
         }
 
@@ -262,10 +515,13 @@ impl FreminalAnsiParser {
             return Err(());
         }
 
-        // 8-bit C1 controls (0x80–0x9F) — recognized only when S8C1T is active
-        // and we are in ANSI mode (VT52 mode does not support 8-bit C1).
+        // 8-bit C1 controls (0x80–0x9F) — recognized only when S8C1T is active,
+        // in ANSI mode (VT52 mode does not support 8-bit C1), and at a UTF-8
+        // character boundary: a byte that continues a well-formed character is
+        // text, as in xterm, which decodes UTF-8 first (`Ŏ` is `C5 8E`).
         if self.s8c1t_mode == S8c1t::EightBit
             && self.vt52_mode == Decanm::Ansi
+            && !continues_character
             && (0x80..=0x9F).contains(&b)
         {
             push_data_if_non_empty(data_output, output);
@@ -284,7 +540,7 @@ impl FreminalAnsiParser {
                 }
                 // CSI (0x9B) ≡ ESC [ — Control Sequence Introducer (8-bit C1)
                 0x9B => {
-                    self.inner = ParserInner::Csi(AnsiCsiParser::new_c1());
+                    self.start_csi(CsiIntroducer::EightBit);
                 }
                 // OSC (0x9D) ≡ ESC ] — Operating System Command
                 0x9D => {
@@ -294,7 +550,10 @@ impl FreminalAnsiParser {
                 0x9F => {
                     self.inner = ParserInner::Apc(ApcParser::new());
                 }
-                // SS2 (0x8E), SS3 (0x8F) — Single Shift G2/G3 (no-op for now)
+                // SS2 (0x8E) ≡ ESC N — Single Shift G2
+                0x8E => output.push(TerminalOutput::SingleShift(CharsetSlot::G2)),
+                // SS3 (0x8F) ≡ ESC O — Single Shift G3
+                0x8F => output.push(TerminalOutput::SingleShift(CharsetSlot::G3)),
                 // ST (0x9C) — String Terminator (no-op when no string is open)
                 // PM (0x9E) — Privacy Message (ignored, no handler)
                 // Other bytes in 0x80–0x9F without defined C1 meaning — silently ignored
@@ -329,7 +588,7 @@ impl FreminalAnsiParser {
 
         match b {
             b'[' => {
-                self.inner = ParserInner::Csi(AnsiCsiParser::new());
+                self.start_csi(CsiIntroducer::SevenBit);
             }
             b']' => {
                 self.inner = ParserInner::Osc(AnsiOscParser::new());
@@ -365,6 +624,13 @@ impl FreminalAnsiParser {
                     }
 
                     ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
+                    // Only an ESC aborts a standard sequence, and a fresh
+                    // parser has seen only `b`, which is not an ESC (that was
+                    // handled at the top of this function), so this is not
+                    // reached; it is handled as the `Standard` state does.
+                    ParserOutcome::FinishedAtEsc => {
+                        self.inner = ParserInner::Escape;
+                    }
 
                     ParserOutcome::Invalid(message) => {
                         // All invalid sequences emit `TerminalOutput::Invalid` here.
@@ -379,6 +645,38 @@ impl FreminalAnsiParser {
                 }
             }
         }
+    }
+
+    /// A string sequence (OSC, DCS or APC) just ended at a bare ESC: the ESC
+    /// that preceded `b` starts a new escape sequence, and `b` is its second
+    /// byte.
+    ///
+    /// The string itself has already been dispatched by its sub-parser. This
+    /// re-enters the escape state (the ESC the sub-parser consumed) and feeds
+    /// `b` to it, so `b` is parsed exactly as it would be after any ESC.
+    /// Put a pending ESC under the escape table of the parser's current mode.
+    ///
+    /// An ESC is pending between two pushes when a read ends after it, or when
+    /// a bare ESC ended a `DCS tmux;` wrapper and the push stopped there
+    /// ([`PushLimit::ThroughTmuxPassthrough`]). The wrapper's payload, applied
+    /// between the pushes, may have switched DECANM, so the ESC's second byte
+    /// must be read under the mode now in force.
+    fn resume_pending_escape(&mut self) {
+        match (&self.inner, self.vt52_mode) {
+            (ParserInner::Escape, Decanm::Vt52) => self.inner = ParserInner::Vt52Escape,
+            (ParserInner::Vt52Escape, Decanm::Ansi) => self.inner = ParserInner::Escape,
+            _ => {}
+        }
+    }
+
+    fn restart_escape_with(
+        &mut self,
+        b: u8,
+        data_output: &mut Vec<u8>,
+        output: &mut Vec<TerminalOutput>,
+    ) {
+        self.inner = ParserInner::Escape;
+        self.ansiparser_inner_escape(b, data_output, output);
     }
 
     /// Feed a raw byte slice from the PTY into the parser, returning all
@@ -404,32 +702,72 @@ impl FreminalAnsiParser {
     ///                  final byte in 0x40–0x7E is received; then dispatches
     ///                  to the appropriate csi_commands sub-handler.
     /// Osc            — collecting the OSC string until BEL (0x07) or ST
-    ///                  (ESC '\') terminates it; then dispatches to osc.rs.
+    ///                  (ESC '\', or the C1 byte 0x9C while S8C1T is active)
+    ///                  terminates it; then dispatches to osc.rs. A bare ESC
+    ///                  (not followed by '\') also ends it: the body so far is
+    ///                  dispatched and the ESC starts a new escape sequence
+    ///                  (Escape state, next byte its second). CAN (0x18) and
+    ///                  SUB (0x1A) cancel it: nothing is dispatched.
     /// Standard       — handles two-byte Fe sequences (ESC # Pn, ESC ( G, …).
-    /// Dcs            — Device Control String; passes bytes to dcs.rs until ST.
+    ///                  A designator (ESC ( ) * +) also takes extra
+    ///                  intermediates (ESC ( % 5) and is ignored as a whole.
+    ///                  An ESC inside it abandons the sequence and restarts
+    ///                  Escape.
+    /// Dcs            — Device Control String; passes bytes to dcs.rs until ST
+    ///                  (as for Osc, including C1 ST under S8C1T and CAN/SUB
+    ///                  cancelling it) or a bare ESC (inside `DCS tmux;` an
+    ///                  `ESC ESC` pair is data).
     /// Apc            — Application Program Command; passes bytes to apc.rs
-    ///                  until ST (used by tmux passthrough passthrough).
+    ///                  until ST, a bare ESC, or CAN/SUB (as for Osc).
     /// Vt52Escape     — waiting for the single command byte after ESC in VT52
     ///                  mode; 'Y' transitions to Vt52CursorAddress.
     /// Vt52CursorAddress — collects the row byte then column byte for the
     ///                  ESC Y row col direct-cursor-address sequence.
+    /// Vt52Ignore     — swallows the rest of a VT52-meaningless `ESC (`-style
+    ///                  sequence (see `ParserInner::Vt52Ignore`).
+    /// Vt52NonAscii   — consuming one non-ASCII character met inside either
+    ///                  of the two states above.
     /// ```
     ///
     /// Plain text bytes are coalesced into `pending_data` and flushed as a
     /// single `TerminalOutput::Data(Vec<u8>)` whenever a control sequence
     /// interrupts the data stream, minimising allocations for the common case
     /// of long runs of ASCII text.
+    pub fn push(&mut self, incoming: &[u8]) -> Vec<TerminalOutput> {
+        self.push_to_limit(incoming, PushLimit::WholeInput).0
+    }
+
+    /// Like [`Self::push`], but stops after the byte that completes a `DCS
+    /// tmux;` passthrough sequence, and returns how many bytes of `incoming`
+    /// it consumed along with the outputs.
+    ///
+    /// The payload of such a sequence is replayed by `TerminalState`, and a
+    /// mode change inside it (S8C1T, DECANM) must govern the bytes after the
+    /// wrapper. Stopping lets the caller replay the payload, copy the mode
+    /// back into this parser, and push the rest: exactly what a read that
+    /// ends at the wrapper does. All of `incoming` is consumed when no
+    /// passthrough sequence completes in it.
+    pub(crate) fn push_through_tmux_passthrough(
+        &mut self,
+        incoming: &[u8],
+    ) -> (Vec<TerminalOutput>, usize) {
+        self.push_to_limit(incoming, PushLimit::ThroughTmuxPassthrough)
+    }
+
     // Inherently large: the ANSI parser state machine handles many escape sequence prefixes
     // (ESC, CSI, OSC, DCS, APC, SOS, PM, ST). Each branch is essential and tightly coupled to
     // the parser state. Splitting would fragment the state machine without reducing complexity.
     #[allow(clippy::too_many_lines)]
-    pub fn push(&mut self, incoming: &[u8]) -> Vec<TerminalOutput> {
+    fn push_to_limit(&mut self, incoming: &[u8], limit: PushLimit) -> (Vec<TerminalOutput>, usize) {
+        self.resume_pending_escape();
         // Take the pending buffer out temporarily
         let mut data_output = std::mem::take(&mut self.pending_data);
         let mut output = Vec::new();
+        let mut consumed = incoming.len();
 
-        for &b in incoming {
+        for (index, &b) in incoming.iter().enumerate() {
             self.seq_trace.push(b);
+            let emitted_from = output.len();
 
             match &mut self.inner {
                 ParserInner::Empty => {
@@ -459,6 +797,12 @@ impl FreminalAnsiParser {
                         ParserOutcome::Continue => (),
                         // we cannot hit this branch right now because the standard parser does not return ParserOutcome::InvalidParserFailure
                         ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
+                        // `b` is an ESC inside an ESC-intermediate sequence
+                        // (`ESC (`, `ESC SP`, ...): the sequence is abandoned
+                        // and the ESC starts a new one, as it does in CSI.
+                        ParserOutcome::FinishedAtEsc => {
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
                         ParserOutcome::Invalid(message) => {
                             // All invalid sequences emit `TerminalOutput::Invalid` here.
                             output.push(TerminalOutput::Invalid);
@@ -471,26 +815,65 @@ impl FreminalAnsiParser {
                         }
                     }
                 }
-                ParserInner::Dcs(parser) => match parser.dcs_parser_inner(b, &mut output) {
-                    ParserOutcome::Finished => {
-                        self.inner = ParserInner::Empty;
+                ParserInner::Dcs(parser) => {
+                    match if self.string_utf8.is_c1_st(b, self.s8c1t_mode) {
+                        parser.terminate_c1_st(&mut output)
+                    } else {
+                        parser.dcs_parser_inner(b, &mut output)
+                    } {
+                        ParserOutcome::Finished => {
+                            self.inner = ParserInner::Empty;
+                        }
+                        ParserOutcome::FinishedAtEsc
+                            if limit == PushLimit::ThroughTmuxPassthrough
+                                && output[emitted_from..].iter().any(is_tmux_passthrough) =>
+                        {
+                            // A bare ESC ended a `DCS tmux;` wrapper. Its payload
+                            // may change the parser's mode, so the ESC stays
+                            // pending and `b`, its second byte, is left for the
+                            // caller to feed again once the payload is applied
+                            // (`resume_pending_escape` picks the escape table).
+                            self.inner = ParserInner::Escape;
+                            self.string_utf8 = Utf8Tracker::NONE;
+                            consumed = index;
+                            for emitted in &output[emitted_from..] {
+                                apply_parser_mode_change(
+                                    emitted,
+                                    &mut self.vt52_mode,
+                                    &mut self.s8c1t_mode,
+                                );
+                            }
+                            break;
+                        }
+                        ParserOutcome::FinishedAtEsc => {
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
+                        ParserOutcome::Continue => (),
+                        ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
+                            output.push(TerminalOutput::Invalid);
+                            self.inner = ParserInner::Empty;
+                        }
                     }
-                    ParserOutcome::Continue => (),
-                    ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
-                        output.push(TerminalOutput::Invalid);
-                        self.inner = ParserInner::Empty;
+                }
+                ParserInner::Apc(parser) => {
+                    match if self.string_utf8.is_c1_st(b, self.s8c1t_mode) {
+                        parser.terminate_c1_st(&mut output)
+                    } else {
+                        parser.apc_parser_inner(b, &mut output)
+                    } {
+                        ParserOutcome::Finished => {
+                            self.inner = ParserInner::Empty;
+                        }
+                        ParserOutcome::FinishedAtEsc => {
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
+                        ParserOutcome::Continue => (),
+                        ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
+                            output.push(TerminalOutput::Invalid);
+                            self.inner = ParserInner::Empty;
+                        }
                     }
-                },
-                ParserInner::Apc(parser) => match parser.apc_parser_inner(b, &mut output) {
-                    ParserOutcome::Finished => {
-                        self.inner = ParserInner::Empty;
-                    }
-                    ParserOutcome::Continue => (),
-                    ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
-                        output.push(TerminalOutput::Invalid);
-                        self.inner = ParserInner::Empty;
-                    }
-                },
+                }
                 ParserInner::Csi(parser) => {
                     // ECMA-48 §5.5: C0 control characters received during a
                     // control sequence are executed immediately; the control
@@ -498,6 +881,7 @@ impl FreminalAnsiParser {
                     // ESC (0x1B) is special: it aborts the current CSI and
                     // starts a new escape sequence.
                     if b == 0x1B {
+                        self.recycle_csi_buffers();
                         self.inner = ParserInner::Escape;
                         continue;
                     }
@@ -509,6 +893,7 @@ impl FreminalAnsiParser {
 
                     match parser.ansiparser_inner_csi(b, &mut output) {
                         ParserOutcome::Finished => {
+                            self.recycle_csi_buffers();
                             self.inner = ParserInner::Empty;
                             if output.last() == Some(&TerminalOutput::Invalid) {
                                 debug!(
@@ -518,12 +903,19 @@ impl FreminalAnsiParser {
                             }
                         }
                         ParserOutcome::Continue => (),
+                        // CSI aborts on ESC above and never returns this;
+                        // handled for completeness rather than as a panic path.
+                        ParserOutcome::FinishedAtEsc => {
+                            self.recycle_csi_buffers();
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
                         ParserOutcome::InvalidParserFailure(message) => {
                             debug!(
                                 "Invalid ANSI sequence: {}; recent={}",
                                 message,
                                 self.current_trace_escaped()
                             );
+                            self.recycle_csi_buffers();
                             self.inner = ParserInner::Empty;
                             output.push(TerminalOutput::Invalid);
                         }
@@ -533,38 +925,48 @@ impl FreminalAnsiParser {
                                 message,
                                 self.current_trace_escaped()
                             );
+                            self.recycle_csi_buffers();
                             self.inner = ParserInner::Empty;
                             output.push(TerminalOutput::Invalid);
                         }
                     }
                 }
-                ParserInner::Osc(parser) => match parser.ansiparser_inner_osc(b, &mut output) {
-                    ParserOutcome::Finished => {
-                        self.inner = ParserInner::Empty;
-                        if output.last() == Some(&TerminalOutput::Invalid) {
+                ParserInner::Osc(parser) => {
+                    match if self.string_utf8.is_c1_st(b, self.s8c1t_mode) {
+                        parser.terminate_c1_st(&mut output)
+                    } else {
+                        parser.ansiparser_inner_osc(b, &mut output)
+                    } {
+                        ParserOutcome::Finished => {
+                            self.inner = ParserInner::Empty;
+                            if output.last() == Some(&TerminalOutput::Invalid) {
+                                debug!(
+                                    "Invalid ANSI sequence; recent={}",
+                                    self.current_trace_escaped()
+                                );
+                            }
+                        }
+                        ParserOutcome::FinishedAtEsc => {
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
+                        ParserOutcome::Continue => (),
+                        // we cannot hit this branch right now because the osc parser does not return ParserOutcome::InvalidParserFailure
+                        ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
+                        ParserOutcome::Invalid(message) => {
+                            // All invalid sequences emit `TerminalOutput::Invalid` here.
+                            output.push(TerminalOutput::Invalid);
                             debug!(
-                                "Invalid ANSI sequence; recent={}",
+                                "Invalid ANSI sequence: {}; recent={}",
+                                message,
                                 self.current_trace_escaped()
                             );
+                            self.inner = ParserInner::Empty;
                         }
                     }
-                    ParserOutcome::Continue => (),
-                    // we cannot hit this branch right now because the osc parser does not return ParserOutcome::InvalidParserFailure
-                    ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
-                    ParserOutcome::Invalid(message) => {
-                        // All invalid sequences emit `TerminalOutput::Invalid` here.
-                        output.push(TerminalOutput::Invalid);
-                        debug!(
-                            "Invalid ANSI sequence: {}; recent={}",
-                            message,
-                            self.current_trace_escaped()
-                        );
-                        self.inner = ParserInner::Empty;
-                    }
-                },
+                }
                 ParserInner::Vt52Escape => {
                     push_data_if_non_empty(&mut data_output, &mut output);
-                    self.handle_vt52_escape(b, &mut output);
+                    self.handle_vt52_escape(b, &mut data_output, &mut output);
                 }
                 ParserInner::Vt52CursorAddress(row_opt) => {
                     push_data_if_non_empty(&mut data_output, &mut output);
@@ -586,6 +988,35 @@ impl FreminalAnsiParser {
                         }
                     }
                 }
+                ParserInner::Vt52Ignore => {
+                    self.handle_vt52_ignore(b, &mut data_output, &mut output);
+                }
+                ParserInner::Vt52NonAscii { table, prefix } => {
+                    let (table, prefix) = (*table, *prefix);
+                    self.vt52_non_ascii_byte(table, prefix, b, &mut data_output, &mut output);
+                }
+            }
+
+            if !matches!(
+                self.inner,
+                ParserInner::Osc(_) | ParserInner::Dcs(_) | ParserInner::Apc(_)
+            ) {
+                self.string_utf8 = Utf8Tracker::NONE;
+            }
+
+            // A mode change (S8C1T/S7C1T, DECANM, RIS) must govern the next
+            // byte of this same read, not the next read, so the parser applies
+            // it here, as it emits the output.  The `continue` paths above
+            // emit only C0 / C1 controls, none of which change a mode.
+            let mut tmux_passthrough_ended = false;
+            for emitted in &output[emitted_from..] {
+                apply_parser_mode_change(emitted, &mut self.vt52_mode, &mut self.s8c1t_mode);
+                tmux_passthrough_ended |=
+                    limit == PushLimit::ThroughTmuxPassthrough && is_tmux_passthrough(emitted);
+            }
+            if tmux_passthrough_ended {
+                consumed = index + 1;
+                break;
             }
         }
 
@@ -597,15 +1028,132 @@ impl FreminalAnsiParser {
         // Put the buffer back into self (no allocations, same Vec reused)
         self.pending_data = data_output;
 
-        output
+        (output, consumed)
+    }
+
+    /// Handle a single byte inside an ignored VT52 `ESC (`-style sequence.
+    ///
+    /// Follows xterm's `vt52_ignore_table` (`VTPrsTbl.c:9890`): C0 controls
+    /// and DEL as in [`Self::vt52_control`], 0x20-0x2F swallowed with the
+    /// state unchanged, 0x30-0x7E swallowed and the state ends, and a
+    /// non-ASCII character as in [`Self::vt52_non_ascii_byte`].
+    fn handle_vt52_ignore(
+        &mut self,
+        b: u8,
+        data_output: &mut Vec<u8>,
+        output: &mut Vec<TerminalOutput>,
+    ) {
+        match b {
+            0x00..=0x1F | 0x7F => self.vt52_control(b, data_output, output),
+            0x20..=0x2F => {}
+            0x30..=0x7E => self.inner = ParserInner::Empty,
+            _ => self.vt52_non_ascii_byte(
+                Vt52Table::Ignore,
+                Utf8Prefix::new(),
+                b,
+                data_output,
+                output,
+            ),
+        }
+    }
+
+    /// A C0 control or DEL met while in a VT52 escape table.
+    ///
+    /// Identical in `vt52_esc_table` and `vt52_ignore_table`: ESC restarts the
+    /// escape (`CASE_ESC`, `charproc.c:3717`: `parsestate = vt52_esc_table`),
+    /// CAN and SUB abort to ground (`CASE_CAN`/`CASE_SUB`, 3618/3646:
+    /// `ResetState`), and every other control either executes (ENQ, BEL, BS,
+    /// HT, LF/VT/FF, CR: 3680-3770, none of which touches `parsestate`) or is
+    /// `CASE_IGNORE` (3614, also leaves `parsestate`), so the table in force
+    /// stays in force.
+    fn vt52_control(&mut self, b: u8, data_output: &mut Vec<u8>, output: &mut Vec<TerminalOutput>) {
+        match b {
+            0x1B => self.inner = ParserInner::Vt52Escape,
+            0x18 | 0x1A => self.inner = ParserInner::Empty,
+            _ => {
+                // Bytes without an executed meaning are dropped, not queued as text.
+                let _ = self.ansi_parser_inner_empty(b, data_output, output);
+            }
+        }
+    }
+
+    /// One byte of a non-ASCII character met while in a VT52 escape table.
+    ///
+    /// xterm decodes UTF-8 before it consults the table: a character above
+    /// U+00FF is `CASE_GROUND_STATE` (`charproc.c:3224-3235`, "wide
+    /// characters ... treated the same as printing characters"), so it is
+    /// swallowed and ends the sequence; U+0080-U+00FF index the table
+    /// (`CASE_IGNORE` in both VT52 tables), so they are swallowed and the
+    /// table stays in force.
+    ///
+    /// `prefix` holds the bytes of the character so far (empty for its first
+    /// byte). Character boundaries are those of `std::str::from_utf8`, the
+    /// same notion the text path's lossy decoding uses: a stray continuation
+    /// byte, an invalid lead byte or a sequence cut short by a non-continuation
+    /// byte is one replacement character (above U+00FF, so it ends the
+    /// sequence). The cutting byte is then handled as ordinary input.
+    fn vt52_non_ascii_byte(
+        &mut self,
+        table: Vt52Table,
+        mut prefix: Utf8Prefix,
+        b: u8,
+        data_output: &mut Vec<u8>,
+        output: &mut Vec<TerminalOutput>,
+    ) {
+        let is_continuation = (0x80..=0xBF).contains(&b);
+        if prefix.len > 0 && !is_continuation {
+            self.inner = ParserInner::Empty;
+            if self.ansi_parser_inner_empty(b, data_output, output).is_ok() {
+                data_output.push(b);
+            }
+            return;
+        }
+        if !prefix.push(b) {
+            self.inner = ParserInner::Empty;
+            return;
+        }
+        match std::str::from_utf8(prefix.as_slice()) {
+            Ok(text) => {
+                let above_latin1 = text.chars().next().is_some_and(|c| u32::from(c) > 0xFF);
+                self.inner = if above_latin1 {
+                    ParserInner::Empty
+                } else {
+                    table.parser_state()
+                };
+            }
+            Err(e) => match e.error_len() {
+                None => self.inner = ParserInner::Vt52NonAscii { table, prefix },
+                Some(invalid) => {
+                    // The invalid bytes are one replacement character; any
+                    // bytes after them are left for the text path to decode.
+                    if let Some(rest) = prefix.as_slice().get(invalid..) {
+                        data_output.extend_from_slice(rest);
+                    }
+                    self.inner = ParserInner::Empty;
+                }
+            },
+        }
     }
 
     /// Handle a single byte after ESC in VT52 mode.
     ///
     /// VT52 escape sequences are all single-byte commands except `ESC Y` (cursor
     /// address) which takes two additional parameter bytes.
-    fn handle_vt52_escape(&mut self, b: u8, output: &mut Vec<TerminalOutput>) {
+    fn handle_vt52_escape(
+        &mut self,
+        b: u8,
+        data_output: &mut Vec<u8>,
+        output: &mut Vec<TerminalOutput>,
+    ) {
         match b {
+            0x00..=0x1F | 0x7F => self.vt52_control(b, data_output, output),
+            0x80..=0xFF => self.vt52_non_ascii_byte(
+                Vt52Table::Escape,
+                Utf8Prefix::new(),
+                b,
+                data_output,
+                output,
+            ),
             // ESC A — Cursor up
             b'A' => {
                 output.push(TerminalOutput::SetCursorPosRel {
@@ -638,18 +1186,20 @@ impl FreminalAnsiParser {
                 });
                 self.inner = ParserInner::Empty;
             }
-            // ESC F — Enter graphics mode (DEC special graphics)
+            // ESC F — Enter graphics mode (DEC special graphics in G0)
             b'F' => {
-                output.push(TerminalOutput::DecSpecialGraphics(
-                    DecSpecialGraphics::Replace,
-                ));
+                output.push(TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::DecSpecialGraphics,
+                });
                 self.inner = ParserInner::Empty;
             }
-            // ESC G — Exit graphics mode
+            // ESC G — Exit graphics mode (ASCII in G0)
             b'G' => {
-                output.push(TerminalOutput::DecSpecialGraphics(
-                    DecSpecialGraphics::DontReplace,
-                ));
+                output.push(TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::Ascii,
+                });
                 self.inner = ParserInner::Empty;
             }
             // ESC H — Cursor home (row 1, col 1)
@@ -696,25 +1246,31 @@ impl FreminalAnsiParser {
             }
             // ESC < — Exit VT52 mode, return to ANSI mode
             //
-            // The parser's `vt52_mode` flag must be flipped immediately — not
-            // deferred to `sync_mode_flags()` — because any bytes remaining in
-            // the current `push()` buffer must be routed through the ANSI
-            // parser, not the VT52 parser.  vttest issues `ESC <` followed by
+            // `push()` flips `vt52_mode` as soon as this output is emitted
+            // (see `apply_parser_mode_change`), because any bytes remaining in
+            // the current buffer must be routed through the ANSI parser, not
+            // the VT52 parser.  vttest issues `ESC <` followed by
             // `ESC P … ESC \` (DECRQSS) in a single PTY read; without the
             // immediate flip the `ESC P` would be routed to `handle_vt52_escape`
             // which does not recognise `P` and the DCS payload would leak to the
             // display as literal text.
             b'<' => {
-                self.vt52_mode = Decanm::Ansi;
                 output.push(TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)));
                 self.inner = ParserInner::Empty;
             }
+            // 0x20-0x2F (SP ! " # $ % & ' ( ) * + , - . /) — `CASE_VT52_IGNORE`:
+            // VT52 has no sequence here, and the byte that follows belongs to
+            // it and is swallowed.
+            0x20..=0x2F => {
+                self.inner = ParserInner::Vt52Ignore;
+            }
+            // Every other final is `CASE_GROUND_STATE` in `vt52_esc_table`:
+            // silently ignored, e.g. ESC N/O/n/o/|/}/~ (the ANSI-only shifts).
             _ => {
-                warn!(
-                    "Unknown VT52 escape: 0x{b:02x}; raw sequence: \"{}\"",
+                debug!(
+                    "Ignoring VT52 escape: 0x{b:02x}; raw sequence: \"{}\"",
                     self.current_trace_escaped()
                 );
-                output.push(TerminalOutput::Invalid);
                 self.inner = ParserInner::Empty;
             }
         }
@@ -885,9 +1441,13 @@ mod tests {
             ClearScrollbackandDisplay,
             ClearLineForwards,
             ClearLineBackwards,
-            DecSpecialGraphics(
-                freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace,
-            ),
+            DesignateCharset {
+                slot: CharsetSlot::G1,
+                set: CharacterSet::DecSpecialGraphics,
+            },
+            InvokeGl(CharsetSlot::G1),
+            InvokeGr(CharsetSlot::G2),
+            SingleShift(CharsetSlot::G3),
             CursorVisualStyle(freminal_common::cursor::CursorVisualStyle::BlockCursorSteady),
             CursorVisualStyleDefault,
             WindowManipulation(
@@ -910,29 +1470,6 @@ mod tests {
             ScreenAlignmentTest,
             CharsetDefault,
             CharsetUTF8,
-            CharsetG0,
-            CharsetG1,
-            CharsetG1AsGR,
-            CharsetG2,
-            CharsetG2AsGR,
-            CharsetG2AsGL,
-            CharsetG3,
-            CharsetG3AsGR,
-            CharsetG3AsGL,
-            DecSpecial,
-            CharsetUK,
-            CharsetUS,
-            CharsetUSASCII,
-            CharsetDutch,
-            CharsetFinnish,
-            CharsetFrench,
-            CharsetFrenchCanadian,
-            CharsetGerman,
-            CharsetItalian,
-            CharsetNorwegianDanish,
-            CharsetSpanish,
-            CharsetSwedish,
-            CharsetSwiss,
             SaveCursor,
             RestoreCursor,
             CursorToLowerLeftCorner,
@@ -1264,9 +1801,10 @@ mod tests {
         let result = p.push(b"\x1bF");
         assert_eq!(
             result,
-            vec![TerminalOutput::DecSpecialGraphics(
-                freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace
-            )]
+            vec![TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G0,
+                set: CharacterSet::DecSpecialGraphics,
+            }]
         );
     }
 
@@ -1276,9 +1814,180 @@ mod tests {
         let result = p.push(b"\x1bG");
         assert_eq!(
             result,
-            vec![TerminalOutput::DecSpecialGraphics(
-                freminal_common::buffer_states::line_draw::DecSpecialGraphics::DontReplace
-            )]
+            vec![TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G0,
+                set: CharacterSet::Ascii,
+            }]
+        );
+    }
+
+    #[test]
+    fn vt52_so_and_si_are_ignored() {
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x0e"), vec![]);
+        assert_eq!(p.push(b"\x0f"), vec![]);
+        assert_eq!(
+            p.push(b"a\x0eb\x0fc"),
+            vec![TerminalOutput::Data(b"abc".to_vec())]
+        );
+    }
+
+    #[test]
+    fn vt52_so_si_ignored_but_esc_f_and_esc_g_still_emit() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x0e\x1bF\x0f\x1bG"),
+            vec![
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::DecSpecialGraphics,
+                },
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::Ascii,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn vt52_ignored_introducers_swallow_the_next_printable_byte() {
+        for intro in *b"()*+ $" {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, intro, b'0', b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{intro:02x} 0 A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_ignore_state_swallows_0x20_to_0x2f_and_del_then_ends_on_0x30_to_0x7e() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b$ !/\x7f0A"),
+            vec![TerminalOutput::Data(b"A".to_vec())]
+        );
+        assert_eq!(p.inner, ParserInner::Empty);
+
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b(~A"),
+            vec![TerminalOutput::Data(b"A".to_vec())]
+        );
+    }
+
+    #[test]
+    fn vt52_ignore_state_executes_c0_controls_and_stays() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b(\r\n\x08\x07\t0A"),
+            vec![
+                TerminalOutput::CarriageReturn,
+                TerminalOutput::Newline,
+                TerminalOutput::Backspace,
+                TerminalOutput::Bell,
+                TerminalOutput::Tab,
+                TerminalOutput::Data(b"A".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn vt52_ignore_state_drops_unassigned_controls_and_so_si() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b(\x00\x01\x0e\x0f\x1f0A"),
+            vec![TerminalOutput::Data(b"A".to_vec())]
+        );
+    }
+
+    #[test]
+    fn vt52_ignore_state_cancelled_by_can_and_sub() {
+        for cancel in [0x18u8, 0x1A] {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b'(', cancel, b'0']),
+                vec![TerminalOutput::Data(b"0".to_vec())],
+                "cancel 0x{cancel:02x}"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_ignore_state_esc_restarts_a_vt52_escape() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x1b(\x1bA"),
+            vec![TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1),
+            }]
+        );
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn vt52_exit_inside_ignore_state_is_an_escape_restart_not_swallowed() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1b(\x1b<A");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)),
+                TerminalOutput::Data(b"A".to_vec()),
+            ]
+        );
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn vt52_ignore_state_survives_a_chunk_boundary() {
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x1b("), vec![]);
+        assert_eq!(p.inner, ParserInner::Vt52Ignore);
+        assert_eq!(p.push(b"0"), vec![]);
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert_eq!(p.push(b"A"), vec![TerminalOutput::Data(b"A".to_vec())]);
+
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x1b"), vec![]);
+        assert_eq!(p.push(b"$"), vec![]);
+        assert_eq!(p.push(b" "), vec![]);
+        assert_eq!(p.inner, ParserInner::Vt52Ignore);
+        assert_eq!(p.push(b"0A"), vec![TerminalOutput::Data(b"A".to_vec())]);
+    }
+
+    #[test]
+    fn vt52_single_and_locking_shift_escapes_are_silent() {
+        for b in *b"NOno|}~" {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b, b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{b:02x}"
+            );
+            assert!(!p.push(&[0x1B, b]).contains(&TerminalOutput::Invalid));
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_ignore_introducers_in_ansi_mode_keep_their_ansi_meaning() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(
+            p.push(b"\x1b(0A"),
+            vec![
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::DecSpecialGraphics,
+                },
+                TerminalOutput::Data(b"A".to_vec()),
+            ]
         );
     }
 
@@ -1400,11 +2109,209 @@ mod tests {
         );
     }
 
+    /// Finals xterm's `vt52_esc_table` handles; every other byte in
+    /// 0x30-0x7E is `CASE_GROUND_STATE`.
+    const VT52_HANDLED_FINALS: &[u8] = b"ABCDFGHIJKYZ=><";
+
     #[test]
-    fn vt52_unknown_escape_produces_invalid() {
+    fn vt52_ground_state_finals_are_silent() {
+        for b in 0x30u8..=0x7E {
+            if VT52_HANDLED_FINALS.contains(&b) {
+                continue;
+            }
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b, b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{b:02x} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty, "ESC 0x{b:02x}");
+        }
+    }
+
+    #[test]
+    fn vt52_every_byte_0x20_to_0x2f_after_esc_swallows_the_next() {
+        for b in 0x20u8..=0x2F {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b, b'0', b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{b:02x} 0 A"
+            );
+        }
+    }
+
+    #[test]
+    fn vt52_escape_executes_controls_and_stays_in_the_escape() {
+        let up = TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(-1),
+        };
+        let cases: [(u8, TerminalOutput); 8] = [
+            (b'\r', TerminalOutput::CarriageReturn),
+            (b'\n', TerminalOutput::Newline),
+            (0x0B, TerminalOutput::Newline),
+            (0x0C, TerminalOutput::Newline),
+            (0x08, TerminalOutput::Backspace),
+            (0x09, TerminalOutput::Tab),
+            (0x07, TerminalOutput::Bell),
+            (0x05, TerminalOutput::Enq),
+        ];
+        for (control, expected) in cases {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, control, b'A']),
+                vec![expected, up.clone()],
+                "ESC 0x{control:02x} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_escape_drops_ignored_controls_and_del_and_stays() {
+        let up = TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(-1),
+        };
+        for control in [0x00u8, 0x01, 0x0E, 0x0F, 0x10, 0x1F, 0x7F] {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, control, b'A']),
+                vec![up.clone()],
+                "ESC 0x{control:02x} A"
+            );
+        }
+    }
+
+    #[test]
+    fn vt52_escape_restarts_on_esc_and_aborts_on_can_and_sub() {
         let mut p = vt52_parser();
-        let result = p.push(b"\x1bX");
-        assert_eq!(result, vec![TerminalOutput::Invalid]);
+        assert_eq!(
+            p.push(b"\x1b\x1bA"),
+            vec![TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1),
+            }]
+        );
+        for cancel in [0x18u8, 0x1A] {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, cancel, b'A']),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC 0x{cancel:02x} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_escape_control_split_across_a_chunk_boundary() {
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x1b"), vec![]);
+        assert_eq!(p.push(b"\r"), vec![TerminalOutput::CarriageReturn]);
+        assert_eq!(p.inner, ParserInner::Vt52Escape);
+    }
+
+    #[test]
+    fn vt52_non_ascii_above_latin1_ends_the_ignore_state() {
+        for ch in ["\u{4e16}", "\u{1f600}", "\u{100}"] {
+            let mut p = vt52_parser();
+            let mut input = b"\x1b(".to_vec();
+            input.extend_from_slice(ch.as_bytes());
+            input.push(b'A');
+            assert_eq!(
+                p.push(&input),
+                vec![TerminalOutput::Data(b"A".to_vec())],
+                "ESC ( {ch:?} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn vt52_latin1_character_is_ignored_and_the_ignore_state_stays() {
+        // U+00E9 indexes xterm's table (CASE_IGNORE); only the ASCII `A` ends it.
+        let mut p = vt52_parser();
+        assert_eq!(p.push("\x1b(\u{e9}A".as_bytes()), vec![]);
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert_eq!(p.push(b"A"), vec![TerminalOutput::Data(b"A".to_vec())]);
+
+        let mut p = vt52_parser();
+        assert_eq!(p.push("\x1b(\u{9f}".as_bytes()), vec![]);
+        assert_eq!(p.inner, ParserInner::Vt52Ignore);
+    }
+
+    #[test]
+    fn vt52_non_ascii_in_the_escape_table() {
+        let up = TerminalOutput::SetCursorPosRel {
+            x: None,
+            y: Some(-1),
+        };
+        // Above U+00FF: ground, silently.
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push("\x1b\u{4e16}A".as_bytes()),
+            vec![TerminalOutput::Data(b"A".to_vec())]
+        );
+        // U+0080-U+00FF: ignored, still after the ESC.
+        let mut p = vt52_parser();
+        assert_eq!(p.push("\x1b\u{e9}A".as_bytes()), vec![up]);
+    }
+
+    #[test]
+    fn vt52_non_ascii_character_split_across_chunks() {
+        let bytes = "\u{4e16}".as_bytes();
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x1b("), vec![]);
+        assert_eq!(p.push(&bytes[..1]), vec![]);
+        assert!(matches!(p.inner, ParserInner::Vt52NonAscii { .. }));
+        assert_eq!(p.push(&bytes[1..2]), vec![]);
+        assert!(matches!(p.inner, ParserInner::Vt52NonAscii { .. }));
+        assert_eq!(p.push(&bytes[2..]), vec![]);
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert_eq!(p.push(b"A"), vec![TerminalOutput::Data(b"A".to_vec())]);
+
+        // And in the escape table, with a Latin-1 character (stays in escape).
+        let latin = "\u{e9}".as_bytes();
+        let mut p = vt52_parser();
+        assert_eq!(p.push(&[0x1B, latin[0]]), vec![]);
+        assert!(matches!(p.inner, ParserInner::Vt52NonAscii { .. }));
+        assert_eq!(p.push(&latin[1..]), vec![]);
+        assert_eq!(p.inner, ParserInner::Vt52Escape);
+    }
+
+    #[test]
+    fn vt52_invalid_utf8_is_one_replacement_character_and_ends_the_state() {
+        let data = |bytes: &[u8]| vec![TerminalOutput::Data(bytes.to_vec())];
+        // Stray continuation byte, invalid lead bytes.
+        for bad in [0x80u8, 0xBF, 0xC0, 0xC1, 0xF5, 0xFF] {
+            let mut p = vt52_parser();
+            assert_eq!(
+                p.push(&[0x1B, b'(', bad, b'A']),
+                data(b"A"),
+                "ESC ( 0x{bad:02x} A"
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+        // Truncated sequence cut short by an ASCII byte: the byte is ordinary input.
+        let mut p = vt52_parser();
+        assert_eq!(p.push(&[0x1B, b'(', 0xE4, 0xB8, b'A']), data(b"A"));
+        assert_eq!(p.inner, ParserInner::Empty);
+        // ... including a control, which then executes normally.
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(&[0x1B, b'(', 0xE4, b'\r']),
+            vec![TerminalOutput::CarriageReturn]
+        );
+        assert_eq!(p.inner, ParserInner::Empty);
+        // A bad second byte: the lead is the replacement character and the
+        // byte after it is left for the text path.
+        let mut p = vt52_parser();
+        assert_eq!(p.push(&[0x1B, b'(', 0xE0, 0x80, b'A']), data(b"\x80A"));
+        // The same in the escape table.
+        let mut p = vt52_parser();
+        assert_eq!(p.push(&[0x1B, 0xFF, b'A']), data(b"A"));
     }
 
     #[test]
@@ -1526,17 +2433,178 @@ mod tests {
         assert_eq!(p.vt52_mode, Decanm::Ansi);
     }
 
+    // -------------------------------------------------------------------------
+    // Parser mode changes take effect within the same push() (Task 147.2)
+    // -------------------------------------------------------------------------
+
+    /// `ESC SP G` then `0x9B 6 n` in one `push()`: the 0x9B is an 8-bit CSI.
+    /// Before 147.2 the parser switched mode only when `TerminalState` applied
+    /// the output, so the 0x9B was parsed as text.
+    #[test]
+    fn s8c1t_applies_to_the_rest_of_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b G\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::EightBitControl,
+                TerminalOutput::CursorReport
+            ]
+        );
+        assert_eq!(p.s8c1t_mode, S8c1t::EightBit);
+    }
+
+    /// `ESC SP F` then `0x9B 6 n` in one `push()`: the 0x9B is no longer a CSI
+    /// introducer, so it is plain text, as in any 7-bit read.
+    #[test]
+    fn s7c1t_applies_to_the_rest_of_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let result = p.push(b"\x1b F\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::SevenBitControl,
+                TerminalOutput::Data(b"\x9b6n".to_vec()),
+            ]
+        );
+        assert_eq!(p.s8c1t_mode, S8c1t::SevenBit);
+    }
+
+    /// With the parser already in 8-bit mode, RIS then `0x9B 6 n` in one
+    /// `push()`: RIS returns the parser to 7-bit at its position, so the 0x9B
+    /// is text.  Before 147.2 the parser stayed 8-bit for the whole read and
+    /// executed the CSI.
+    #[test]
+    fn ris_resets_parser_modes_within_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let result = p.push(b"\x1bc\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::ResetDevice,
+                TerminalOutput::Data(b"\x9b6n".to_vec()),
+            ]
+        );
+        assert_eq!(p.s8c1t_mode, S8c1t::SevenBit);
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
+    }
+
+    /// `TerminalState` folds the outputs of a tmux payload through
+    /// `apply_parser_mode_change` over its own copy of the modes: RIS must
+    /// reset that copy's DECANM too, so it cannot stay in VT52 after the
+    /// handler has returned to ANSI.
+    #[test]
+    fn ris_resets_decanm_and_s8c1t_in_a_tracked_copy_of_the_modes() {
+        let mut vt52 = Decanm::Vt52;
+        let mut s8c1t = S8c1t::EightBit;
+        apply_parser_mode_change(&TerminalOutput::ResetDevice, &mut vt52, &mut s8c1t);
+        assert_eq!(vt52, Decanm::Ansi);
+        assert_eq!(s8c1t, S8c1t::SevenBit);
+    }
+
+    /// S8C1T, RIS, then S8C1T again in one `push()`: the mode changes apply in
+    /// order, so the final state is 8-bit and the trailing `0x9B` is a CSI.
+    #[test]
+    fn s8c1t_ris_s8c1t_apply_in_order_within_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b G\x1bc\x1b G\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::EightBitControl,
+                TerminalOutput::ResetDevice,
+                TerminalOutput::EightBitControl,
+                TerminalOutput::CursorReport,
+            ]
+        );
+    }
+
+    /// Leaving VT52 with `ESC <` and then RIS in one `push()`: the RIS is
+    /// parsed as RIS (the ANSI escape state is back) and returns the parser to
+    /// 7-bit controls, so the `0x9B` after it is text. RIS cannot be sent in
+    /// VT52 mode itself (`ESC c` is ignored there), so the parser's own DECANM
+    /// is never something RIS has to undo.
+    #[test]
+    fn ris_after_leaving_vt52_resets_s8c1t_within_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let _ = p.push(b"\x1b[?2l");
+        assert_eq!(p.vt52_mode, Decanm::Vt52);
+        let result = p.push(b"\x1b<\x1bc\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)),
+                TerminalOutput::ResetDevice,
+                TerminalOutput::Data(b"\x9b6n".to_vec()),
+            ]
+        );
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
+        assert_eq!(p.s8c1t_mode, S8c1t::SevenBit);
+    }
+
+    /// In VT52 mode `ESC c` is not RIS: it is ignored, and S8C1T is untouched.
+    #[test]
+    fn esc_c_in_vt52_mode_is_not_a_reset() {
+        let mut p = vt52_parser();
+        p.s8c1t_mode = S8c1t::EightBit;
+        assert_eq!(p.push(b"\x1bc"), vec![]);
+        assert_eq!(p.vt52_mode, Decanm::Vt52);
+        assert_eq!(p.s8c1t_mode, S8c1t::EightBit);
+    }
+
+    /// `CSI ? 2 l` then a VT52 `ESC A` in one `push()`: the `ESC A` is VT52
+    /// cursor-up, not an (invalid) ANSI escape.
+    #[test]
+    fn decanm_reset_applies_to_the_rest_of_the_same_push() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b[?2l\x1bA");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52)),
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                },
+            ]
+        );
+        assert_eq!(p.vt52_mode, Decanm::Vt52);
+    }
+
+    /// The reverse: `CSI ? 2 h` is not reachable from VT52 mode (CSI is not
+    /// recognised there), so `ESC <` is the way back, and the very next byte
+    /// of the same push is ANSI.
+    #[test]
+    fn vt52_exit_applies_to_the_rest_of_the_same_push() {
+        let mut p = vt52_parser();
+        let result = p.push(b"\x1b<\x1b[1A");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)),
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                },
+            ]
+        );
+    }
+
     #[test]
     fn esc_plus_0_designates_g3_as_dec_special_graphics() {
-        // ESC + 0 should designate the G3 character set as DEC Special Graphics,
-        // producing the same output as ESC ( 0 does for G0.
+        // ESC + 0 designates DEC Special Graphics into G3 and into no other
+        // slot: it must not behave like ESC ( 0.
         let mut parser = FreminalAnsiParser::new();
         let result = parser.push(b"\x1b+0");
         assert_eq!(
             result,
-            vec![TerminalOutput::DecSpecialGraphics(
-                freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace
-            )]
+            vec![TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G3,
+                set: CharacterSet::DecSpecialGraphics,
+            }]
         );
     }
 
@@ -1658,11 +2726,11 @@ mod tests {
         );
         assert_eq!(p.inner, ParserInner::Empty);
 
-        // 0x8E (SS2) also falls through to the catch-all
-        let result2 = p.push(b"\x8E");
+        // PM (0x9E) has no handler either and is ignored.
+        let result2 = p.push(b"\x9E");
         assert!(
             result2.is_empty(),
-            "SS2 (0x8E) should be silently ignored: {result2:?}"
+            "PM (0x9E) should be silently ignored: {result2:?}"
         );
     }
 
@@ -1716,8 +2784,8 @@ mod tests {
         assert!(
             result
                 .iter()
-                .any(|o| matches!(o, TerminalOutput::DecSpecialGraphics(_))),
-            "ESC ( 0 should produce DecSpecialGraphics: {result:?}"
+                .any(|o| matches!(o, TerminalOutput::DesignateCharset { .. })),
+            "ESC ( 0 should produce DesignateCharset: {result:?}"
         );
         assert_eq!(p.inner, ParserInner::Empty);
     }
@@ -1725,13 +2793,134 @@ mod tests {
     #[test]
     fn standard_parser_invalid_charset_designator() {
         let mut p = FreminalAnsiParser::new();
-        // ESC ( followed by an unknown charset designator 'Z'
-        // This goes through StandardParser Continue on '(' then Invalid on 'Z'
-        let result = p.push(b"\x1b(Z");
-        // Should produce Invalid output
+        // ESC ( followed by a byte that cannot be a designator final
+        let result = p.push(b"\x1b(\x01");
         let has_invalid = result.iter().any(|o| matches!(o, TerminalOutput::Invalid));
-        assert!(has_invalid, "ESC ( Z should produce Invalid: {result:?}");
+        assert!(has_invalid, "ESC ( 0x01 should produce Invalid: {result:?}");
         assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn unknown_charset_designator_final_is_ignored() {
+        let mut p = FreminalAnsiParser::new();
+        // 'Z' is a well-formed final for a set freminal does not implement: the
+        // sequence is consumed and emits nothing, not even `Invalid`.
+        let result = p.push(b"\x1b(Z");
+        assert!(result.is_empty(), "ESC ( Z must emit nothing: {result:?}");
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    // ── Character sets: SO/SI, single shifts ────────────────────────────────
+
+    #[test]
+    fn so_and_si_invoke_g1_and_g0_after_flushing_data() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"a\x0eb\x0fc");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Data(b"a".to_vec()),
+                TerminalOutput::InvokeGl(CharsetSlot::G1),
+                TerminalOutput::Data(b"b".to_vec()),
+                TerminalOutput::InvokeGl(CharsetSlot::G0),
+                TerminalOutput::Data(b"c".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn so_inside_a_csi_executes_inline_and_the_csi_continues() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b[1\x0eA");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::InvokeGl(CharsetSlot::G1),
+                TerminalOutput::SetCursorPosRel {
+                    x: None,
+                    y: Some(-1)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn seven_bit_ss2_and_ss3_emit_single_shifts() {
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"a\x1bNb\x1bOc");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Data(b"a".to_vec()),
+                TerminalOutput::SingleShift(CharsetSlot::G2),
+                TerminalOutput::Data(b"b".to_vec()),
+                TerminalOutput::SingleShift(CharsetSlot::G3),
+                TerminalOutput::Data(b"c".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn eight_bit_ss2_and_ss3_emit_single_shifts_under_s8c1t() {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let result = p.push(b"a\x8eb\x8fc");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Data(b"a".to_vec()),
+                TerminalOutput::SingleShift(CharsetSlot::G2),
+                TerminalOutput::Data(b"b".to_vec()),
+                TerminalOutput::SingleShift(CharsetSlot::G3),
+                TerminalOutput::Data(b"c".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn eight_bit_ss2_and_ss3_are_not_recognised_under_s7c1t() {
+        // Without S8C1T the bytes are not C1 controls: no single shift.
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x8e\x8f");
+        assert!(
+            !result
+                .iter()
+                .any(|o| matches!(o, TerminalOutput::SingleShift(_))),
+            "SS2/SS3 bytes must not shift under S7C1T: {result:?}"
+        );
+    }
+
+    #[test]
+    fn charset_outputs_do_not_change_a_parser_mode() {
+        // `apply_parser_mode_change` must treat the charset outputs as inert.
+        for output in [
+            TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G0,
+                set: CharacterSet::DecSpecialGraphics,
+            },
+            TerminalOutput::InvokeGl(CharsetSlot::G1),
+            TerminalOutput::InvokeGr(CharsetSlot::G2),
+            TerminalOutput::SingleShift(CharsetSlot::G3),
+        ] {
+            let mut vt52 = Decanm::Vt52;
+            let mut s8c1t = S8c1t::EightBit;
+            apply_parser_mode_change(&output, &mut vt52, &mut s8c1t);
+            assert_eq!(vt52, Decanm::Vt52, "{output}");
+            assert_eq!(s8c1t, S8c1t::EightBit, "{output}");
+        }
+    }
+
+    #[test]
+    fn bare_esc_ending_a_string_then_n_is_single_shift_two() {
+        // The bare ESC ends the OSC (`FinishedAtEsc`), and the byte after it is
+        // the second byte of a new escape sequence: here ESC N.
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b]0;t\x1bNq");
+        assert!(
+            result.contains(&TerminalOutput::SingleShift(CharsetSlot::G2)),
+            "ESC N after a bare-ESC-terminated OSC must be SS2: {result:?}"
+        );
+        assert_eq!(result.last(), Some(&TerminalOutput::Data(b"q".to_vec())));
     }
 
     // ── DCS parser Invalid path (lines 439-442) ────────────────────────────
@@ -1986,5 +3175,709 @@ mod tests {
         assert!(std::mem::size_of::<StandardParser>() < MAX_BYTES);
         assert!(std::mem::size_of::<DcsParser>() < MAX_BYTES);
         assert!(std::mem::size_of::<ApcParser>() < MAX_BYTES);
+    }
+
+    // ── CSI buffer reuse (147.15) ───────────────────────────────────────────
+
+    /// Assert the parser holds no stale CSI bytes and a bounded spare capacity.
+    fn assert_csi_buffers_clean(p: &FreminalAnsiParser) {
+        assert!(p.csi_buffers.is_empty(), "stale bytes: {:?}", p.csi_buffers);
+        assert!(p.csi_buffers.max_capacity() <= crate::ansi_components::csi::RETAINED_CAPACITY_MAX);
+    }
+
+    /// What a brand-new parser makes of `bytes`.
+    fn fresh_output(bytes: &[u8]) -> Vec<TerminalOutput> {
+        FreminalAnsiParser::new().push(bytes)
+    }
+
+    #[test]
+    fn csi_after_long_csi_has_no_stale_params_or_intermediates() {
+        let mut p = FreminalAnsiParser::new();
+        // A long sequence with intermediates and many parameters.
+        let mut long = b"\x1b[".to_vec();
+        for i in 0..200 {
+            long.extend_from_slice(format!("{i};").as_bytes());
+        }
+        long.extend_from_slice(b"1 q");
+        let _ = p.push(&long);
+        assert_csi_buffers_clean(&p);
+
+        let result = p.push(b"\x1b[5;10H");
+        assert_eq!(result, fresh_output(b"\x1b[5;10H"));
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(10),
+                y: Some(5)
+            }]
+        );
+        assert_csi_buffers_clean(&p);
+    }
+
+    #[test]
+    fn csi_buffer_capacity_is_bounded_after_a_huge_sequence() {
+        let mut p = FreminalAnsiParser::new();
+        let mut huge = b"\x1b[".to_vec();
+        huge.extend(std::iter::repeat_n(b'1', 200_000));
+        huge.push(b'm');
+        let _ = p.push(&huge);
+        assert_csi_buffers_clean(&p);
+
+        // A huge sequence that is aborted instead of finished.
+        let mut huge_aborted = b"\x1b[".to_vec();
+        huge_aborted.extend(std::iter::repeat_n(b'1', 200_000));
+        let _ = p.push(&huge_aborted);
+        let _ = p.push(b"\x1b");
+        assert_csi_buffers_clean(&p);
+
+        assert_eq!(p.push(b"[2J"), fresh_output(b"\x1b[2J"));
+    }
+
+    #[test]
+    fn csi_buffers_are_clean_after_every_exit_path() {
+        let follow_up = b"\x1b[3;4H";
+        let expected = fresh_output(follow_up);
+        let prefix_cases: [(&str, &[u8]); 5] = [
+            ("finished", b"\x1b[1;2;3;4m"),
+            ("invalid byte", b"\x1b[1;2\x7f"),
+            ("abort on ESC", b"\x1b[1;2;3 \x1b"),
+            ("abort on ESC into new CSI", b"\x1b[1;2;3\x1b[9"),
+            ("unhandled final", b"\x1b[1;2;3 W"),
+        ];
+        for (name, prefix) in prefix_cases {
+            let mut p = FreminalAnsiParser::new();
+            let _ = p.push(prefix);
+            // The "new CSI" case is mid-sequence; finish it harmlessly.
+            if matches!(p.inner, ParserInner::Csi(_)) {
+                let _ = p.push(b"m");
+            }
+            if matches!(p.inner, ParserInner::Escape) {
+                let _ = p.push(b"[0m");
+            }
+            assert_csi_buffers_clean(&p);
+            assert_eq!(p.push(follow_up), expected, "{name}");
+            assert_csi_buffers_clean(&p);
+        }
+    }
+
+    #[test]
+    fn csi_buffers_are_clean_after_c1_csi_and_vt52_and_ris() {
+        let follow_up = b"\x1b[3;4H";
+        let expected = fresh_output(follow_up);
+
+        // 8-bit CSI, then a sequence that restarts through ESC.
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let _ = p.push(b"\x9b1;2;3");
+        let _ = p.push(b"\x1bc"); // ESC c: RIS aborts the open CSI.
+        assert_csi_buffers_clean(&p);
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
+        assert_eq!(p.s8c1t_mode, S8c1t::SevenBit);
+        assert_eq!(p.push(follow_up), expected);
+
+        // CSI, then VT52 mode in effect: the CSI is gone, VT52 `ESC H` works.
+        let mut p = FreminalAnsiParser::new();
+        let _ = p.push(b"\x1b[?2l"); // DECANM reset: enter VT52.
+        assert_eq!(p.vt52_mode, Decanm::Vt52);
+        assert_csi_buffers_clean(&p);
+        assert_eq!(
+            p.push(b"\x1bH"),
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(1),
+                y: Some(1)
+            }]
+        );
+        let _ = p.push(b"\x1b<"); // back to ANSI
+        assert_eq!(p.push(follow_up), expected);
+        assert_csi_buffers_clean(&p);
+    }
+
+    #[test]
+    fn csi_split_across_pushes_still_reuses_buffers_correctly() {
+        let mut p = FreminalAnsiParser::new();
+        let _ = p.push(b"\x1b[1;2");
+        let _ = p.push(b";3m\x1b[5");
+        let result = p.push(b";10H");
+        assert_eq!(
+            result,
+            vec![TerminalOutput::SetCursorPos {
+                x: Some(10),
+                y: Some(5)
+            }]
+        );
+        assert_csi_buffers_clean(&p);
+    }
+
+    /// `assert_csi_buffers_clean` alone cannot tell a parser that keeps its
+    /// buffers from one that drops them (a dropped set is empty, too). A short
+    /// CSI grows the buffers, so spare capacity after it proves they came back.
+    fn assert_csi_buffers_retained(p: &FreminalAnsiParser, what: &str) {
+        assert_csi_buffers_clean(p);
+        assert!(
+            p.csi_buffers.max_capacity() > 0,
+            "{what}: the parser dropped its CSI buffers instead of keeping them"
+        );
+    }
+
+    #[test]
+    fn a_short_csi_leaves_spare_capacity_on_every_exit_path() {
+        let cases: [(&str, &[u8]); 5] = [
+            ("finished", b"\x1b[1;2;3m"),
+            ("finished with an intermediate", b"\x1b[1;2 q"),
+            ("invalid byte", b"\x1b[1;2\x7f"),
+            ("abort on ESC", b"\x1b[1;2;3\x1b"),
+            ("unhandled final", b"\x1b[1;2;3 W"),
+        ];
+        for (name, bytes) in cases {
+            let mut p = FreminalAnsiParser::new();
+            assert_eq!(p.csi_buffers.max_capacity(), 0, "{name}: starts empty");
+            let _ = p.push(bytes);
+            if matches!(p.inner, ParserInner::Escape) {
+                let _ = p.push(b"c");
+            }
+            assert_csi_buffers_retained(&p, name);
+        }
+    }
+
+    #[test]
+    fn the_buffer_a_short_csi_grew_is_reused_by_the_next_one() {
+        let mut p = FreminalAnsiParser::new();
+        let _ = p.push(b"\x1b[1;2;3;4;5;6;7;8;9m");
+        let grown = p.csi_buffers.max_capacity();
+        assert!(grown > 0);
+        let _ = p.push(b"\x1b[1;2m");
+        assert_eq!(p.csi_buffers.max_capacity(), grown);
+    }
+
+    // ── CSI byte cap (147 PR review R21) ────────────────────────────────────
+
+    use crate::ansi_components::csi::MAX_CSI_BYTES;
+
+    /// The open CSI sub-parser, if the parser is in the CSI state.
+    fn open_csi(p: &FreminalAnsiParser) -> &AnsiCsiParser {
+        let ParserInner::Csi(csi) = &p.inner else {
+            panic!("expected an open CSI, got {:?}", p.inner);
+        };
+        csi
+    }
+
+    #[test]
+    fn an_open_csi_stops_growing_its_buffers_at_the_cap() {
+        let mut p = FreminalAnsiParser::new();
+        let mut input = b"\x1b[".to_vec();
+        input.extend(std::iter::repeat_n(b'1', 8 * MAX_CSI_BYTES));
+        assert_eq!(p.push(&input), vec![]);
+        let csi = open_csi(&p);
+        assert!(csi.sequence.len() <= MAX_CSI_BYTES);
+        assert!(csi.params.len() <= MAX_CSI_BYTES);
+        assert_eq!(csi.sequence.capacity(), 0, "buffers are released");
+        assert_eq!(csi.params.capacity(), 0, "buffers are released");
+        assert_eq!(csi.intermediates.capacity(), 0, "buffers are released");
+    }
+
+    #[test]
+    fn an_overlong_csi_is_discarded_through_its_final_byte_and_text_follows() {
+        for (name, lead, body) in [
+            ("parameters", &b""[..], &b"1;"[..]),
+            ("digits", b"", b"1"),
+            ("intermediates", b"1", b" "),
+        ] {
+            let mut p = FreminalAnsiParser::new();
+            let mut input = b"\x1b[".to_vec();
+            input.extend_from_slice(lead);
+            while input.len() < 2 * MAX_CSI_BYTES {
+                input.extend_from_slice(body);
+            }
+            input.extend_from_slice(b"HText");
+            assert_eq!(p.push(&input), vec![data("Text")], "{name}");
+            assert_eq!(p.inner, ParserInner::Empty, "{name}");
+            // The spent buffers were released, and the next CSI works.
+            assert_eq!(p.csi_buffers.max_capacity(), 0, "{name}");
+            assert_eq!(p.push(b"\x1b[5;10H"), fresh_output(b"\x1b[5;10H"), "{name}");
+            assert_csi_buffers_retained(&p, name);
+        }
+    }
+
+    #[test]
+    fn an_overlong_csi_is_discarded_across_reads() {
+        let mut p = FreminalAnsiParser::new();
+        let mut first = b"\x1b[".to_vec();
+        first.extend(std::iter::repeat_n(b'1', MAX_CSI_BYTES + 10));
+        assert_eq!(p.push(&first), vec![]);
+        assert_eq!(p.push(&vec![b'2'; 1000]), vec![]);
+        assert_eq!(p.push(b"mText"), vec![data("Text")]);
+    }
+
+    #[test]
+    fn an_overlong_csi_aborted_by_esc_dispatches_nothing() {
+        let mut p = FreminalAnsiParser::new();
+        let mut input = b"\x1b[".to_vec();
+        input.extend(std::iter::repeat_n(b'1', MAX_CSI_BYTES + 10));
+        input.extend_from_slice(b"\x1b[5;10H");
+        assert_eq!(p.push(&input), fresh_output(b"\x1b[5;10H"));
+        assert!(p.csi_buffers.max_capacity() > 0);
+    }
+
+    #[test]
+    fn an_overlong_csi_still_ends_at_a_byte_that_cannot_belong_to_it() {
+        // A parameter byte after an intermediate is invalid, as in a short CSI.
+        let mut p = FreminalAnsiParser::new();
+        let mut input = b"\x1b[".to_vec();
+        input.extend(std::iter::repeat_n(b'1', MAX_CSI_BYTES + 10));
+        input.extend_from_slice(b" 1X");
+        let out = p.push(&input);
+        // The invalid `1` is consumed, as it is in a short sequence.
+        assert_eq!(out, vec![TerminalOutput::Invalid, data("X")]);
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn incomplete_prefix_accepts_only_well_formed_partial_characters() {
+        for ok in [
+            &[0xC3][..],
+            &[0xE0, 0xA0],
+            &[0xF0, 0x9F],
+            &[0xF0, 0x9F, 0x98],
+            &[0xED, 0x9F],
+        ] {
+            assert!(Utf8Tracker::is_incomplete_prefix(ok), "{ok:x?}");
+        }
+        for bad in [
+            &[][..],
+            b"a",
+            &[0x84],
+            &[0xC0],
+            &[0xE0, 0x84],
+            &[0xED, 0xA0],
+            &[0xF4, 0x90],
+            &[0xF5, 0x80],
+            &[0xC3, 0xA9],
+        ] {
+            assert!(!Utf8Tracker::is_incomplete_prefix(bad), "{bad:x?}");
+        }
+    }
+
+    #[test]
+    fn c1_st_after_an_ill_formed_utf8_prefix_ends_the_string() {
+        // `E0` allows only `A0`-`BF` next, so this `9C` cannot continue it: it
+        // is ST, and the text after it is ground-state data (review R26).
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        let out = p.push(b"\x9d0;\xe0\x9cX");
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert_eq!(out.last(), Some(&data("X")));
+    }
+
+    #[test]
+    fn a_new_string_does_not_inherit_a_character_from_a_byte_it_never_took() {
+        // A bare ESC ends the DCS; `C5` is then rejected by the escape parser.
+        // The next OSC must still end at a standalone `9C` (review R27).
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        p.push(b"\x90abc\x1b\xc5");
+        // An immediately terminated OSC: its first byte is the ST.
+        p.push(b"\x9d\x9c");
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn under_s8c1t_a_utf8_continuation_in_text_is_not_a_c1_control() {
+        // `Ŏ` is `C5 8E`: the `8E` is text, not SS2 (review R32).
+        for split in [None, Some(1)] {
+            let mut p = FreminalAnsiParser::new();
+            p.s8c1t_mode = S8c1t::EightBit;
+            let input = "Ŏab".as_bytes();
+            let out = match split {
+                None => p.push(input),
+                Some(at) => {
+                    let mut out = p.push(&input[..at]);
+                    out.extend(p.push(&input[at..]));
+                    out
+                }
+            };
+            assert!(
+                !out.iter()
+                    .any(|o| matches!(o, TerminalOutput::SingleShift(_))),
+                "{split:?}: {out:?}"
+            );
+            let text: Vec<u8> = out
+                .iter()
+                .filter_map(|o| match o {
+                    TerminalOutput::Data(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert_eq!(text, input, "{split:?}");
+        }
+    }
+
+    #[test]
+    fn under_s8c1t_a_standalone_ss2_or_one_after_a_broken_character_shifts() {
+        for input in [&b"\x8ea"[..], b"\xc5\r\x8ea", b"\xc5\x1b[m\x8ea"] {
+            let mut p = FreminalAnsiParser::new();
+            p.s8c1t_mode = S8c1t::EightBit;
+            let out = p.push(input);
+            assert!(
+                out.contains(&TerminalOutput::SingleShift(CharsetSlot::G2)),
+                "{input:?}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_csi_exactly_at_the_cap_is_still_dispatched() {
+        let mut p = FreminalAnsiParser::new();
+        // Body: digits then the final `m`: MAX_CSI_BYTES bytes in all.
+        let mut input = b"\x1b[".to_vec();
+        input.extend(std::iter::repeat_n(b'0', MAX_CSI_BYTES - 1));
+        input.push(b'm');
+        let out = p.push(&input);
+        assert!(
+            !out.contains(&TerminalOutput::Invalid),
+            "an at-cap SGR is not rejected: {out:?}"
+        );
+        assert_eq!(out, FreminalAnsiParser::new().push(b"\x1b[0m"));
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    // -------------------------------------------------------------------------
+    // C1 ST, CAN/SUB and ESC inside strings and escape intermediates
+    // (Task 147 adversarial review A1-A4)
+    // -------------------------------------------------------------------------
+
+    fn eight_bit_parser() -> FreminalAnsiParser {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        p
+    }
+
+    fn data(text: &str) -> TerminalOutput {
+        TerminalOutput::Data(text.as_bytes().to_vec())
+    }
+
+    fn title(text: &str) -> TerminalOutput {
+        TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(text.to_string()))
+    }
+
+    #[test]
+    fn c1_st_ends_an_osc_under_s8c1t() {
+        assert_eq!(
+            eight_bit_parser().push(b"\x9d0;t\x9cX"),
+            vec![title("t"), data("X")]
+        );
+    }
+
+    #[test]
+    fn c1_st_ends_a_dcs_under_s8c1t() {
+        assert_eq!(
+            eight_bit_parser().push(b"\x90$qm\x9cX"),
+            vec![
+                TerminalOutput::DeviceControlString(b"P$qm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_st_ends_an_apc_under_s8c1t() {
+        assert_eq!(
+            eight_bit_parser().push(b"\x9fGa=q,i=1;\x9cX"),
+            vec![
+                TerminalOutput::ApplicationProgramCommand(b"_Ga=q,i=1;\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_st_also_ends_strings_opened_with_a_seven_bit_introducer() {
+        let mut p = eight_bit_parser();
+        assert_eq!(p.push(b"\x1b]0;t\x9cX"), vec![title("t"), data("X")]);
+        assert_eq!(
+            p.push(b"\x1bP$qm\x9cX"),
+            vec![
+                TerminalOutput::DeviceControlString(b"P$qm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_st_after_an_unfinished_seven_bit_st_drops_the_esc() {
+        // `ESC` then `0x9C`: the ESC was the start of an ST that never
+        // completed, and is not part of the body.
+        assert_eq!(
+            eight_bit_parser().push(b"\x9d0;t\x1b\x9cX"),
+            vec![title("t"), data("X")]
+        );
+        assert_eq!(
+            eight_bit_parser().push(b"\x90$qm\x1b\x9cX"),
+            vec![
+                TerminalOutput::DeviceControlString(b"P$qm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+        assert_eq!(
+            eight_bit_parser().push(b"\x9fGa=q;\x1b\x9cX"),
+            vec![
+                TerminalOutput::ApplicationProgramCommand(b"_Ga=q;\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    /// Under S7C1T `0x9C` is not a control: it is the continuation byte of
+    /// U+015C in an OSC title, and must stay in the body.
+    #[test]
+    fn c1_st_byte_is_body_under_s7c1t() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(
+            p.push("\x1b]0;\u{15c}\x07X".as_bytes()),
+            vec![title("\u{15c}"), data("X")]
+        );
+        let out = p.push(b"\x1bP$q\x9cm\x1b\\X");
+        assert_eq!(
+            out,
+            vec![
+                TerminalOutput::DeviceControlString(b"P$q\x9cm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+        let out = p.push(b"\x1b_Ga\x9cb\x1b\\X");
+        assert_eq!(
+            out,
+            vec![
+                TerminalOutput::ApplicationProgramCommand(b"_Ga\x9cb\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    /// Under S8C1T a `0x9C` that completes a UTF-8 character (`Ŝ` is `C5 9C`,
+    /// `“` is `E2 80 9C`) is body, not an ST.
+    #[test]
+    fn c1_st_byte_completing_a_utf8_character_is_body_under_s8c1t() {
+        let mut p = eight_bit_parser();
+        assert_eq!(
+            p.push("\x1b]0;\u{15c}\x07X".as_bytes()),
+            vec![title("\u{15c}"), data("X")]
+        );
+        let mut quoted = b"\x9d0;a".to_vec();
+        quoted.extend_from_slice("\u{201c}b\x07X".as_bytes());
+        assert_eq!(p.push(&quoted), vec![title("a\u{201c}b"), data("X")]);
+        assert_eq!(
+            p.push(b"\x90$q\xc5\x9cm\x9cX"),
+            vec![
+                TerminalOutput::DeviceControlString(b"P$q\xc5\x9cm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+        assert_eq!(
+            p.push(b"\x9fGa\xc5\x9cb\x9cX"),
+            vec![
+                TerminalOutput::ApplicationProgramCommand(b"_Ga\xc5\x9cb\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_st_byte_completing_a_character_is_body_when_the_read_splits_inside_it() {
+        let mut p = eight_bit_parser();
+        assert_eq!(p.push(b"\x1b]0;\xc5"), vec![]);
+        assert_eq!(p.push(b"\x9c\x07X"), vec![title("\u{15c}"), data("X")]);
+    }
+
+    /// A `0x9C` that completes no character still ends the string: after
+    /// ASCII, after a finished character, after a lead byte that ASCII
+    /// interrupted, and after a stray continuation byte.
+    #[test]
+    fn a_standalone_c1_st_byte_still_ends_a_string_under_s8c1t() {
+        for body in [&b"t"[..], "\u{15c}".as_bytes(), b"\xc5t", b"\x80", b"\xff"] {
+            let mut input = b"\x9d0;".to_vec();
+            input.extend_from_slice(body);
+            input.extend_from_slice(b"\x9cX");
+            let mut p = eight_bit_parser();
+            let out = p.push(&input);
+            assert_eq!(out.last(), Some(&data("X")), "{body:?}: {out:?}");
+            assert_eq!(p.inner, ParserInner::Empty, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn c1_st_ends_an_overflowed_apc_under_s8c1t_with_no_output() {
+        let mut p = eight_bit_parser();
+        let mut input = vec![0x9f];
+        input.resize(crate::ansi_components::apc::MAX_APC_BYTES + 10, b'x');
+        input.extend_from_slice(b"\x9cX");
+        assert_eq!(p.push(&input), vec![data("X")]);
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn c1_st_ends_an_overflowed_osc_under_s8c1t_with_no_output() {
+        let mut p = eight_bit_parser();
+        let mut input = b"\x9d0;".to_vec();
+        input.resize(crate::ansi_components::osc::MAX_OSC_BYTES + 10, b'x');
+        input.extend_from_slice(b"\x9cX");
+        assert_eq!(p.push(&input), vec![data("X")]);
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn can_and_sub_cancel_a_string_and_the_next_byte_is_text() {
+        for cancel in [0x18_u8, 0x1a] {
+            for introducer in [&b"\x1b]0;t"[..], b"\x1bP$qm", b"\x1b_Ga=q;"] {
+                let mut input = introducer.to_vec();
+                input.extend_from_slice(&[cancel, b'X']);
+                let mut p = FreminalAnsiParser::new();
+                assert_eq!(
+                    p.push(&input),
+                    vec![data("X")],
+                    "0x{cancel:02x} after {:?}",
+                    String::from_utf8_lossy(introducer)
+                );
+                assert_eq!(p.inner, ParserInner::Empty);
+            }
+        }
+    }
+
+    #[test]
+    fn can_cancels_a_string_that_has_a_pending_esc() {
+        // The ESC is part of a possible ST; CAN still cancels the whole string.
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(p.push(b"\x1bP$qm\x1b\x18X"), vec![data("X")]);
+        assert_eq!(p.push(b"\x1b_Ga\x1b\x18X"), vec![data("X")]);
+        assert_eq!(p.push(b"\x1b]0;t\x1b\x18X"), vec![data("X")]);
+    }
+
+    #[test]
+    fn esc_inside_an_escape_intermediate_sequence_restarts_the_escape() {
+        let reference = FreminalAnsiParser::new().push(b"\x1b[31mX");
+        assert!(
+            reference.len() >= 2 && !reference.contains(&TerminalOutput::Invalid),
+            "reference: {reference:?}"
+        );
+        for intermediate in *b"()*+ #%" {
+            let mut p = FreminalAnsiParser::new();
+            let result = p.push(&[0x1b, intermediate, 0x1b, b'[', b'3', b'1', b'm', b'X']);
+            assert_eq!(
+                result, reference,
+                "ESC {:?} ESC [31mX must give red X",
+                intermediate as char
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn esc_inside_an_escape_intermediate_sequence_can_start_another_intermediate_sequence() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(
+            p.push(b"\x1b(\x1b(0"),
+            vec![TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G0,
+                set: CharacterSet::DecSpecialGraphics,
+            }]
+        );
+    }
+
+    #[test]
+    fn extra_designator_intermediates_swallow_the_whole_sequence() {
+        for sequence in [
+            &b"\x1b(%5abc"[..],
+            b"\x1b(\"4abc",
+            b"\x1b)%5abc",
+            b"\x1b*&4abc",
+            b"\x1b+ !#5abc",
+        ] {
+            let mut p = FreminalAnsiParser::new();
+            assert_eq!(
+                p.push(sequence),
+                vec![data("abc")],
+                "{:?}",
+                String::from_utf8_lossy(sequence)
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    /// `ESC - A`, `ESC $ B` and their multi-intermediate forms name sets
+    /// freminal does not have: they end at their final, which is not text.
+    #[test]
+    fn unsupported_set_designators_print_nothing_but_the_text_after_them() {
+        for sequence in [
+            &b"\x1b-AX"[..],
+            b"\x1b.AX",
+            b"\x1b/AX",
+            b"\x1b-%5X",
+            b"\x1b$BX",
+            b"\x1b$(BX",
+            b"\x1b$)CX",
+            b"\x1b$*DX",
+            b"\x1b$+ EX",
+        ] {
+            let mut p = FreminalAnsiParser::new();
+            assert_eq!(
+                p.push(sequence),
+                vec![data("X")],
+                "{:?}",
+                String::from_utf8_lossy(sequence)
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn supported_g0_to_g3_designation_is_unchanged() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(
+            p.push(b"\x1b(0\x1b)B\x1b*A\x1b+0X"),
+            vec![
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::DecSpecialGraphics,
+                },
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G1,
+                    set: CharacterSet::Ascii,
+                },
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G2,
+                    set: CharacterSet::UnitedKingdom,
+                },
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G3,
+                    set: CharacterSet::DecSpecialGraphics,
+                },
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unsupported_set_designator_split_across_pushes_is_still_swallowed() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(p.push(b"\x1b$"), vec![]);
+        assert_eq!(p.push(b"("), vec![]);
+        assert_eq!(p.push(b"BX"), vec![data("X")]);
+    }
+
+    #[test]
+    fn a_very_long_run_of_designator_intermediates_is_swallowed() {
+        let mut p = FreminalAnsiParser::new();
+        let mut input = b"\x1b(".to_vec();
+        input.resize(input.len() + 1024 * 1024, b'%');
+        input.extend_from_slice(b"5abc");
+        assert_eq!(p.push(&input), vec![data("abc")]);
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn a_multi_byte_designator_split_across_pushes_is_still_swallowed() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(p.push(b"\x1b(%"), vec![]);
+        assert_eq!(p.push(b"5abc"), vec![data("abc")]);
     }
 }

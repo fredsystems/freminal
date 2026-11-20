@@ -125,6 +125,59 @@ fn test_send_focus_event_disabled() {
     );
 }
 
+/// Task 147.4: the focus reports follow S8C1T, and S7C1T restores `ESC [`.
+#[test]
+fn test_send_focus_event_follows_s8c1t() {
+    let (mut state, rx) = make_state();
+    state.modes.focus_reporting = XtMseWin::Enabled;
+
+    let cases: [(&[u8], bool, &[u8]); 4] = [
+        (b"\x1b G", true, b"\x9bI"),
+        (b"\x1b G", false, b"\x9bO"),
+        (b"\x1b F", true, b"\x1b[I"),
+        (b"\x1b F", false, b"\x1b[O"),
+    ];
+    for (select_mode, focused, expected) in cases {
+        state.handle_incoming_data(select_mode);
+        drain(&rx);
+        state.send_focus_event(focused);
+        assert_eq!(
+            unwrap_write(rx.try_recv().unwrap()),
+            expected,
+            "after {select_mode:?}, focused={focused}"
+        );
+        assert!(rx.try_recv().is_err(), "only one message should be sent");
+    }
+}
+
+/// Task 147.4: a key written after `ESC SP G` uses the 8-bit introducer, and
+/// DECCKM selects SS3 (`0x8F`) over CSI (`0x9B`).
+#[test]
+fn test_write_cursor_keys_follow_s8c1t() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G");
+    drain(&rx);
+
+    state
+        .write(&TerminalInput::ArrowUp(KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(unwrap_write(rx.try_recv().unwrap()), b"\x9bA");
+
+    state.handle_incoming_data(b"\x1b[?1h");
+    drain(&rx);
+    state
+        .write(&TerminalInput::ArrowUp(KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(unwrap_write(rx.try_recv().unwrap()), b"\x8fA");
+
+    state.handle_incoming_data(b"\x1b F");
+    drain(&rx);
+    state
+        .write(&TerminalInput::ArrowUp(KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(unwrap_write(rx.try_recv().unwrap()), b"\x1bOA");
+}
+
 // ─── write ───────────────────────────────────────────────────────────────────
 
 /// `write(Ascii(b'A'))` must succeed and deliver a single byte `0x41` (`'A'`).
@@ -652,42 +705,46 @@ fn test_alternate_scroll_decrqm_after_set_is_enabled() {
     );
 }
 
-// ─── Hilite Mouse Tracking (?1001) ──────────────────────────────────────────
+// ─── Hilite Mouse Tracking (?1001) — recognised, not implemented ────────────
 
-/// `CSI ? 1001 h` (DECSET) sets mouse tracking to `XtMseHilite`.
+/// `CSI ? 1001 h` (DECSET) is a typed no-op: it must not become a mouse
+/// tracking level (Task 147.21).
 #[test]
-fn test_hilite_mouse_tracking_set() {
+fn test_hilite_mouse_tracking_set_does_not_change_tracking() {
     use freminal_common::buffer_states::modes::mouse::MouseTrack;
     let (mut state, rx) = make_state();
     drain(&rx);
 
     state.handle_incoming_data(b"\x1b[?1001h");
-    assert_eq!(
-        state.modes.mouse_tracking,
-        MouseTrack::XtMseHilite,
-        "DECSET ?1001 must set mouse tracking to XtMseHilite"
-    );
-}
-
-/// `CSI ? 1001 l` (DECRST) resets mouse tracking to `NoTracking`.
-#[test]
-fn test_hilite_mouse_tracking_reset() {
-    use freminal_common::buffer_states::modes::mouse::MouseTrack;
-    let (mut state, rx) = make_state();
-    drain(&rx);
-
-    state.handle_incoming_data(b"\x1b[?1001h");
-    state.handle_incoming_data(b"\x1b[?1001l");
     assert_eq!(
         state.modes.mouse_tracking,
         MouseTrack::NoTracking,
-        "DECRST ?1001 must reset mouse tracking to NoTracking"
+        "DECSET ?1001 must not set a mouse tracking level"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "DECSET ?1001 must not write anything"
     );
 }
 
-/// DECRQM `?1001` returns Ps=2 in default (no-tracking) state.
+/// `?1001h` while `?1000` tracking is active leaves `?1000` active, and
+/// `?1001l` does not clear it either.
 #[test]
-fn test_hilite_mouse_tracking_decrqm_default_is_reset() {
+fn test_hilite_mouse_tracking_leaves_active_tracking_alone() {
+    use freminal_common::buffer_states::modes::mouse::MouseTrack;
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?1000h\x1b[?1001h");
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseX11);
+
+    state.handle_incoming_data(b"\x1b[?1001l");
+    assert_eq!(state.modes.mouse_tracking, MouseTrack::XtMseX11);
+}
+
+/// DECRQM `?1001` answers Ps=0 (not recognised) in the default state.
+#[test]
+fn test_hilite_mouse_tracking_decrqm_default_is_not_recognised() {
     let (mut state, rx) = make_state();
     drain(&rx);
 
@@ -696,14 +753,14 @@ fn test_hilite_mouse_tracking_decrqm_default_is_reset() {
     let bytes = unwrap_write(msg);
     let resp = String::from_utf8(bytes).unwrap();
     assert_eq!(
-        resp, "\x1b[?1001;2$y",
-        "DECRQM ?1001 in default (no-tracking) state must return Ps=2 (reset)"
+        resp, "\x1b[?1001;0$y",
+        "DECRQM ?1001 must return Ps=0 (not recognised)"
     );
 }
 
-/// DECRQM `?1001` returns Ps=1 after DECSET.
+/// DECRQM `?1001` still answers Ps=0 after DECSET: the mode is not stored.
 #[test]
-fn test_hilite_mouse_tracking_decrqm_after_set() {
+fn test_hilite_mouse_tracking_decrqm_after_set_is_not_recognised() {
     let (mut state, rx) = make_state();
     drain(&rx);
 
@@ -715,8 +772,8 @@ fn test_hilite_mouse_tracking_decrqm_after_set() {
     let bytes = unwrap_write(msg);
     let resp = String::from_utf8(bytes).unwrap();
     assert_eq!(
-        resp, "\x1b[?1001;1$y",
-        "DECRQM ?1001 after DECSET must return Ps=1 (set)"
+        resp, "\x1b[?1001;0$y",
+        "DECRQM ?1001 after DECSET must still return Ps=0"
     );
 }
 
@@ -799,6 +856,72 @@ fn s8c1t_after_ris_in_one_buffer_leaves_parser_eight_bit() {
     let writes = collect_writes(&rx);
     assert_eq!(writes.len(), 1, "expected one DA1 reply: {writes:?}");
     assert_eq!(writes[0][0], 0x9B, "DA1 reply must use 8-bit CSI");
+}
+
+// ─── parser mode changes within one read (Task 147.2) ────────────────────────
+
+/// `ESC SP G` then `0x9B 6 n` in one read: the 0x9B is an 8-bit CSI, so the
+/// CPR request is answered (with an 8-bit CSI reply).  Before 147.2 the parser
+/// switched mode only after the whole read was parsed, so the 0x9B was text and
+/// no reply was sent.
+#[test]
+fn s8c1t_and_eight_bit_csi_in_one_read_get_a_reply() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b G\x9b6n");
+
+    let writes = collect_writes(&rx);
+    assert_eq!(writes.len(), 1, "expected one CPR reply: {writes:?}");
+    assert_eq!(writes[0][0], 0x9B, "CPR reply must use 8-bit CSI");
+    assert!(writes[0].ends_with(b"R"), "got {:?}", writes[0]);
+}
+
+/// `ESC SP F` within one read: a following `0x9B` is text, so no reply.
+/// Before 147.2 the parser stayed 8-bit for the rest of the read and answered.
+#[test]
+fn s7c1t_then_c1_csi_in_one_read_is_not_a_csi() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b F\x9b6n");
+
+    assert_eq!(state.parser.s8c1t_mode, S8c1t::SevenBit);
+    let writes = collect_writes(&rx);
+    assert!(writes.is_empty(), "0x9B must be text, got {writes:?}");
+}
+
+/// With the terminal already in 8-bit mode, RIS then `0x9B 6 n` in one read:
+/// RIS returns the parser to 7-bit at its position, so the 0x9B is text and
+/// nothing is replied.  Before 147.2 the parser stayed 8-bit for the whole read
+/// and the CSI was executed.
+#[test]
+fn ris_then_c1_csi_in_one_read_is_not_a_csi() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G");
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1bc\x9b6n");
+
+    assert_eq!(state.parser.s8c1t_mode, S8c1t::SevenBit);
+    let writes = collect_writes(&rx);
+    assert!(writes.is_empty(), "0x9B must be text, got {writes:?}");
+}
+
+/// `CSI ? 2 l` then VT52 `ESC A` in one read: the cursor moves up.  Before
+/// 147.2 the `ESC A` was parsed under ANSI rules and ignored.
+#[test]
+fn decanm_reset_then_vt52_cursor_up_in_one_read_moves_the_cursor() {
+    let (mut state, _rx) = make_state();
+    state.handle_incoming_data(b"\x1b[5;5H");
+    let before = state.handler.cursor_pos();
+
+    state.handle_incoming_data(b"\x1b[?2l\x1bA");
+
+    let after = state.handler.cursor_pos();
+    assert_eq!(after.y + 1, before.y, "cursor must move up one row");
+    assert_eq!(after.x, before.x);
 }
 
 // ─── RIS state reset: what survives (Task 131.8b) ───────────────────────────

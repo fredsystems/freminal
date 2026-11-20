@@ -922,10 +922,11 @@ shell-integration/
   hooks: PROMPT_COMMAND append for D + OSC 7; DEBUG trap for C; PS1
   wrap for A + B. Every emitted marker carries `freminal=1; fid=$$-<N>`
   where N is a per-prompt counter.
-- **`zsh/.zshenv`**: the Ghostty-derived `+X`-check dance to restore
-  the user's original `$ZDOTDIR` (or `unset ZDOTDIR`), then source the
-  user's real `.zshenv`, then `source` our `freminal-integration`
-  script.
+- **`zsh/.zshenv`**: a `${+name}` check to restore the user's original
+  `$ZDOTDIR` (or `unset ZDOTDIR`), then source the user's real
+  `.zshenv`, then `source` our `freminal-integration` script. (Corrected
+  by Task 147.C4: the original wording called this "Ghostty-derived";
+  the code was written independently.)
 - **`zsh/freminal-integration`**: install `precmd_functions` and
   `preexec_functions` entries (using `add-zsh-hook` if available).
   Every emitted marker carries `freminal=1; fid=$$-<N>`. PROMPT
@@ -971,7 +972,7 @@ match detect_shell(&cmd) {
     }
     Some(Shell::Zsh) => {
         // Preserve user's existing $ZDOTDIR via a sentinel env var
-        // (Ghostty's +X-style approach: if the user had any $ZDOTDIR
+        // (zsh's `${+name}` set-vs-unset test: if the user had any $ZDOTDIR
         // set, including empty, we save it. Otherwise we don't set
         // our sentinel at all.).
         if let Ok(z) = std::env::var("ZDOTDIR") {

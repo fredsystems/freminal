@@ -96,6 +96,7 @@ let
           background_image
           background_image_mode
           background_image_opacity
+          auto_detect_urls
           ;
       };
 
@@ -122,6 +123,7 @@ let
           allow_clipboard_write
           allow_kitty_file_transfer
           allow_window_ops
+          password_indicator
           ;
       };
 
@@ -179,6 +181,7 @@ let
           routing_recording
           routing_paste_blocked
           routing_config_reload
+          command_finished_template
           osc99_filters
           ;
       };
@@ -557,6 +560,17 @@ in
             Null uses the default (0.5).
           '';
         };
+
+        auto_detect_urls = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Detect plain URLs (http, https, file, ftp, mailto) in terminal
+            output and make them clickable, in addition to OSC 8 hyperlinks.
+            An OSC 8 link wins where it overlaps a detected URL.
+            Null uses the default (true).
+          '';
+        };
       };
 
       chrome = {
@@ -725,6 +739,17 @@ in
             queries (window size, position, state, title) and title push/pop
             are unaffected.
             Null uses the default (false).
+          '';
+        };
+
+        password_indicator = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Show a lock icon in the tab bar when the foreground process
+            disables terminal echo (for example a password prompt from sudo,
+            ssh or passwd).
+            Null uses the default (true).
           '';
         };
       };
@@ -1154,6 +1179,21 @@ in
             Routing for the "config reloaded" toast: "toast" (in-app only)
             or "disabled" (suppress).
             Null uses the default ("toast").
+          '';
+        };
+
+        command_finished_template = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = ''
+            Template for the body of command-finished notifications.
+            Tokens: {command} (the command text, or "Command" if it scrolled
+            away), {duration} (human-readable elapsed time, e.g. "3s" or
+            "2m15s"), {exit_code} (the numeric exit code, or "?" if the shell
+            omitted it), {cwd} (the working directory at prompt start, or
+            empty), and {tab_name} (the display name of the tab the command
+            ran in).
+            Null uses the default ("{command} finished in {duration} (exit {exit_code})").
           '';
         };
 

@@ -52,10 +52,11 @@ use crate::gui::font_manager::FontManager;
 use crate::gui::ligature_shaping::LigatureShaping;
 use crate::gui::shaping::ShapingCache;
 use crate::gui::terminal::cursor_appearance::CursorAppearance;
+use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_common::buffer_states::tchar::TChar;
-use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColors};
+use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColors, TerminalColor};
 use freminal_common::config::BackgroundImageMode;
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::CATPPUCCIN_MOCHA;
@@ -69,7 +70,22 @@ use freminal_common::themes::CATPPUCCIN_MOCHA;
 /// assertions possible at all — a randomised grid would force the
 /// assertions down to ranges, and a range wide enough to be stable is
 /// usually wide enough to miss the regression it was meant to catch.
-fn synthetic_grid(cols: usize, rows: usize) -> (Vec<TChar>, Vec<FormatTag>) {
+///
+/// The explicit (non-default) background colour of the cell a frame marks
+/// with [`SyntheticFrame::with_explicit_background_cell`].
+pub const EXPLICIT_BACKGROUND: TerminalColor = TerminalColor::Blue;
+
+/// `reversed_cell` is the `(col, row)` of one cell drawn with SGR 7
+/// (reverse video) and `explicit_background_cell` of one cell drawn with the
+/// explicit background [`EXPLICIT_BACKGROUND`]; every other cell has the
+/// default format. They let a pixel test place a double-reversal cell (SGR 7
+/// under DECSCNM) or an explicit-background cell in a known position.
+fn synthetic_grid(
+    cols: usize,
+    rows: usize,
+    reversed_cell: Option<(usize, usize)>,
+    explicit_background_cell: Option<(usize, usize)>,
+) -> (Vec<TChar>, Vec<FormatTag>) {
     let mut chars = Vec::with_capacity(rows * (cols + 1));
     for row in 0..rows {
         for col in 0..cols {
@@ -78,12 +94,55 @@ fn synthetic_grid(cols: usize, rows: usize) -> (Vec<TChar>, Vec<FormatTag>) {
         }
         chars.push(TChar::NewLine);
     }
-    let tags = vec![FormatTag {
-        start: 0,
-        end: chars.len(),
+    let total = chars.len();
+    let span = |start: usize, end: usize, colors: StateColors| FormatTag {
+        start,
+        end,
+        colors,
         ..FormatTag::default()
-    }];
+    };
+    let plain = StateColors::default().with_reverse_video(ReverseVideo::Off);
+
+    let position =
+        |(col, row): (usize, usize)| (col < cols && row < rows).then_some(row * (cols + 1) + col);
+    let reversed_at = reversed_cell.and_then(position);
+    let explicit_at = explicit_background_cell.and_then(position);
+    let mut marked: Vec<usize> = reversed_at.into_iter().chain(explicit_at).collect();
+    marked.sort_unstable();
+    marked.dedup();
+
+    let mut tags = Vec::new();
+    let mut next = 0;
+    for at in marked {
+        // A cell marked both ways carries both: SGR 7 over an explicit
+        // background.
+        let mut colors = plain;
+        if reversed_at == Some(at) {
+            colors = colors.with_reverse_video(ReverseVideo::On);
+        }
+        if explicit_at == Some(at) {
+            colors = colors.with_background_color(EXPLICIT_BACKGROUND);
+        }
+        if next < at {
+            tags.push(span(next, at, plain));
+        }
+        tags.push(span(at, at + 1, colors));
+        next = at + 1;
+    }
+    if next < total {
+        tags.push(span(next, total, plain));
+    }
     (chars, tags)
+}
+
+/// The colours every synthetic frame resolves against: the Mocha theme with
+/// no palette or dynamic overrides.
+fn synthetic_colors() -> ResolvedColors {
+    ResolvedColors::resolve(
+        &CATPPUCCIN_MOCHA,
+        &ColorPalette::default(),
+        &DynamicColorOverrides::default(),
+    )
 }
 
 /// The cursor draw parameters for a synthetic frame at the origin in the
@@ -147,6 +206,20 @@ pub struct SyntheticFrame {
     /// grid, modelling the sub-cell remainder a real pane's `terminal_rect`
     /// has to the right of and below its last cell. Defaults to `(0, 0)`.
     pub remainder_px: (u32, u32),
+    /// Whether the screen is in reverse video (DECSCNM, Task 147.27). When
+    /// [`ScreenInversion::Reversed`] the pane's base fill is the resolved
+    /// foreground, derived exactly as a real pane derives it; the explicit
+    /// [`Self::base_fill`] override is ignored.
+    pub screen_inversion: ScreenInversion,
+    /// `(col, row)` of one cell drawn with SGR 7, or `None` for none.
+    pub reversed_cell: Option<(usize, usize)>,
+    /// `(col, row)` of one cell drawn with the explicit background
+    /// [`EXPLICIT_BACKGROUND`], or `None` for none.
+    pub explicit_background_cell: Option<(usize, usize)>,
+    /// The pane's background opacity as a percentage (`100` is opaque), the
+    /// `background_opacity` config value scaled by 100 so the frame stays
+    /// `Eq`. Defaults to `100`.
+    pub opacity_percent: u8,
 }
 
 impl SyntheticFrame {
@@ -161,6 +234,10 @@ impl SyntheticFrame {
             toast: ToastPresence::Absent,
             base_fill: None,
             remainder_px: (0, 0),
+            screen_inversion: ScreenInversion::Normal,
+            reversed_cell: None,
+            explicit_background_cell: None,
+            opacity_percent: 100,
         }
     }
 
@@ -191,13 +268,64 @@ impl SyntheticFrame {
         }
     }
 
-    /// The [`PaneBackground`] this frame draws with: fully opaque, with the
-    /// frame's base fill (if any) normalised to `0.0..=1.0`.
-    fn pane_background(&self) -> PaneBackground {
-        PaneBackground {
-            opacity: 1.0,
-            base_fill: self.base_fill.map(PaneBackground::fill_channels),
+    /// Set DECSCNM (whole-screen reverse video).
+    #[must_use]
+    pub const fn with_screen_inversion(self, screen_inversion: ScreenInversion) -> Self {
+        Self {
+            screen_inversion,
+            ..self
         }
+    }
+
+    /// Draw the cell at `(col, row)` with SGR 7 (reverse video).
+    #[must_use]
+    pub const fn with_reversed_cell(self, col: usize, row: usize) -> Self {
+        Self {
+            reversed_cell: Some((col, row)),
+            ..self
+        }
+    }
+
+    /// Draw the cell at `(col, row)` with the explicit background
+    /// [`EXPLICIT_BACKGROUND`].
+    #[must_use]
+    pub const fn with_explicit_background_cell(self, col: usize, row: usize) -> Self {
+        Self {
+            explicit_background_cell: Some((col, row)),
+            ..self
+        }
+    }
+
+    /// Set the pane's background opacity, as a percentage (`100` is opaque).
+    #[must_use]
+    pub const fn with_opacity_percent(self, opacity_percent: u8) -> Self {
+        Self {
+            opacity_percent,
+            ..self
+        }
+    }
+
+    /// The [`PaneBackground`] this frame draws with. Under
+    /// DECSCNM the base fill is derived as a real pane derives it
+    /// ([`PaneBackground::base_fill_for`]); otherwise it is the frame's
+    /// explicit override (if any) normalised to `0.0..=1.0`.
+    fn pane_background(&self) -> PaneBackground {
+        let opacity = self.opacity();
+        let base_fill = match self.screen_inversion {
+            ScreenInversion::Reversed => PaneBackground::base_fill_for(
+                CATPPUCCIN_MOCHA.background,
+                &synthetic_colors(),
+                self.screen_inversion,
+                opacity,
+            ),
+            ScreenInversion::Normal => self.base_fill.map(PaneBackground::fill_channels),
+        };
+        PaneBackground { opacity, base_fill }
+    }
+
+    /// The background opacity in `0.0..=1.0`.
+    fn opacity(&self) -> f32 {
+        f32::from(self.opacity_percent) / 100.0
     }
 }
 
@@ -310,7 +438,12 @@ impl HeadlessRenderer {
     /// afterwards when `frame.toast` is [`ToastPresence::Present`].
     pub fn draw_frame(&mut self, gl: &Gl<'_>, frame: &SyntheticFrame) {
         let (vp_w, vp_h) = self.viewport_px(frame);
-        let (chars, tags) = synthetic_grid(frame.cols, frame.rows);
+        let (chars, tags) = synthetic_grid(
+            frame.cols,
+            frame.rows,
+            frame.reversed_cell,
+            frame.explicit_background_cell,
+        );
 
         // Split borrow: `build_foreground_instances` needs `&mut atlas`
         // alongside `&font_manager`, and `draw_with_verts` needs `&mut
@@ -342,15 +475,12 @@ impl HeadlessRenderer {
         );
 
         let cursor = synthetic_cursor(frame);
-        let colors = ResolvedColors::resolve(
-            &CATPPUCCIN_MOCHA,
-            &ColorPalette::default(),
-            &DynamicColorOverrides::default(),
-        );
+        let colors = synthetic_colors();
         let mut bg = Vec::new();
         let mut deco = Vec::new();
         let _cursor_range = build_background_instances(
             &BackgroundFrame {
+                opacity: frame.opacity(),
                 shaped_lines: &lines,
                 cell_width,
                 cell_height,
@@ -365,7 +495,7 @@ impl HeadlessRenderer {
                 command_block_hover_rows: None,
                 term_width_cols: frame.cols,
                 colors: &colors,
-                screen_inversion: ScreenInversion::Normal,
+                screen_inversion: frame.screen_inversion,
             },
             &mut bg,
             &mut deco,
@@ -378,7 +508,10 @@ impl HeadlessRenderer {
             font_manager,
             cell_height,
             ascent,
-            &FgRenderOptions::all_visible(None),
+            &FgRenderOptions {
+                screen_inversion: frame.screen_inversion,
+                ..FgRenderOptions::all_visible(None)
+            },
             &colors,
             &mut fg,
         );

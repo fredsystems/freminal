@@ -72,6 +72,7 @@ mod tests {
     };
 
     use crate::{
+        buffer::{ImagePlacementMode, PlaceImageRequest},
         image_store::{
             AnimationControl, ImagePlacement, ImageProtocol, ImageSizeMode, InlineImage,
             next_image_id,
@@ -100,7 +101,20 @@ mod tests {
     fn place(buf: &mut Buffer, protocol: ImageProtocol, cols: usize, rows: usize) -> u64 {
         let image = make_image(cols, rows);
         let id = image.id;
-        let _ = buf.place_image(image, 0, protocol, None, None, 0, None, 1, None);
+        let _ = buf.place_image(
+            image,
+            0,
+            PlaceImageRequest {
+                protocol,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
+        );
         id
     }
 

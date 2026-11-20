@@ -126,7 +126,7 @@ pub struct ShapedLine {
 /// clone (refcount bump) instead of a deep clone.
 ///
 /// Subtask 124.6 (lever 1) adds a second, content-addressed cache
-/// ([`RunCache`]) alongside the line cache. The line cache is keyed by line
+/// (`RunCache`) alongside the line cache. The line cache is keyed by line
 /// index, so a one-line scroll invalidates every line even though most of
 /// their runs are byte-identical to runs shaped a moment ago at a different
 /// index (see the 124.16 findings block in
@@ -254,12 +254,12 @@ pub struct ShapingCacheStats {
     pub hits: u64,
     /// Lines re-segmented and re-shaped through harfrust.
     pub misses: u64,
-    /// Subtask 124.6: runs served from [`RunCache`] (current or previous
+    /// Subtask 124.6: runs served from `RunCache` (current or previous
     /// generation) as a template clone, without a `harfrust` shape call.
     /// Only counted for runs belonging to a line that missed the line-level
     /// cache — a line hit never touches the run cache at all.
     pub run_hits: u64,
-    /// Subtask 124.6: runs that missed [`RunCache`] entirely and were shaped
+    /// Subtask 124.6: runs that missed `RunCache` entirely and were shaped
     /// fresh through `harfrust`.
     pub run_misses: u64,
 }
@@ -288,7 +288,7 @@ impl ShapingCacheStats {
         Some(self.hits as f64 / total as f64)
     }
 
-    /// Runs considered by [`RunCache`] — `run_hits + run_misses`.
+    /// Runs considered by `RunCache` — `run_hits + run_misses`.
     ///
     /// Always `<=` the number of runs segmented from missed lines: a run
     /// belonging to a line-level cache hit is never counted here at all.
@@ -297,7 +297,7 @@ impl ShapingCacheStats {
         self.run_hits.saturating_add(self.run_misses)
     }
 
-    /// Fraction of considered runs served from [`RunCache`], or `None` when
+    /// Fraction of considered runs served from `RunCache`, or `None` when
     /// no run has been considered yet. See [`Self::hit_rate`] for why `None`
     /// is distinct from `0.0`.
     #[must_use]
@@ -321,7 +321,7 @@ impl Default for ShapingCache {
 impl ShapingCache {
     /// Create a new empty shaping cache.
     ///
-    /// Not `const` (unlike before subtask 124.6): [`RunCache`]'s `HashMap`
+    /// Not `const` (unlike before subtask 124.6): `RunCache`'s `HashMap`
     /// fields have no `const` constructor.
     #[must_use]
     pub fn new() -> Self {
@@ -338,7 +338,7 @@ impl ShapingCache {
     /// of the events a hit-rate measurement most wants to see the cost of,
     /// and zeroing the tally here would hide it. Use [`Self::reset_stats`].
     ///
-    /// Also clears [`Self::run_cache`] (subtask 124.6): a font rebuild can
+    /// Also clears `Self::run_cache` (subtask 124.6): a font rebuild can
     /// reuse the same `FaceId` values for entirely different font data, so
     /// leaving stale run-cache entries keyed on those `FaceId`s behind would
     /// serve glyph templates shaped against the old font.

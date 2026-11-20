@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! Centralized mapping from [`GuiTheme`] geometry and [`ThemePalette`] colors
-//! to an egui [`Visuals`].
+//! to an egui `Visuals`.
 //!
 //! # Design
 //!
@@ -347,7 +347,7 @@ pub fn build_visuals(
     visuals
 }
 
-/// Apply the chrome [`GuiTheme`] padding to an egui [`Style`]'s [`Spacing`].
+/// Apply the chrome [`GuiTheme`] padding to an egui `Style`'s `Spacing`.
 ///
 /// `Spacing` lives on [`egui::Style`], not [`egui::Visuals`], so padding
 /// cannot be returned from [`build_visuals`]; this sibling is applied

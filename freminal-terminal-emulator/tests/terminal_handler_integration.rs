@@ -1415,14 +1415,16 @@ fn no_write_tx_does_not_panic() {
 fn dec_special_replace_lower_right_corner() {
     // Enable Replace mode, send byte 0x6a → cell must contain TChar::Utf8 for ┘ (U+2518).
     use freminal_common::buffer_states::{
-        line_draw::DecSpecialGraphics, terminal_output::TerminalOutput,
+        charset::{CharacterSet, CharsetSlot},
+        terminal_output::TerminalOutput,
     };
 
     let mut handler = TerminalHandler::new(80, 24);
 
-    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
-        DecSpecialGraphics::Replace,
-    )]);
+    handler.process_outputs(&[TerminalOutput::DesignateCharset {
+        slot: CharsetSlot::G0,
+        set: CharacterSet::DecSpecialGraphics,
+    }]);
     handler.handle_data(&[0x6a]);
 
     let visible_rows = handler.buffer().visible_rows(0);
@@ -1460,21 +1462,24 @@ fn dec_special_toggle() {
     // Disable Replace → write 0x6a again (stored as ASCII).
     // Verify both cells independently.
     use freminal_common::buffer_states::{
-        line_draw::DecSpecialGraphics, terminal_output::TerminalOutput,
+        charset::{CharacterSet, CharsetSlot},
+        terminal_output::TerminalOutput,
     };
 
     let mut handler = TerminalHandler::new(80, 24);
 
     // First character: Replace mode → ┘
-    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
-        DecSpecialGraphics::Replace,
-    )]);
+    handler.process_outputs(&[TerminalOutput::DesignateCharset {
+        slot: CharsetSlot::G0,
+        set: CharacterSet::DecSpecialGraphics,
+    }]);
     handler.handle_data(&[0x6a]);
 
     // Second character: DontReplace mode → ASCII 'j'
-    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
-        DecSpecialGraphics::DontReplace,
-    )]);
+    handler.process_outputs(&[TerminalOutput::DesignateCharset {
+        slot: CharsetSlot::G0,
+        set: CharacterSet::Ascii,
+    }]);
     handler.handle_data(&[0x6a]);
 
     let visible_rows = handler.buffer().visible_rows(0);
@@ -1497,14 +1502,16 @@ fn dec_special_toggle() {
 fn dec_special_all_passthrough_above_7e() {
     // Bytes above 0x7E are never remapped even in Replace mode.
     use freminal_common::buffer_states::{
-        line_draw::DecSpecialGraphics, terminal_output::TerminalOutput,
+        charset::{CharacterSet, CharsetSlot},
+        terminal_output::TerminalOutput,
     };
 
     let mut handler = TerminalHandler::new(80, 24);
 
-    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
-        DecSpecialGraphics::Replace,
-    )]);
+    handler.process_outputs(&[TerminalOutput::DesignateCharset {
+        slot: CharsetSlot::G0,
+        set: CharacterSet::DecSpecialGraphics,
+    }]);
 
     // 0x41 = 'A' (below 0x5F — also not remapped)
     handler.handle_data(&[0x41]);
@@ -2971,13 +2978,17 @@ fn test_decrc_after_decstr_restores_default_character_set() {
     // DECSTR records a complete saved cursor, including the default G0
     // character set. Designating DEC Special Graphics afterwards and then
     // issuing DECRC without a new DECSC must restore the default set.
-    use freminal_common::buffer_states::{line_draw::DecSpecialGraphics, tchar::TChar};
+    use freminal_common::buffer_states::{
+        charset::{CharacterSet, CharsetSlot},
+        tchar::TChar,
+    };
 
     let mut handler = TerminalHandler::new(40, 10);
     handler.process_outputs(&[TerminalOutput::SoftReset]);
-    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
-        DecSpecialGraphics::Replace,
-    )]);
+    handler.process_outputs(&[TerminalOutput::DesignateCharset {
+        slot: CharsetSlot::G0,
+        set: CharacterSet::DecSpecialGraphics,
+    }]);
     handler.process_outputs(&[TerminalOutput::RestoreCursor]);
     handler.handle_data(&[0x6a]);
 
@@ -4088,17 +4099,38 @@ fn decrpm_xtcblink_after_enable_blink() {
 
 #[test]
 fn decrpm_unknown_mode_returns_not_recognized() {
-    use freminal_common::buffer_states::mode::Mode;
+    use freminal_common::buffer_states::{mode::Mode, modes::unknown::ModeNamespace};
 
     let mut handler = TerminalHandler::new(80, 24);
     let resp = query_handler_mode(
         &mut handler,
-        TerminalOutput::Mode(Mode::UnknownQuery(b"9999".to_vec())),
+        TerminalOutput::Mode(Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: b"9999".to_vec(),
+        }),
     );
     // Unknown mode → Ps=0 (not recognized)
     assert_eq!(
         resp, "\x1b[?9999;0$y",
         "Unknown mode query must return Ps=0"
+    );
+}
+
+#[test]
+fn decrpm_unknown_ansi_mode_reply_has_no_question_mark() {
+    use freminal_common::buffer_states::{mode::Mode, modes::unknown::ModeNamespace};
+
+    let mut handler = TerminalHandler::new(80, 24);
+    let resp = query_handler_mode(
+        &mut handler,
+        TerminalOutput::Mode(Mode::UnknownQuery {
+            namespace: ModeNamespace::Ansi,
+            params: b"99".to_vec(),
+        }),
+    );
+    assert_eq!(
+        resp, "\x1b[99;0$y",
+        "ANSI unknown query must keep its namespace"
     );
 }
 

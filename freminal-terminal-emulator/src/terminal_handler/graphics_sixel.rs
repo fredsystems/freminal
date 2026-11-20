@@ -17,6 +17,7 @@ use freminal_common::buffer_states::{
     modes::decsdm::Decsdm, modes::private_color_registers::PrivateColorRegisters,
 };
 
+use freminal_buffer::buffer::{ImagePlacementMode, PlaceImageRequest};
 use freminal_buffer::image_store::{
     ImageProtocol, InlineImage, next_image_id, next_placement_instance_id,
 };
@@ -113,26 +114,29 @@ impl TerminalHandler {
         // so this placement never merges with an unrelated one, and pass
         // `None` sub-cell offset (Task 100.19, kitty-only).
         let placement_instance = next_placement_instance_id();
-        let place_result = self.buffer.place_image(
+
+        // With sixel scrolling off (DECSDM, ?80 h) the image is drawn at the
+        // top-left of the screen, clipped, with no scroll and no cursor move,
+        // as xterm does (`graphics_sixel.c:395-405`).
+        let mode = if self.sixel_display_mode == Decsdm::DisplayMode {
+            ImagePlacementMode::FixedOrigin
+        } else {
+            ImagePlacementMode::Inline
+        };
+        self.buffer.place_image(
             inline_image,
             0,
-            ImageProtocol::Sixel,
-            None,
-            None,
-            0,
-            None,
-            placement_instance,
-            None,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Sixel,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance,
+                subcell_offset: None,
+                mode,
+            },
         );
-
-        // In DECSDM display mode (?80 h), the cursor does not advance past
-        // the image.  `place_image` always moves the cursor below the image,
-        // so put it back on the image origin, located by row number so
-        // scrollback eviction during placement cannot displace it
-        // (Task 125.C7).
-        if self.sixel_display_mode == Decsdm::DisplayMode {
-            self.buffer.restore_cursor_to_image_origin(&place_result);
-        }
     }
 }
 
@@ -485,20 +489,34 @@ mod tests {
         let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
         handler.handle_device_control_string(&dcs);
 
+        // xterm (`graphics_sixel.c:395-405`): the text cursor does not move,
+        // and the image is anchored at the top-left of the screen rather than
+        // at the cursor.
         let cursor_after = handler.buffer.cursor().pos;
-        // In display mode, cursor should be restored to its pre-image position.
         assert_eq!(
             cursor_before, cursor_after,
             "Display mode: cursor should NOT advance past sixel image, \
              before=({},{}) after=({},{})",
             cursor_before.x, cursor_before.y, cursor_after.x, cursor_after.y
         );
+        let top = handler.buffer().rows().len().saturating_sub(24);
+        let origin = handler.buffer().rows()[top].cells()[0]
+            .image_placement()
+            .expect("image anchored at screen row 0, column 0");
+        assert_eq!((origin.col_in_image, origin.row_in_image), (0, 0));
+        let cursor_row = handler.buffer().rows()[cursor_after.y].cells();
+        assert!(
+            cursor_row
+                .get(cursor_after.x)
+                .is_none_or(|c| !c.has_image()),
+            "no image cell at the cursor"
+        );
     }
 
-    /// Regression (Task 125.C7): at scrollback capacity the placement evicts
-    /// rows, so the DECSDM restore must use the row number, not an index.
+    /// At scrollback capacity DECSDM still draws at the screen origin: nothing
+    /// scrolls, so no row is evicted and the cursor stays where it was.
     #[test]
-    fn sixel_display_mode_at_scrollback_capacity_keeps_cursor_on_image_origin() {
+    fn sixel_display_mode_at_scrollback_capacity_does_not_scroll() {
         use freminal_common::buffer_states::{
             mode::{Mode, SetMode},
             modes::decsdm::Decsdm,
@@ -519,24 +537,21 @@ mod tests {
         }
         handler.handle_data(b"ab");
         let base_before = handler.buffer().row_base();
-        let origin = handler.buffer().cursor_row_number();
-        let x_before = handler.buffer().cursor().pos.x;
+        let rows_before = handler.buffer().rows().len();
+        let cursor_before = handler.buffer().cursor().pos;
 
         // 3 bands = 18px = 2 cell rows.
         let sixel_body = b"#1;2;100;0;0#1~-#1~-#1~";
         let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
         handler.handle_device_control_string(&dcs);
 
-        assert!(
-            handler.buffer().row_base() > base_before,
-            "setup: placement must evict rows"
-        );
-        assert_eq!(handler.buffer().cursor_row_number(), origin);
-        let pos = handler.buffer().cursor().pos;
-        assert_eq!(pos.x, x_before);
-        let placement = handler.buffer().rows()[pos.y].cells()[pos.x]
+        assert_eq!(handler.buffer().row_base(), base_before, "nothing evicted");
+        assert_eq!(handler.buffer().rows().len(), rows_before, "nothing pushed");
+        assert_eq!(handler.buffer().cursor().pos, cursor_before);
+        let top = handler.buffer().rows().len() - 4;
+        let placement = handler.buffer().rows()[top].cells()[0]
             .image_placement()
-            .expect("cursor sits on the image origin cell");
+            .expect("image anchored at the top-left of the screen");
         assert_eq!((placement.col_in_image, placement.row_in_image), (0, 0));
     }
 

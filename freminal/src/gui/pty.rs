@@ -21,7 +21,7 @@ use freminal_common::buffer_states::command_block::CommandBlock;
 use freminal_common::buffer_states::modes::theme::Theming;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::ShellIntegrationConfig;
-use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
+use freminal_common::pty_write::FreminalTerminalSize;
 use freminal_common::send_or_log;
 use freminal_common::term_name::TermName;
 use freminal_terminal_emulator::interface::TerminalEmulator;
@@ -340,11 +340,6 @@ pub struct TabChannels {
     /// instead, by the per-pane `window_cmd_budget` report cap (148.C9).
     pub input_tx: Sender<InputEvent>,
 
-    /// Sender for raw bytes to the PTY, for layout startup-command injection
-    /// only. GUI-originated replies go through `input_tx` as
-    /// `InputEvent::Reply`.
-    pub pty_write_tx: Sender<PtyWrite>,
-
     /// Receiver for window commands from the PTY thread.
     pub window_cmd_rx: Receiver<WindowCommand>,
 
@@ -389,8 +384,8 @@ pub struct TabChannels {
     /// `window_cmd_rx` that the GUI has not drained yet (148.C9, 148.RC2).
     ///
     /// The PTY thread admits a command only while its class is below its cap
-    /// (see [`WindowCommandBudget::admit`]); the GUI releases one per command
-    /// it drains (see [`WindowCommandBudget::release`]).  It bounds the
+    /// (see `WindowCommandBudget::admit`); the GUI releases one per command
+    /// it drains (see `WindowCommandBudget::release`).  It bounds the
     /// `window_cmd_rx` backlog, and so the replies the GUI can send back on
     /// `input_tx`, while the GUI is not draining (for example a minimised
     /// window that is not redrawing).
@@ -398,7 +393,7 @@ pub struct TabChannels {
 
     /// OS process ID of the PTY child shell.
     ///
-    /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
+    /// Used for CWD discovery via `crate::gui::platform::read_cwd` when
     /// saving layouts or building recording topology snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
@@ -533,14 +528,14 @@ impl CommandClass {
 
 /// The per-pane counters bounding the `window_cmd_rx` backlog.
 ///
-/// One counter covers Report-class commands ([`MAX_OUTSTANDING_REPORTS`]), one
-/// Viewport-class commands ([`MAX_OUTSTANDING_VIEWPORT_COMMANDS`]) and one the
+/// One counter covers Report-class commands (`MAX_OUTSTANDING_REPORTS`), one
+/// Viewport-class commands (`MAX_OUTSTANDING_VIEWPORT_COMMANDS`) and one the
 /// payload bytes those commands hold, of either class
-/// ([`MAX_OUTSTANDING_VIEWPORT_BYTES`]; OSC 99 reports carry icons).
+/// (`MAX_OUTSTANDING_VIEWPORT_BYTES`; OSC 99 reports carry icons).
 ///
 /// Shared between the PTY consumer thread, the only caller of
-/// [`admit`](Self::admit) and the only incrementer, and the GUI, which only
-/// [`release`](Self::release)s.  Plain atomics: no lock is involved.  Cloning
+/// `admit` and the only incrementer, and the GUI, which only
+/// `release`s.  Plain atomics: no lock is involved.  Cloning
 /// shares the same counters.
 #[derive(Debug, Clone, Default)]
 pub struct WindowCommandBudget {
@@ -811,7 +806,6 @@ pub fn spawn_pty_tab(
         Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
     let arc_swap_gui = Arc::clone(&arc_swap);
 
-    let pty_write_tx = terminal.clone_write_tx();
     let child_exit_rx = terminal.child_exit_rx();
     let echo_off = terminal
         .echo_off_atomic()
@@ -894,7 +888,6 @@ pub fn spawn_pty_tab(
     Ok(TabChannels {
         arc_swap: arc_swap_gui,
         input_tx,
-        pty_write_tx,
         window_cmd_rx,
         clipboard_rx,
         search_buffer_rx,
@@ -1556,6 +1549,7 @@ mod tests {
         Osc99ButtonSupport, Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport,
         Osc99SoundNames, Osc99Support, Osc99UrgencySupport,
     };
+    use freminal_common::pty_write::PtyWrite;
     use freminal_terminal_emulator::io::{GuiReply, WindowStateReport};
 
     /// Helper: build a fresh `CommandBlock` with the given fid.

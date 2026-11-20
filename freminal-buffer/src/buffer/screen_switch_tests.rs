@@ -23,7 +23,7 @@ use freminal_common::{
 };
 
 use crate::{
-    buffer::{Buffer, PlaceImageResult, RowStore},
+    buffer::{Buffer, ImagePlacementMode, PlaceImageRequest, PlaceImageResult},
     cell::Cell,
     image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
     row::Row,
@@ -72,7 +72,20 @@ fn place_image_at(buf: &mut Buffer, col: usize, row: usize, cols: usize, rows: u
     };
     let id = image.id;
     buf.set_cursor_pos(Some(col), Some(row));
-    let result = buf.place_image(image, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+    let result = buf.place_image(
+        image,
+        0,
+        PlaceImageRequest {
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
+            mode: ImagePlacementMode::Inline,
+        },
+    );
     assert!(matches!(result, PlaceImageResult { .. }));
     id
 }
@@ -188,6 +201,102 @@ fn clear_alternate_screen_gives_blank_rows_with_fresh_higher_numbers() {
     );
     assert_eq!(buf.image_cell_count, 0);
     assert!(!buf.image_store().contains(id), "alt image store emptied");
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn a_first_alternate_entry_builds_one_store() {
+    let mut buf = Buffer::new(20, 4);
+
+    buf.switch_to_alternate_cleared();
+
+    assert_eq!(buf.kind(), BufferType::Alternate);
+    assert_eq!(buf.rows().len(), 4);
+    assert_eq!(buf.row_base(), RowNumber::ALTERNATE_BASE);
+    assert_eq!(
+        buf.next_row_number(),
+        RowNumber::ALTERNATE_BASE.saturating_add(4),
+        "one store was numbered, so no block of row numbers was skipped"
+    );
+    for i in 0..4 {
+        assert_eq!(row_text(&buf, i), "");
+    }
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn a_cleared_re_entry_renumbers_past_the_parked_store() {
+    let (mut buf, id) = buffer_with_parked_alternate();
+    let parked_next = buf
+        .parked_alternate
+        .as_ref()
+        .expect("the alternate screen is parked")
+        .rows
+        .next_number();
+
+    buf.switch_to_alternate_cleared();
+
+    assert_eq!(buf.kind(), BufferType::Alternate);
+    assert_eq!(buf.rows().len(), 4);
+    assert!(
+        buf.row_base() >= parked_next,
+        "blank rows are numbered past the parked store ({} < {parked_next})",
+        buf.row_base()
+    );
+    for i in 0..4 {
+        assert_eq!(row_text(&buf, i), "", "row {i} is blank");
+    }
+    assert_eq!(buf.image_cell_count, 0);
+    assert!(!buf.image_store().contains(id), "alt image store emptied");
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn a_cleared_entry_is_the_pair_of_a_switch_and_a_clear() {
+    let (mut cleared, _) = buffer_with_parked_alternate();
+    let (mut pair, _) = buffer_with_parked_alternate();
+    cleared.set_format(loud_tag());
+    pair.set_format(loud_tag());
+
+    cleared.switch_to_alternate_cleared();
+    pair.switch_to_alternate();
+    pair.clear_alternate_screen();
+
+    assert_eq!(cleared.row_base(), pair.row_base());
+    assert_eq!(cleared.next_row_number(), pair.next_row_number());
+    assert_eq!(cleared.cursor_screen_pos(), pair.cursor_screen_pos());
+    for i in 0..4 {
+        assert_eq!(cleared.rows()[i].cells(), pair.rows()[i].cells());
+    }
+
+    // Already on the alternate screen it only clears, as the pair does.
+    cleared.insert_text(&text("x"));
+    pair.insert_text(&text("x"));
+    cleared.switch_to_alternate_cleared();
+    pair.switch_to_alternate();
+    pair.clear_alternate_screen();
+    assert_eq!(cleared.row_base(), pair.row_base());
+    assert_eq!(row_text(&cleared, 0), "");
+}
+
+#[test]
+fn a_cleared_first_entry_applies_the_current_background() {
+    let mut buf = Buffer::new(6, 3);
+    buf.set_format(loud_tag());
+
+    buf.switch_to_alternate_cleared();
+
+    assert_eq!(buf.rows().len(), 3);
+    for (index, row) in buf.rows().iter().enumerate() {
+        assert_eq!(row.cells().len(), 6, "row {index} has explicit blank cells");
+        for cell in row.cells() {
+            let tag = cell.tag();
+            assert_eq!(tag.colors.background_color, TerminalColor::Blue);
+            assert_eq!(tag.colors.color, TerminalColor::Default, "no foreground");
+            assert_eq!(tag.font_weight, FontWeight::Normal, "no weight");
+            assert!(tag.url.is_none(), "no hyperlink");
+        }
+    }
     buf.debug_assert_invariants();
 }
 
@@ -634,7 +743,8 @@ fn a_parked_row_of_the_wrong_width_trips_the_invariant_check() {
 fn a_parked_row_in_the_wrong_namespace_trips_the_invariant_check() {
     let (mut buf, _) = buffer_with_parked_alternate();
     let parked = buf.parked_alternate.as_mut().unwrap();
-    parked.rows = RowStore::from_rows_at(RowNumber::ZERO, (0..4).map(|_| Row::new(20)));
+    parked.rows =
+        crate::buffer::RowStore::from_rows_at(RowNumber::ZERO, (0..4).map(|_| Row::new(20)));
     parked.image_cell_count = 0;
 
     buf.debug_assert_invariants();
@@ -835,4 +945,96 @@ fn parking_the_primary_moves_its_image_store() {
     );
     let blank = Row::new(20);
     assert_eq!(buf.rows()[0].characters(), blank.characters());
+}
+
+// ── DECSC saves the pending-wrap flag (Task 147.6) ───────────────────────
+
+#[test]
+fn decrc_restores_pending_wrap_so_the_next_print_wraps() {
+    let mut buf = Buffer::new(10, 5);
+    buf.insert_text(&text("abcdefghij"));
+    assert_eq!(buf.cursor.pos.x, 10, "precondition: pending wrap");
+    buf.save_cursor();
+
+    buf.set_cursor_pos(Some(0), Some(3));
+    buf.restore_cursor();
+    assert_eq!(
+        buf.cursor.pos.x, 10,
+        "pending wrap is restored, not clamped"
+    );
+    assert_eq!(buf.cursor_screen_pos().y, 0);
+
+    buf.insert_text(&text("K"));
+    assert_eq!(buf.cursor_screen_pos().y, 1, "K wrapped to the next row");
+    assert_eq!(row_text(&buf, 1), "K");
+    assert_eq!(row_text(&buf, 0), "abcdefghij");
+}
+
+#[test]
+fn decrc_without_pending_wrap_restores_the_column_as_before() {
+    let mut buf = Buffer::new(10, 5);
+    buf.insert_text(&text("abcdefghi"));
+    assert_eq!(buf.cursor.pos.x, 9, "precondition: last column, no pending");
+    buf.save_cursor();
+
+    buf.set_cursor_pos(Some(0), Some(3));
+    buf.restore_cursor();
+    assert_eq!(buf.cursor.pos.x, 9);
+
+    buf.insert_text(&text("K"));
+    assert_eq!(buf.cursor_screen_pos().y, 0, "K stayed on the row");
+    assert_eq!(buf.cursor.pos.x, 10, "and it entered pending wrap itself");
+}
+
+#[test]
+fn decrc_after_a_narrowing_resize_keeps_pending_wrap_on_the_reflowed_cell() {
+    // Task 147.18: the saved 'j' reflows to the last column of the second
+    // piece, so the cursor is still just past it and the next print wraps.
+    let mut buf = Buffer::new(10, 5);
+    buf.set_cursor_pos(Some(0), Some(2));
+    buf.insert_text(&text("abcdefghij"));
+    assert_eq!(buf.cursor.pos.x, 10, "precondition: pending wrap");
+    buf.save_cursor();
+
+    buf.set_size(5, 5, 0);
+    buf.set_cursor_pos(Some(0), Some(0));
+    buf.restore_cursor();
+    assert_eq!(buf.cursor.pos.x, 5, "pending wrap at the new right edge");
+
+    let row = buf.cursor_screen_pos().y;
+    buf.insert_text(&text("K"));
+    assert_eq!(
+        buf.cursor_screen_pos().y,
+        row + 1,
+        "the print after the restore wraps"
+    );
+    assert_eq!(buf.cursor.pos.x, 1);
+}
+
+#[test]
+fn decrc_after_a_widening_resize_moves_to_the_column_after_the_saved_cell() {
+    let mut buf = Buffer::new(10, 5);
+    buf.insert_text(&text("abcdefghij"));
+    buf.save_cursor();
+
+    buf.set_size(20, 5, 0);
+    buf.restore_cursor();
+    assert_eq!(buf.cursor.pos.x, 10, "pending wrap became the next column");
+    assert_eq!(buf.cursor_screen_pos().y, 0);
+}
+
+#[test]
+fn decrc_pending_wrap_survives_an_alternate_screen_round_trip() {
+    let mut buf = Buffer::new(10, 5);
+    buf.insert_text(&text("abcdefghij"));
+    buf.save_cursor();
+
+    buf.switch_to_alternate();
+    buf.set_cursor_pos(Some(0), Some(0));
+    buf.switch_to_primary();
+    buf.restore_cursor();
+
+    assert_eq!(buf.cursor.pos.x, 10, "pending wrap still restored");
+    buf.insert_text(&text("K"));
+    assert_eq!(buf.cursor_screen_pos().y, 1);
 }

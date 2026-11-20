@@ -11,6 +11,7 @@ use freminal_common::{
         mode::{Mode, TerminalModes},
         modes::{
             MouseModeNumber, ReportMode,
+            alt_sends_escape::AltSendsEscape,
             alternate_scroll::AlternateScroll,
             decanm::Decanm,
             decarm::Decarm,
@@ -21,6 +22,7 @@ use freminal_common::{
             decscnm::ScreenInversion,
             keypad::KeypadMode,
             lnm::Lnm,
+            meta_sends_escape::MetaSendsEscape,
             mouse::{MouseEncoding, MouseTrack},
             s8c1t::S8c1t,
             sync_updates::SynchronizedUpdates,
@@ -38,7 +40,7 @@ use freminal_common::{
 use std::{fmt::Write as _, time::Instant};
 
 use crate::{
-    ansi::FreminalAnsiParser,
+    ansi::{FreminalAnsiParser, Utf8Tracker, apply_parser_mode_change},
     ansi_components::tracer::BoundedDisplay,
     input::{KeyEventMeta, TerminalInput, TerminalInputPayload},
     io::PtyWrite,
@@ -77,6 +79,13 @@ fn hex_preview(data: &[u8], max_bytes: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+/// The parser's DECANM / S8C1T state at one point of the byte stream.
+#[derive(Clone, Copy, Debug)]
+struct WireModes {
+    vt52_mode: Decanm,
+    s8c1t_mode: S8c1t,
 }
 
 #[derive(Debug)]
@@ -226,24 +235,28 @@ impl TerminalState {
     ///
     /// - **`TerminalHandler` (buffer layer)** owns modes that directly affect
     ///   buffer mutations: DECAWM, DECOM, DECLRMM, DECCOLM, alternate screen
-    ///   (`XtExtscrn` / `AltScreen47`), DEC special graphics, etc.  The
-    ///   handler processes these inside `process_outputs()` and updates its own
-    ///   internal state.  `sync_mode_flags` receives the same output list but
-    ///   hits the catch-all `_ => {}` branch for these variants.
+    ///   (`XtExtscrn` / `AltScreen47`), etc.  The handler processes these
+    ///   inside `process_outputs()` and updates its own internal state.
+    ///   `sync_mode_flags` receives the same output list but hits the
+    ///   catch-all `_ => {}` branch for these variants.  (Character-set state,
+    ///   including DEC special graphics, is not a mode: it is the handler's
+    ///   `CharsetState`.)
     ///
     /// - **`TerminalState.modes` (`TerminalModes`)** owns modes that affect
     ///   input encoding or GUI-visible behaviour: `cursor_key` (DECCKM),
     ///   `bracketed_paste`, `mouse_tracking`, `mouse_encoding`, `focus_reporting`
     ///   (`XtMseWin`), `repeat_keys` (DECARM), `keypad_mode` (DECPAM/DECNKM),
     ///   `invert_screen` (DECSCNM), `synchronized_updates`, `line_feed_mode`,
-    ///   `backarrow_key_mode` (DECBKM), `alternate_scroll`, and the
+    ///   `backarrow_key_mode` (DECBKM), `alternate_scroll`,
+    ///   `meta_sends_escape` (`?1036`), `alt_sends_escape` (`?1039`), and the
     ///   theme state (`theming`, `theme_mode`).  `?45` reverse wrap and the cursor
     ///   blink state are owned by the handler alone.
     ///
-    /// - **`FreminalAnsiParser.vt52_mode` (parser layer)** — DECANM must also
-    ///   be mirrored into the parser so it routes ESC bytes to the correct
-    ///   VT52 or ANSI state machine.  This is the only mode flag that needs
-    ///   to be copied to a third layer.
+    /// - **`FreminalAnsiParser.vt52_mode` / `s8c1t_mode` (parser layer)** —
+    ///   DECANM, S8C1T/S7C1T and RIS also change how the parser reads the
+    ///   following bytes.  The parser applies those itself, at the moment it
+    ///   emits the output (so they take effect within the same read); this
+    ///   function does not write them.
     ///
     /// Query variants are intercepted here: the current state is looked up
     /// and a DECRPM response is sent.
@@ -257,21 +270,21 @@ impl TerminalState {
             TerminalOutput::NormalKeypadMode => {
                 self.modes.keypad_mode = KeypadMode::Numeric;
             }
-            // S8C1T (ESC SP G) / S7C1T (ESC SP F) — toggle 8-bit C1 control
-            // recognition in the parser and response encoding in the handler.
+            // S8C1T (ESC SP G) / S7C1T (ESC SP F) — mirror the response
+            // encoding into the handler.  The parser already applied its own
+            // 8-bit C1 recognition when it emitted the output.
             TerminalOutput::EightBitControl => {
-                self.parser.s8c1t_mode = S8c1t::EightBit;
                 self.handler.set_s8c1t_mode(S8c1t::EightBit);
             }
             TerminalOutput::SevenBitControl => {
-                self.parser.s8c1t_mode = S8c1t::SevenBit;
                 self.handler.set_s8c1t_mode(S8c1t::SevenBit);
             }
             // DECSTR (CSI ! p) — soft terminal reset. The handler applies
             // its own subset of Table 5-9 of the VT510 Programmer Reference.
             // Of the `TerminalState`-owned mode fields only DECCKM (cursor
             // keys) and DECNKM (keypad) are on that table, so only those two
-            // are reset here. Mouse tracking, bracketed paste, focus
+            // are reset here, plus `?1036` / `?1039`, which Task 147.24
+            // returns to their defaults on both resets. Mouse tracking, bracketed paste, focus
             // reporting, synchronized updates, DECSCNM and the rest of
             // `TerminalModes` are deliberately left alone: none are in
             // Table 5-9.
@@ -284,6 +297,8 @@ impl TerminalState {
             TerminalOutput::SoftReset => {
                 self.modes.cursor_key = Decckm::Ansi;
                 self.modes.keypad_mode = KeypadMode::Numeric;
+                self.modes.meta_sends_escape = MetaSendsEscape::default();
+                self.modes.alt_sends_escape = AltSendsEscape::default();
             }
             _ => {}
         }
@@ -303,6 +318,8 @@ impl TerminalState {
             | Mode::SynchronizedUpdates(SynchronizedUpdates::Query)
             | Mode::Decnkm(Decnkm::Query)
             | Mode::Decbkm(Decbkm::Query)
+            | Mode::MetaSendsEscape(MetaSendsEscape::Query)
+            | Mode::AltSendsEscape(AltSendsEscape::Query)
             | Mode::AlternateScroll(AlternateScroll::Query)
             | Mode::Theming(Theming::Query) => {
                 self.handle_mode_query(mode);
@@ -329,6 +346,8 @@ impl TerminalState {
                 self.modes.keypad_mode = KeypadMode::Numeric;
             }
             Mode::Decbkm(v) => self.modes.backarrow_key_mode = *v,
+            Mode::MetaSendsEscape(v) => self.modes.meta_sends_escape = *v,
+            Mode::AltSendsEscape(v) => self.modes.alt_sends_escape = *v,
             Mode::AlternateScroll(v) => self.modes.alternate_scroll = *v,
             // ── Modes handled entirely by TerminalHandler ──────
             Mode::XtExtscrn(_)
@@ -343,7 +362,7 @@ impl TerminalState {
             | Mode::Declrmm(_)
             | Mode::AllowColumnModeSwitch(_)
             | Mode::AllowAltScreen(_)
-            | Mode::UnknownQuery(_)
+            | Mode::UnknownQuery { .. }
             | Mode::ApplicationEscapeKey(_)
             | Mode::InBandResizeMode(_)
             | Mode::GraphemeClustering(_)
@@ -351,21 +370,18 @@ impl TerminalState {
             | Mode::Decnrcm(_)
             | Mode::Irm(_)
             | Mode::PrivateColorRegisters(_)
+            | Mode::Kam(_)
+            | Mode::Srm(_)
+            | Mode::HiliteMouseTracking(_)
+            | Mode::MetaSendsEighthBit(_)
+            | Mode::NumLockOverridesKeypad(_)
             | Mode::ReverseWrapAround(_)
             | Mode::XtRevWrap2(_)
             | Mode::LineFeedMode(Lnm::Query)
-            | Mode::Decanm(Decanm::Query)
+            // DECANM: the handler owns the authoritative `vt52_mode` flag and
+            // the parser applied its own copy when it emitted the output.
+            | Mode::Decanm(_)
             | Mode::Decsclm(Decsclm::Query) => {}
-            // DECANM — toggle the parser between VT52 and ANSI modes.
-            // The handler owns the authoritative `vt52_mode` flag, but
-            // the parser also needs to know so it routes ESC bytes to
-            // the correct state machine.
-            Mode::Decanm(Decanm::Vt52) => {
-                self.parser.vt52_mode = Decanm::Vt52;
-            }
-            Mode::Decanm(Decanm::Ansi) => {
-                self.parser.vt52_mode = Decanm::Ansi;
-            }
             // ── ?2031 Theming Set/Reset — only honoured when mode is Auto ──
             //
             // When `theme_mode` is `Dark` or `Light`, the mode is locked and
@@ -456,6 +472,14 @@ impl TerminalState {
                 let resp = self.modes.backarrow_key_mode.report(None);
                 self.handler.write_csi_response(&resp);
             }
+            Mode::MetaSendsEscape(MetaSendsEscape::Query) => {
+                let resp = self.modes.meta_sends_escape.report(None);
+                self.handler.write_csi_response(&resp);
+            }
+            Mode::AltSendsEscape(AltSendsEscape::Query) => {
+                let resp = self.modes.alt_sends_escape.report(None);
+                self.handler.write_csi_response(&resp);
+            }
             Mode::AlternateScroll(AlternateScroll::Query) => {
                 let resp = self.modes.alternate_scroll.report(None);
                 self.handler.write_csi_response(&resp);
@@ -499,11 +523,21 @@ impl TerminalState {
     /// Any tmux DCS passthrough payload an output queued is processed right
     /// after that output, before the next one, so an inner sequence takes
     /// effect at the position its wrapper occupied on the wire.  The handler's
-    /// end-of-batch housekeeping runs once, after the last output (see
-    /// [`Self::process_outputs_at_depth`] for why not per nested batch).
-    fn process_parsed_outputs(&mut self, parsed: &[TerminalOutput]) {
-        self.process_outputs_at_depth(parsed, 0);
-        self.handler.finish_output_batch();
+    /// end-of-batch housekeeping is not run here: a read is processed in
+    /// segments, and the caller runs it once per read (see
+    /// [`Self::process_outputs_at_depth`]).
+    ///
+    /// `entry_modes` is the parser's DECANM / S8C1T state from before it parsed
+    /// `parsed`.  Folding each output into it, in event order, tracks the mode
+    /// in force at every point of the byte stream; once the batch is applied it
+    /// is written back to the parser so a mode change that arrived inside a
+    /// tmux passthrough payload (which the outer parser never emitted) also
+    /// governs the following reads.
+    fn process_parsed_outputs(&mut self, parsed: &[TerminalOutput], entry_modes: WireModes) {
+        let mut wire_modes = entry_modes;
+        self.process_outputs_at_depth(parsed, 0, &mut wire_modes);
+        self.parser.vt52_mode = wire_modes.vt52_mode;
+        self.parser.s8c1t_mode = wire_modes.s8c1t_mode;
     }
 
     /// Apply `outputs` in event order at tmux nesting `depth`.
@@ -517,28 +551,37 @@ impl TerminalState {
     /// mode flags are synced, (c) `ResetDevice` applies the `TerminalState`
     /// RIS reset, and only then (d) the tmux payloads the handler queued while
     /// applying it are drained.  Each payload is parsed with a **fresh**
-    /// [`FreminalAnsiParser`] seeded with the outer parser's `vt52_mode` and
-    /// `s8c1t_mode`: a payload is a complete sequence, so it must neither
-    /// splice into nor leave residue in whatever sequence the outer parser is
-    /// part-way through.
+    /// [`FreminalAnsiParser`] seeded with `wire_modes`, the DECANM / S8C1T mode
+    /// in force at that output's position in the byte stream (not the outer
+    /// parser's end-of-read mode): a payload is a complete sequence, so it
+    /// must neither splice into nor leave residue in whatever sequence the
+    /// outer parser is part-way through.
     ///
     /// The end-of-batch housekeeping (`finish_output_batch`) is deliberately
     /// **not** run here: it is a per-PTY-read cost (see
     /// `prune_evicted_real_placements`), and nested payloads are part of the
-    /// same read.  [`Self::process_parsed_outputs`] runs it once at the top.
-    fn process_outputs_at_depth(&mut self, outputs: &[TerminalOutput], depth: usize) {
+    /// same read.  `handle_incoming_data` runs it once per PTY read, after every
+    /// segment.
+    fn process_outputs_at_depth(
+        &mut self,
+        outputs: &[TerminalOutput],
+        depth: usize,
+        wire_modes: &mut WireModes,
+    ) {
         for output in outputs {
             self.handler.process_output_in_batch(output);
             self.sync_mode_flags(output);
             if matches!(output, TerminalOutput::ResetDevice) {
-                // RIS resets the parser's DECANM / S8C1T modes mid-iteration.
-                // The outputs that follow in this same chunk were already
-                // parsed, so they are applied as parsed; the parser's
-                // in-flight sequence, `leftover_data` and queued window
-                // commands belong to bytes after the RIS and survive it.
+                // The parser's in-flight sequence, `leftover_data` and queued
+                // window commands belong to bytes after the RIS and survive it.
                 self.apply_state_reset();
             }
-            self.process_tmux_passthrough_queue(depth);
+            apply_parser_mode_change(
+                output,
+                &mut wire_modes.vt52_mode,
+                &mut wire_modes.s8c1t_mode,
+            );
+            self.process_tmux_passthrough_queue(depth, wire_modes);
         }
     }
 
@@ -546,7 +589,7 @@ impl TerminalState {
     /// through a fresh parser, one nesting level below `depth`.
     ///
     /// See [`Self::process_outputs_at_depth`] for the depth semantics.
-    fn process_tmux_passthrough_queue(&mut self, depth: usize) {
+    fn process_tmux_passthrough_queue(&mut self, depth: usize, wire_modes: &mut WireModes) {
         let queued = self.handler.take_tmux_passthrough_queue();
         for payload in queued {
             let payload_depth = depth + 1;
@@ -558,13 +601,20 @@ impl TerminalState {
                 continue;
             }
             let mut parser = FreminalAnsiParser::new();
-            parser.vt52_mode = self.parser.vt52_mode;
-            parser.s8c1t_mode = self.parser.s8c1t_mode;
-            let inner = parser.push(&payload);
-            for output in &inner {
-                trace!(output = %BoundedDisplay(output), "parsed tmux passthrough output");
+            let mut rest = payload.as_slice();
+            loop {
+                parser.vt52_mode = wire_modes.vt52_mode;
+                parser.s8c1t_mode = wire_modes.s8c1t_mode;
+                let (inner, consumed) = parser.push_through_tmux_passthrough(rest);
+                for output in &inner {
+                    trace!(output = %BoundedDisplay(output), "parsed tmux passthrough output");
+                }
+                self.process_outputs_at_depth(&inner, payload_depth, wire_modes);
+                let Some(remaining) = rest.get(consumed..).filter(|r| !r.is_empty()) else {
+                    break;
+                };
+                rest = remaining;
             }
-            self.process_outputs_at_depth(&inner, payload_depth);
         }
     }
 
@@ -577,10 +627,9 @@ impl TerminalState {
     /// - `modes` return to their defaults, **except** `theme_mode` and
     ///   `theming`, which are config / OS-pushed state that is re-pushed only
     ///   on the next `ThemeModeUpdate`;
-    /// - the parser's `vt52_mode` and `s8c1t_mode` return to ANSI / 7-bit.  The
-    ///   parser itself is **not** replaced: this chunk has already been parsed,
-    ///   so the parser's in-flight sequence and pending data belong to bytes
-    ///   that follow the RIS;
+    /// - the parser is **not** touched: it reset its own `vt52_mode` and
+    ///   `s8c1t_mode` when it emitted `ResetDevice`, and its in-flight sequence
+    ///   and pending data belong to bytes that follow the RIS;
     /// - `leftover_data` is kept for the same reason (it holds a split UTF-8
     ///   character that follows the RIS);
     /// - `window_commands` is kept: those events were already emitted and are
@@ -595,8 +644,6 @@ impl TerminalState {
             theming,
             ..TerminalModes::default()
         };
-        self.parser.vt52_mode = Decanm::Ansi;
-        self.parser.s8c1t_mode = S8c1t::SevenBit;
     }
 
     /// Process one chunk of raw PTY bytes through the full terminal pipeline.
@@ -614,16 +661,18 @@ impl TerminalState {
     ///
     /// 3. **Parser** — feeds the complete (non-trailing) bytes to
     ///    `FreminalAnsiParser::push()`, which produces a `Vec<TerminalOutput>`.
+    ///    The parser applies a DECANM / S8C1T / S7C1T / RIS mode change itself as
+    ///    it emits the output, so the rest of the same read is parsed under the
+    ///    new mode.
     ///
     /// 4. **Event-order processing** — a single pass over the parsed outputs.
     ///    For each `TerminalOutput` item, in order: the handler applies it to
     ///    the buffer (text insertion, cursor movement, erase operations, mode
     ///    changes, replies, etc.); the `TerminalState`-owned mode flags are
-    ///    synced (mouse tracking, bracketed paste, focus reporting, DECANM,
-    ///    etc.); if the item is `ResetDevice` (ESC c), the `TerminalState` RIS
-    ///    reset runs at that point (modes other than the theme state, and the
-    ///    parser's DECANM / S8C1T modes; `leftover_data`, the parser's
-    ///    in-flight sequence and queued window commands survive); and finally
+    ///    synced (mouse tracking, bracketed paste, focus reporting, etc.); if
+    ///    the item is `ResetDevice` (ESC c), the `TerminalState` RIS reset runs
+    ///    at that point (modes other than the theme state; `leftover_data`, the
+    ///    parser's in-flight sequence and queued window commands survive); and finally
     ///    any DCS tmux passthrough payload the item queued is parsed with a
     ///    fresh parser and processed the same way, recursively, up to
     ///    `MAX_TMUX_PASSTHROUGH_DEPTH` levels, before the next item is looked
@@ -692,8 +741,12 @@ impl TerminalState {
                     continue;
                 };
                 // If the declared sequence extends past the end of the buffer,
-                // this leading byte begins an incomplete sequence.
-                if i + seq_len > len {
+                // this leading byte begins an incomplete sequence -- held back
+                // only when what is there is a well-formed prefix. An
+                // ill-formed tail (`E0 84`: `E0` needs `A0`-`BF` next) is not
+                // a character in progress and is processed now, so a C1 byte
+                // in it acts under S8C1T without waiting for another read.
+                if i + seq_len > len && Utf8Tracker::is_incomplete_prefix(&incoming[i..]) {
                     found = Some(i);
                 }
                 // Whether or not it's incomplete we stop scanning: a leading byte
@@ -713,16 +766,35 @@ impl TerminalState {
             }
         }
 
-        let parsed = self.parser.push(&incoming);
+        // The read is parsed in pieces, each ending at a `DCS tmux;` wrapper,
+        // so a mode change inside a wrapper's payload governs the bytes after
+        // it, as it does when the read ends at the wrapper.
+        let mut rest = incoming.as_slice();
+        loop {
+            let entry_modes = WireModes {
+                vt52_mode: self.parser.vt52_mode,
+                s8c1t_mode: self.parser.s8c1t_mode,
+            };
+            let (parsed, consumed) = self.parser.push_through_tmux_passthrough(rest);
 
-        for output in &parsed {
-            // Outputs can carry whole DCS/APC/OSC payloads, so bound what is
-            // logged, and bound it while formatting rather than after a full
-            // `to_string()`. `tracing` formats only when the event is enabled.
-            trace!(output = %BoundedDisplay(output), "parsed terminal output");
+            for output in &parsed {
+                // Outputs can carry whole DCS/APC/OSC payloads, so bound what is
+                // logged, and bound it while formatting rather than after a full
+                // `to_string()`. `tracing` formats only when the event is enabled.
+                trace!(output = %BoundedDisplay(output), "parsed terminal output");
+            }
+
+            self.process_parsed_outputs(&parsed, entry_modes);
+
+            let Some(remaining) = rest.get(consumed..).filter(|r| !r.is_empty()) else {
+                break;
+            };
+            rest = remaining;
         }
 
-        self.process_parsed_outputs(&parsed);
+        // The end-of-batch housekeeping is a per-read cost, so it runs once
+        // after every segment of the read, not once per segment.
+        self.handler.finish_output_batch();
 
         // Drain window commands queued by the new handler into the shared vec
         // so that the GUI's existing drain loop in handle_window_manipulation
@@ -746,7 +818,6 @@ impl TerminalState {
     /// Will return an error if the write fails
     pub fn write(&self, to_write: &TerminalInput) -> Result<(), InternalStateError> {
         let decckm = self.cursor_key_mode();
-        let keypad_app = self.modes.keypad_mode;
         let modify_other_keys = self.handler.modify_other_keys_level();
         let application_escape_key = self.handler.application_escape_key();
         let backarrow_sends_bs = self.modes.backarrow_key_mode;
@@ -754,12 +825,12 @@ impl TerminalState {
         let kitty_keyboard_flags = self.handler.kitty_keyboard_flags();
         match to_write.to_payload(
             decckm,
-            keypad_app,
             modify_other_keys,
             application_escape_key,
             backarrow_sends_bs,
             line_feed_mode,
             kitty_keyboard_flags,
+            *self.handler.s8c1t_mode(),
             &KeyEventMeta::PRESS,
         ) {
             TerminalInputPayload::Single(c) => {
@@ -994,6 +1065,26 @@ mod tests {
     }
 
     #[test]
+    fn an_ill_formed_utf8_tail_is_processed_now() {
+        // `84` cannot continue `E0`, so the tail is not held back: under
+        // S8C1T the `84` is IND in this read (PR #589 review).
+        let mut state = TerminalState::default();
+        let before = state.handler.cursor_pos();
+        state.handle_incoming_data(b"\x1b G\xe0\x84");
+        assert!(state.leftover_data.is_none(), "nothing is held back");
+        assert_eq!(state.handler.cursor_pos().y, before.y + 1, "IND moved down");
+    }
+
+    #[test]
+    fn a_well_formed_incomplete_utf8_tail_is_held_back() {
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b G\xf0\x9f");
+        assert_eq!(state.leftover_data, Some(vec![0xF0, 0x9F]));
+        state.handle_incoming_data(b"\x98\x80");
+        assert!(state.leftover_data.is_none());
+    }
+
+    #[test]
     fn handle_incoming_data_ascii_only_no_leftover() {
         let mut state = TerminalState::default();
         state.handle_incoming_data(b"Hello");
@@ -1047,6 +1138,23 @@ mod tests {
         // Must not panic — error is logged but not propagated
         state.send_focus_event(true);
         state.send_focus_event(false);
+    }
+
+    // ── 147.7: CSI Ps u with parameters is ignored ──────────────────────────
+    #[test]
+    fn csi_ps_u_with_parameter_does_not_restore_cursor() {
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b[3;4H\x1b7\x1b[10;10H");
+        let moved = state.cursor_pos();
+        assert_eq!((moved.x, moved.y), (9, 9));
+
+        state.handle_incoming_data(b"\x1b[1u");
+        let after = state.cursor_pos();
+        assert_eq!((after.x, after.y), (9, 9), "CSI 1 u must not restore");
+
+        state.handle_incoming_data(b"\x1b[u");
+        let restored = state.cursor_pos();
+        assert_eq!((restored.x, restored.y), (3, 2), "CSI u must restore");
     }
 
     // ── Lines 372-378: Mouse mode query DECRPM for encoding modes ───────────

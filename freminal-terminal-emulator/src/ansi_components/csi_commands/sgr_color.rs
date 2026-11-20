@@ -8,7 +8,7 @@
 //! SGR `38` (foreground), `48` (background) and `58` (underline colour) are
 //! followed by a colour type and its values, either as further
 //! semicolon-separated parameters (`38;2;R;G;B`, `38;5;N`) or as colon
-//! sub-parameters (`38:2::R:G:B`, `38:5:N`). [`parse_sgr_color`] turns the
+//! sub-parameters (`38:2::R:G:B`, `38:5:N`). `parse_sgr_color` turns the
 //! values after the `38`/`48`/`58` into a [`TerminalColor`].
 //!
 //! This is the single extractor shared by SGR and by every later consumer of

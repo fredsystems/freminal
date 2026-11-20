@@ -8,9 +8,38 @@
 //! Contains DA1/DA2/DA3, DECREQTPARM, DSR, color theme report, and
 //! device name/version responses.
 
+use conv2::ValueFrom;
 use freminal_common::buffer_states::modes::decanm::Decanm;
+use freminal_common::buffer_states::sixel::{MAX_PALETTE, MAX_SIXEL_DIMENSION, MAX_SIXEL_PIXELS};
+use freminal_common::buffer_states::xtsmgraphics::{
+    GraphicsAttributeAction, GraphicsAttributeItem,
+};
 
 use super::TerminalHandler;
+
+/// XTSMGRAPHICS status: success.
+const XTSMGRAPHICS_OK: u8 = 0;
+/// XTSMGRAPHICS status: error in `Pi`.
+const XTSMGRAPHICS_BAD_ITEM: u8 = 1;
+/// XTSMGRAPHICS status: error in `Pa`.
+const XTSMGRAPHICS_BAD_ACTION: u8 = 2;
+/// XTSMGRAPHICS status: failure.
+const XTSMGRAPHICS_FAILURE: u8 = 3;
+
+/// The largest sixel geometry, per axis, that is safe to advertise.
+///
+/// The decoder caps each axis at [`MAX_SIXEL_DIMENSION`] and the total at
+/// [`MAX_SIXEL_PIXELS`], so a client that sizes an image to the reported
+/// maximum on both axes must not exceed either. The largest square that
+/// satisfies both is the answer.
+const MAX_SIXEL_GEOMETRY: usize = {
+    let side = MAX_SIXEL_PIXELS.isqrt();
+    if side < MAX_SIXEL_DIMENSION {
+        side
+    } else {
+        MAX_SIXEL_DIMENSION
+    }
+};
 
 impl TerminalHandler {
     /// Handle DA2 — Secondary Device Attributes.
@@ -64,6 +93,60 @@ impl TerminalHandler {
     pub fn handle_device_name_and_version(&mut self) {
         let version = env!("CARGO_PKG_VERSION");
         self.write_dcs_response(&format!(">|XTerm(Freminal {version})"));
+    }
+
+    /// Handle XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`).
+    ///
+    /// Replies `CSI ? Pi ; Ps [; Pv ...] S` following xterm built with sixel
+    /// but without `ReGIS` (`charproc.c`, `CASE_GRAPHICS_ATTRIBUTES`; xterm
+    /// `ctlseqs.txt`). The status `Ps` is 0 (success), 1 (error in `Pi`), 2
+    /// (error in `Pa`) or 3 (failure); the value fields are present only on
+    /// success.
+    ///
+    /// - `Pi=1` (colour registers): read, reset and read-maximum answer
+    ///   [`MAX_PALETTE`], because the register count is fixed; set answers 3.
+    /// - `Pi=2` (sixel geometry): read answers the text-area pixel size
+    ///   (grid size times cell pixel size) clamped to the decoder maximum;
+    ///   read-maximum answers that maximum; reset and set answer 3.
+    /// - `Pi=3` (`ReGIS`) answers 1 (error in `Pi`), as xterm does when built
+    ///   without `ReGIS`: the item does not exist (`OPT_REGIS_GRAPHICS` compiled
+    ///   out falls to the `default:` arm).
+    pub fn handle_graphics_attribute_request(
+        &mut self,
+        item: GraphicsAttributeItem,
+        action: GraphicsAttributeAction,
+    ) {
+        use GraphicsAttributeAction as Action;
+
+        let pi = item.code();
+        let reply = match item {
+            GraphicsAttributeItem::ColorRegisters => match action {
+                Action::Read | Action::Reset | Action::ReadMaximum => {
+                    format!("?{pi};{XTSMGRAPHICS_OK};{MAX_PALETTE}S")
+                }
+                Action::Set => format!("?{pi};{XTSMGRAPHICS_FAILURE}S"),
+                Action::Unknown(_) => format!("?{pi};{XTSMGRAPHICS_BAD_ACTION}S"),
+            },
+            GraphicsAttributeItem::SixelGeometry => match action {
+                Action::Read => {
+                    let (cols, rows) = self.win_size();
+                    let cell_w = usize::value_from(self.cell_pixel_width).unwrap_or(usize::MAX);
+                    let cell_h = usize::value_from(self.cell_pixel_height).unwrap_or(usize::MAX);
+                    let width = cols.saturating_mul(cell_w).min(MAX_SIXEL_GEOMETRY);
+                    let height = rows.saturating_mul(cell_h).min(MAX_SIXEL_GEOMETRY);
+                    format!("?{pi};{XTSMGRAPHICS_OK};{width};{height}S")
+                }
+                Action::ReadMaximum => {
+                    format!("?{pi};{XTSMGRAPHICS_OK};{MAX_SIXEL_GEOMETRY};{MAX_SIXEL_GEOMETRY}S")
+                }
+                Action::Reset | Action::Set => format!("?{pi};{XTSMGRAPHICS_FAILURE}S"),
+                Action::Unknown(_) => format!("?{pi};{XTSMGRAPHICS_BAD_ACTION}S"),
+            },
+            GraphicsAttributeItem::ReGisGeometry | GraphicsAttributeItem::Unknown(_) => {
+                format!("?{pi};{XTSMGRAPHICS_BAD_ITEM}S")
+            }
+        };
+        self.write_csi_response(&reply);
     }
 
     /// Handle DSR — Device Status Report (Ps=5).

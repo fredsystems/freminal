@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Offscreen egui-level pixel harness for [`crate::frame_paint::paint_frame`]
+//! Offscreen egui-level pixel harness for `crate::frame_paint::paint_frame`
 //! (Task 124.19b).
 //!
 //! One concept: driving `paint_frame` -- the real egui `run_ui` /
@@ -57,15 +57,15 @@ pub enum HarnessError {
     PainterCreation(String),
 }
 
-/// A [`FrameSurface`] over an [`OffscreenGl`] pbuffer, with caller-chosen
+/// A `FrameSurface` over an [`OffscreenGl`] pbuffer, with caller-chosen
 /// partial-present support and buffer age.
 ///
 /// This is the load-bearing piece of the harness: a real windowed
-/// [`crate::gl_context::GlState`] can never report `buffer_age() == 1` on
+/// `crate::gl_context::GlState` can never report `buffer_age() == 1` on
 /// its very first frame (a fresh surface's back buffer holds nothing), so a
-/// test cannot reach [`PartialPresentDecision::Taken`] by driving a real
+/// test cannot reach `PartialPresentDecision::Taken` by driving a real
 /// surface through only two frames. This type lets a test simply declare
-/// the surface state [`decide_partial_present`](crate::frame_paint::decide_partial_present)
+/// the surface state `decide_partial_present`
 /// needs, independent of how many frames have actually been painted.
 ///
 /// `age` is a [`Cell<u32>`], not a plain field: a 124.18 test needs
@@ -74,12 +74,12 @@ pub enum HarnessError {
 /// `age == 1` to seed history, then a `Partial` frame at `age == 2` to
 /// exercise the union) -- see [`Self::set_age`].
 ///
-/// Also records whether [`FrameSurface::clear_to`] was called via a
+/// Also records whether `FrameSurface::clear_to` was called via a
 /// [`Cell<bool>`] -- the harness runs entirely on one thread, so a `Cell`
 /// is sufficient and avoids the ceremony of a `Mutex` for a single flag.
 ///
 /// Separately records the region passed to the most recent
-/// [`FrameSurface::clear_region_to`] call (124.20), as a
+/// `FrameSurface::clear_region_to` call (124.20), as a
 /// `Cell<Option<DamageRect>>` rather than a second bool: a test asserting
 /// the scissored clear fired needs to know *which* region it was given,
 /// not just that it was called, to catch a bug that scissors to the wrong
@@ -93,11 +93,11 @@ pub struct HarnessSurface {
 }
 
 impl HarnessSurface {
-    /// Wrap `off` as a [`FrameSurface`] that reports `support` and, until
+    /// Wrap `off` as a `FrameSurface` that reports `support` and, until
     /// changed via [`Self::set_age`], `age` for every frame painted through
     /// it (see the type doc for why this can't be probed from `off`
     /// itself). Per `freminal-state-representation`, this takes the named
-    /// [`PartialPresentSupport`] rather than a bare `bool`.
+    /// `PartialPresentSupport` rather than a bare `bool`.
     #[must_use]
     pub const fn new(off: OffscreenGl, support: PartialPresentSupport, age: u32) -> Self {
         Self {
@@ -116,14 +116,14 @@ impl HarnessSurface {
         self.age.set(age);
     }
 
-    /// Whether [`FrameSurface::clear_to`] was called since the last
+    /// Whether `FrameSurface::clear_to` was called since the last
     /// [`Self::reset_cleared`].
     #[must_use]
     pub const fn was_cleared(&self) -> bool {
         self.cleared.get()
     }
 
-    /// The region passed to [`FrameSurface::clear_region_to`] since the
+    /// The region passed to `FrameSurface::clear_region_to` since the
     /// last [`Self::reset_cleared`], or `None` if it was not called this
     /// frame (124.20).
     #[must_use]
@@ -244,7 +244,7 @@ impl Readback {
     }
 }
 
-/// One frame's paint closure, in the exact shape [`paint_frame`] expects.
+/// One frame's paint closure, in the exact shape `paint_frame` expects.
 ///
 /// Boxed (rather than a bare generic on [`HarnessDriver::run_frames`]) so a
 /// single `Vec` can hold frames whose closures capture different local
@@ -259,16 +259,16 @@ pub struct HarnessFrameResult {
     /// The framebuffer contents immediately after this frame's paint.
     pub readback: Readback,
     /// Why this frame did or did not take the skip-clear + partial-present
-    /// path -- see [`PartialPresentDecision`].
+    /// path -- see `PartialPresentDecision`.
     pub decision: PartialPresentDecision,
-    /// Whether [`FrameSurface::clear_to`] was called for this frame.
+    /// Whether `FrameSurface::clear_to` was called for this frame.
     pub cleared: bool,
-    /// The region [`FrameSurface::clear_region_to`] was called with for
+    /// The region `FrameSurface::clear_region_to` was called with for
     /// this frame, or `None` if it was not called (124.20).
     pub scissor_cleared: Option<DamageRect>,
 }
 
-/// Drives [`paint_frame`] against one [`HarnessSurface`], painting a
+/// Drives `paint_frame` against one [`HarnessSurface`], painting a
 /// caller-supplied sequence of frames with no clear or buffer swap between
 /// them beyond whatever `paint_frame` itself decides.
 ///
@@ -1118,7 +1118,7 @@ mod tests {
     /// region subsumes but never repaints. 124.20 replaces "skip the
     /// clear" with "scissor the clear to the redraw region"
     /// (`GlState::clear_scissored`, reached through
-    /// [`FrameSurface::clear_region_to`]), which is what turns this from a
+    /// `FrameSurface::clear_region_to`), which is what turns this from a
     /// defect pin into a fix pin. This inversion is mandatory, not a
     /// rewrite of convenience -- see `PLAN_124_RENDER_EFFICIENCY.md`'s
     /// 124.20.

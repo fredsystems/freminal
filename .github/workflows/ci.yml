@@ -151,6 +151,17 @@ jobs:
         run: cargo xtask check
       - if: ${{ matrix.toolchain != 'stable' }}
         run: cargo xtask check-msrv
+      # Rustdoc with `-D warnings` (broken / private intra-doc links). One OS
+      # is enough: it checks doc text, not platform behaviour. Windows- and
+      # macOS-only items are not documented on this leg.
+      - if: ${{ matrix.toolchain == 'stable' && matrix.os == 'ubuntu-latest' }}
+        run: cargo xtask check-docs
+      # Clippy on `freminal` with only the `gl-pixel` feature (Task 147.26):
+      # items kept alive by `--all-features` are dead in that combination.
+      # One Linux leg is enough; the harness is Linux-only and the Windows
+      # target is covered locally by `cargo xtask check-windows`.
+      - if: ${{ matrix.toolchain == 'stable' && matrix.os == 'ubuntu-latest' }}
+        run: cargo xtask check-gl-pixel
 
   # Run the test suite natively on every target platform. The `check`
   # matrix above only compiles (`cargo xtask check`); it never runs the

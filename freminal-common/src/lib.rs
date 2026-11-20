@@ -34,27 +34,20 @@
 pub mod app_state;
 /// CLI argument types.
 pub mod args;
-/// Base-64 encoding/decoding utilities.
 pub mod base64;
 /// Terminal cell state types: format, cursor, colors, SGR, modes, and output.
 pub mod buffer_states;
-/// Terminal color representation and the 256-color xterm palette.
 pub mod colors;
 /// Application configuration loaded from TOML and CLI arguments.
 pub mod config;
 /// Cursor position and visual style types.
 pub mod cursor;
-/// Toolkit-agnostic 2D geometry primitives (`Point`, `Rect`); no egui
-/// dependency.
 pub mod geometry;
-/// Toolkit-agnostic GUI styling geometry (corner radii, strokes, spacing).
 pub mod gui_theme;
 /// Registry of host-dependent capability facts the PTY thread cannot know by
 /// itself (configuration and platform).
 pub mod host_capabilities;
-/// Bounded, allocation-free `key=value` tokenizer for kitty-style metadata.
 pub mod key_value;
-/// Configurable key bindings: actions, key combos, and the binding map.
 pub mod keybindings;
 /// Layout file format types, parser, and resolver.
 pub mod layout;
@@ -64,18 +57,18 @@ pub mod logging;
 pub mod pty_write;
 /// SGR (Select Graphic Rendition) parameter types.
 pub mod sgr;
-/// The `TERM` value advertised to spawned programs: platform default and validation.
 pub mod term_name;
 /// Terminal window size type.
 pub mod terminal_size;
-/// Embedded terminfo database blob.
 pub mod terminfo;
+/// The terminfo source (`res/freminal.ti`) and its parser, for table-of-truth
+/// tests in downstream crates. Absent from production builds.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod terminfo_source;
 /// Embedded color theme palettes.
 pub mod themes;
 /// Persisted ephemeral UI window geometry (e.g. Settings window).
 pub mod window_state;
-/// Classification of path strings by Windows path syntax (UNC, device,
-/// drive-letter), used to refuse network paths before any filesystem call.
 pub mod windows_path;
 
 #[macro_use]

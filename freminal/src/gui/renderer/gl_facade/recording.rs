@@ -108,6 +108,7 @@ pub struct RecordingState {
     /// Task 125.8: monotonic counter fabricating `glow::Query` handles for
     /// `create_query`, the same per-type-counter style as the six handle
     /// types above.
+    #[cfg(any(feature = "gpu-profiling", test))]
     next_query: Cell<u32>,
     /// Task 125.8: which fabricated query handles a test (or the
     /// `gpu_profiling` adapter's own test suite) has declared "available",
@@ -115,7 +116,7 @@ pub struct RecordingState {
     /// [`Self::mark_query_available`]. Absent from this map means "not yet
     /// available", the correct default for a query that was just issued.
     query_results: RefCell<HashMap<glow::Query, u64>>,
-    /// Task 125.8: the string [`super::facade::Gl::get_parameter_string`]'s
+    /// Task 125.8: the string `super::facade::Gl::get_parameter_string`'s
     /// `Recording` arm reports for `glow::VERSION`. Defaults to empty,
     /// which `freminal_windowing::gpu_profiling::parse_gl_version_string`
     /// cannot parse, so
@@ -162,6 +163,7 @@ impl RecordingState {
             next_texture: Cell::new(1),
             next_framebuffer: Cell::new(1),
             next_uniform_location: Cell::new(1),
+            #[cfg(any(feature = "gpu-profiling", test))]
             next_query: Cell::new(1),
             query_results: RefCell::new(HashMap::new()),
             gl_version_string: RefCell::new(String::new()),
@@ -378,17 +380,18 @@ impl RecordingState {
     }
 
     /// Fabricate the next `glow::Query` (Task 125.8).
+    #[cfg(any(feature = "gpu-profiling", test))]
     pub(super) fn next_query(&self) -> glow::Query {
         glow::NativeQuery(Self::bump(&self.next_query))
     }
 
-    /// Override the string [`super::facade::Gl::get_parameter_string`]'s
+    /// Override the string `super::facade::Gl::get_parameter_string`'s
     /// `Recording` arm reports for `glow::VERSION` (Task 125.8). Test/
     /// adapter-support API, mirroring [`Self::mark_query_available`]: a
     /// test that wants `gui::renderer::gpu_profiling::PaneGpuTimingProfile::detect_capability`
     /// to resolve `Available` against a recording session calls this with
     /// a parseable desktop version string (e.g. `"4.6.0 Recording"`)
-    /// before calling `detect_capability`. See [`Self::gl_version_string`]'s
+    /// before calling `detect_capability`. See `Self::gl_version_string`'s
     /// doc on the field for why the default is deliberately empty
     /// (unparsable) instead.
     pub fn set_gl_version_string(&self, version: impl Into<String>) {
@@ -398,6 +401,7 @@ impl RecordingState {
     /// The current fabricated `GL_VERSION` string (Task 125.8) -- empty
     /// until [`Self::set_gl_version_string`] is called. Backs the
     /// `Recording` arm of `Gl::get_parameter_string(glow::VERSION)`.
+    #[cfg(any(feature = "gpu-profiling", test))]
     pub(super) fn gl_version_string(&self) -> String {
         self.gl_version_string.borrow().clone()
     }
@@ -411,10 +415,10 @@ impl RecordingState {
     /// "delayed availability" scenario
     /// `freminal_windowing::gpu_profiling::GpuQueryRing` is built to
     /// handle. Before this is called for a given `query`, both
-    /// [`super::facade::Gl::get_query_parameter_u32`] (with
+    /// `super::facade::Gl::get_query_parameter_u32` (with
     /// `GL_QUERY_RESULT_AVAILABLE`, via the `Recording` arm) reports
     /// unavailable (`0`) and
-    /// [`super::facade::Gl::get_query_parameter_u64`] reports `0` for it.
+    /// `super::facade::Gl::get_query_parameter_u64` reports `0` for it.
     pub fn mark_query_available(&self, query: glow::Query, result_ns: u64) {
         self.query_results.borrow_mut().insert(query, result_ns);
     }
@@ -422,6 +426,7 @@ impl RecordingState {
     /// Whether `query` has been marked available via
     /// [`Self::mark_query_available`] (Task 125.8). Backs the `Recording`
     /// arm of `Gl::get_query_parameter_u32(query, GL_QUERY_RESULT_AVAILABLE)`.
+    #[cfg(any(feature = "gpu-profiling", test))]
     pub(super) fn query_is_available(&self, query: glow::Query) -> bool {
         self.query_results.borrow().contains_key(&query)
     }
@@ -436,6 +441,7 @@ impl RecordingState {
     /// non-panicking `0` fallback keeps this recording-support code itself
     /// free of `unwrap`/`expect`/`panic!`, per the crate's panic-free
     /// production rule.
+    #[cfg(any(feature = "gpu-profiling", test))]
     pub(super) fn query_result_ns(&self, query: glow::Query) -> u64 {
         self.query_results
             .borrow()

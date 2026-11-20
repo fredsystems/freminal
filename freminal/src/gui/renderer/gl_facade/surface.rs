@@ -34,10 +34,10 @@
 /// reviewed, not waved through. There is no automated check that this
 /// array itself stays exhaustive against future call sites (that guard
 /// would require parsing method-call syntax, not just scanning for an
-/// import); [`tests::has_context_use_sites_match_allowlist`] instead
+/// import); `tests::has_context_use_sites_match_allowlist` instead
 /// guards the narrower, checkable invariant that no *new file* starts
 /// calling `glow::HasContext` methods outside the facade without going
-/// through [`NOT_YET_MIGRATED`](tests::NOT_YET_MIGRATED).
+/// through `NOT_YET_MIGRATED`.
 pub const GL_CALL_SURFACE: [&str; 56] = [
     "active_texture",
     "attach_shader",

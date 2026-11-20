@@ -11,6 +11,7 @@ use crate::buffer_states::modes::{
     ReportMode,
     allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
+    alt_sends_escape::AltSendsEscape,
     alternate_scroll::AlternateScroll,
     application_escape_key::ApplicationEscapeKey,
     decanm::Decanm,
@@ -28,14 +29,20 @@ use crate::buffer_states::modes::{
     decsdm::Decsdm,
     dectcem::Dectcem,
     grapheme::GraphemeClustering,
+    hilite_mouse_tracking::HiliteMouseTracking,
     in_band_resize_mode::InBandResizeMode,
     irm::Irm,
+    kam::Kam,
     keypad::KeypadMode,
     lnm::Lnm,
+    meta_sends_eighth_bit::MetaSendsEighthBit,
+    meta_sends_escape::MetaSendsEscape,
     mouse::{MouseEncoding, MouseTrack},
+    numlock_overrides_keypad::NumLockOverridesKeypad,
     private_color_registers::PrivateColorRegisters,
     reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
+    srm::Srm,
     sync_updates::SynchronizedUpdates,
     theme::Theming,
     unknown::{ModeNamespace, UnknownMode},
@@ -81,6 +88,10 @@ pub struct TerminalModes {
     pub line_feed_mode: Lnm,
     pub keypad_mode: KeypadMode,
     pub backarrow_key_mode: Decbkm,
+    /// `?1036`: whether legacy Alt+text is prefixed with `ESC`. Defaults to set.
+    pub meta_sends_escape: MetaSendsEscape,
+    /// `?1039`: stored and reported, read by nothing else.
+    pub alt_sends_escape: AltSendsEscape,
     pub alternate_scroll: AlternateScroll,
     /// DEC private mode `?2031` — the current dark/light theming state.
     ///
@@ -142,7 +153,28 @@ pub enum Mode {
     ApplicationEscapeKey(ApplicationEscapeKey),
     InBandResizeMode(InBandResizeMode),
     PrivateColorRegisters(PrivateColorRegisters),
-    UnknownQuery(Vec<u8>),
+    /// Keyboard Action Mode (ANSI 2) — recognised, not implemented.
+    Kam(Kam),
+    /// Send/Receive Mode (ANSI 12) — recognised, not implemented.
+    Srm(Srm),
+    /// Hilite mouse tracking (`?1001`) — recognised, not implemented. Not a
+    /// `MouseMode`: it never reports events or changes the tracking level.
+    HiliteMouseTracking(HiliteMouseTracking),
+    /// Meta sets the eighth bit (`?1034`) — recognised, not implemented.
+    MetaSendsEighthBit(MetaSendsEighthBit),
+    /// `NumLock` overrides the application keypad (`?1035`) — recognised, not
+    /// implemented.
+    NumLockOverridesKeypad(NumLockOverridesKeypad),
+    /// Meta sends escape (`?1036`) -- gates the legacy Alt prefix.
+    MetaSendsEscape(MetaSendsEscape),
+    /// Alt sends escape (`?1039`) -- stored and reported only.
+    AltSendsEscape(AltSendsEscape),
+    /// DECRQM for a mode with no handler. `namespace` records whether the
+    /// query carried the `?` prefix so the reply can keep the same form.
+    UnknownQuery {
+        namespace: ModeNamespace,
+        params: Vec<u8>,
+    },
     Unknown(UnknownMode),
 }
 
@@ -179,7 +211,9 @@ impl Mode {
             b"?8" => Self::Decarm(Decarm::new(&mode)),
             b"?9" => Self::mouse_mode(mode, MouseTrack::XtMsex10, 9),
             b"?12" => Self::XtCBlink(XtCBlink::new(&mode)),
+            b"2" => Self::Kam(Kam::new(&mode)),
             b"4" => Self::Irm(Irm::new(&mode)),
+            b"12" => Self::Srm(Srm::new(&mode)),
             b"20" => Self::LineFeedMode(Lnm::new(&mode)),
             b"?25" => Self::Dectem(Dectcem::new(&mode)),
             b"?40" => Self::AllowColumnModeSwitch(AllowColumnModeSwitch::new(&mode)),
@@ -190,7 +224,7 @@ impl Mode {
             b"?69" => Self::Declrmm(Declrmm::new(&mode)),
             b"?80" => Self::Decsdm(Decsdm::new(&mode)),
             b"?1000" => Self::mouse_mode(mode, MouseTrack::XtMseX11, 1000),
-            b"?1001" => Self::mouse_mode(mode, MouseTrack::XtMseHilite, 1001),
+            b"?1001" => Self::HiliteMouseTracking(HiliteMouseTracking::new(&mode)),
             b"?1002" => Self::mouse_mode(mode, MouseTrack::XtMseBtn, 1002),
             b"?1003" => Self::mouse_mode(mode, MouseTrack::XtMseAny, 1003),
             b"?1004" => Self::XtMseWin(XtMseWin::new(&mode)),
@@ -201,6 +235,10 @@ impl Mode {
             // recommended; ?1006 (SGR) is the preferred replacement.
             b"?1007" => Self::AlternateScroll(AlternateScroll::new(&mode)),
             b"?1016" => Self::mouse_encoding_mode(mode, MouseEncoding::SgrPixels, 1016),
+            b"?1034" => Self::MetaSendsEighthBit(MetaSendsEighthBit::new(&mode)),
+            b"?1035" => Self::NumLockOverridesKeypad(NumLockOverridesKeypad::new(&mode)),
+            b"?1036" => Self::MetaSendsEscape(MetaSendsEscape::new(&mode)),
+            b"?1039" => Self::AltSendsEscape(AltSendsEscape::new(&mode)),
             b"?1045" => Self::XtRevWrap2(XtRevWrap2::new(&mode)),
             b"?1046" => Self::AllowAltScreen(AllowAltScreen::new(&mode)),
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
@@ -223,14 +261,18 @@ impl Mode {
                     .copied()
                     .collect::<Vec<u8>>();
 
-                if mode == SetMode::DecQuery {
-                    Self::UnknownQuery(output_params)
+                let namespace = if is_dec {
+                    ModeNamespace::Dec
                 } else {
-                    let namespace = if is_dec {
-                        ModeNamespace::Dec
-                    } else {
-                        ModeNamespace::Ansi
-                    };
+                    ModeNamespace::Ansi
+                };
+
+                if mode == SetMode::DecQuery {
+                    Self::UnknownQuery {
+                        namespace,
+                        params: output_params,
+                    }
+                } else {
                     Self::Unknown(UnknownMode::new(&output_params, mode, namespace))
                 }
             }
@@ -284,11 +326,20 @@ impl ReportMode for Mode {
             Self::ApplicationEscapeKey(aek) => aek.report(override_mode),
             Self::InBandResizeMode(mok) => mok.report(override_mode),
             Self::PrivateColorRegisters(pcr) => pcr.report(override_mode),
+            Self::Kam(kam) => kam.report(override_mode),
+            Self::Srm(srm) => srm.report(override_mode),
+            Self::HiliteMouseTracking(hilite) => hilite.report(override_mode),
+            Self::MetaSendsEighthBit(meta) => meta.report(override_mode),
+            Self::NumLockOverridesKeypad(numlock) => numlock.report(override_mode),
+            Self::MetaSendsEscape(meta) => meta.report(override_mode),
+            Self::AltSendsEscape(alt) => alt.report(override_mode),
             Self::Unknown(mode) => mode.report(override_mode),
-            Self::UnknownQuery(v) => {
-                // convert each digit to a char
-                let digits = v.iter().map(|&x| x as char).collect::<String>();
-                format!("?{digits};0$y")
+            Self::UnknownQuery { namespace, params } => {
+                let digits = params.iter().map(|&x| x as char).collect::<String>();
+                match namespace {
+                    ModeNamespace::Dec => format!("?{digits};0$y"),
+                    ModeNamespace::Ansi => format!("{digits};0$y"),
+                }
             }
         }
     }
@@ -338,8 +389,21 @@ impl fmt::Display for Mode {
             Self::ApplicationEscapeKey(aek) => write!(f, "{aek}"),
             Self::InBandResizeMode(mok) => write!(f, "{mok}"),
             Self::PrivateColorRegisters(pcr) => write!(f, "{pcr}"),
+            Self::Kam(kam) => write!(f, "{kam}"),
+            Self::Srm(srm) => write!(f, "{srm}"),
+            Self::HiliteMouseTracking(hilite) => write!(f, "{hilite}"),
+            Self::MetaSendsEighthBit(meta) => write!(f, "{meta}"),
+            Self::NumLockOverridesKeypad(numlock) => write!(f, "{numlock}"),
+            Self::MetaSendsEscape(meta) => write!(f, "{meta}"),
+            Self::AltSendsEscape(alt) => write!(f, "{alt}"),
             Self::Unknown(params) => write!(f, "{params}"),
-            Self::UnknownQuery(v) => write!(f, "Unknown Query({v:?})"),
+            Self::UnknownQuery { namespace, params } => {
+                write!(
+                    f,
+                    "{namespace} Unknown Query({})",
+                    String::from_utf8_lossy(params)
+                )
+            }
         }
     }
 }
@@ -543,16 +607,45 @@ mod tests {
     // ── Mode::UnknownQuery ──────────────────────────────────────────
 
     #[test]
-    fn report_unknown_query_decrpm_format() {
-        let mode = Mode::UnknownQuery(vec![b'4', b'7']);
+    fn report_unknown_query_dec_decrpm_format() {
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: vec![b'4', b'7'],
+        };
         assert_eq!(mode.report(None), "?47;0$y");
     }
 
     #[test]
+    fn report_unknown_query_ansi_decrpm_format_has_no_question_mark() {
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Ansi,
+            params: vec![b'4', b'7'],
+        };
+        assert_eq!(mode.report(None), "47;0$y");
+    }
+
+    #[test]
     fn display_unknown_query() {
-        let mode = Mode::UnknownQuery(vec![b'4', b'7']);
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: vec![b'4', b'7'],
+        };
         let s = format!("{mode}");
         assert!(s.contains("Unknown Query"), "got: {s}");
+    }
+
+    #[test]
+    fn display_unknown_query_prints_the_mode_as_digits() {
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: b"9999".to_vec(),
+        };
+        assert_eq!(format!("{mode}"), "DEC Unknown Query(9999)");
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Ansi,
+            params: b"77".to_vec(),
+        };
+        assert_eq!(format!("{mode}"), "ANSI Unknown Query(77)");
     }
 
     // ── Delegating Display arms ─────────────────────────────────────

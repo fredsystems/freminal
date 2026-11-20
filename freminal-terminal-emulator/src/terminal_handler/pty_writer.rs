@@ -221,8 +221,8 @@ impl TerminalHandler {
 
     /// Serialise a GUI-originated reply and write it to the PTY.
     ///
-    /// Builds the reply body and frames it through [`Self::write_csi_response`]
-    /// or [`Self::write_osc_response`], so the introducer and terminator follow
+    /// Builds the reply body and frames it through `Self::write_csi_response`
+    /// or `Self::write_osc_response`, so the introducer and terminator follow
     /// the current S8C1T mode. Absent or empty OSC 99 ids default to `0`.
     ///
     /// Text an application chose and the terminal merely stores (the title,

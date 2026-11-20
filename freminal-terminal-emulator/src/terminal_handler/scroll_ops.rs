@@ -193,8 +193,7 @@ impl TerminalHandler {
             }
             (AltScreenMode::SaveClear1049, AltScreenAction::Enter) => {
                 self.handle_save_cursor();
-                self.buffer.switch_to_alternate();
-                self.clear_alternate_screen();
+                self.switch_to_alternate_cleared();
             }
             (AltScreenMode::SaveClear1049, AltScreenAction::Leave) => {
                 self.buffer.switch_to_primary();

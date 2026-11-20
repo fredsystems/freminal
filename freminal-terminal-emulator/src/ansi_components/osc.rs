@@ -55,7 +55,7 @@ const OSC_CLIPBOARD_HEADER_ALLOWANCE: usize = 256;
 /// [`MAX_OSC_BYTES`].
 ///
 /// This is the padded base64 size of [`MAX_OSC52_WRITE_BYTES`]
-/// (`4 * ceil(n / 3)`) plus [`OSC_CLIPBOARD_HEADER_ALLOWANCE`], so the largest
+/// (`4 * ceil(n / 3)`) plus `OSC_CLIPBOARD_HEADER_ALLOWANCE`, so the largest
 /// permitted clipboard write is still accumulated, but a hostile multi-megabyte
 /// sequence is discarded without being buffered (Task 148.16, GHSA-v2hw-gcg8-2rfr).
 /// A sequence over this cap is dropped whole, like any over-limit OSC. The
@@ -180,6 +180,11 @@ impl AnsiOscParser {
     /// Control bytes follow ECMA-48 and the DEC VT500 state machine (as xterm
     /// does): CAN and SUB cancel the sequence with no output; every other C0
     /// byte except BEL and ESC, and DEL, is ignored and does not end it.
+    ///
+    /// An ESC followed by anything other than `\` (a bare ESC) ends the
+    /// sequence: it returns [`ParserOutcome::FinishedAtEsc`] with the body
+    /// received so far in `params` (the ESC is not part of it), and the byte
+    /// just pushed was not consumed.
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn push(&mut self, b: u8) -> ParserOutcome {
         if let AnsiOscParserState::Finished
@@ -197,6 +202,18 @@ impl AnsiOscParser {
 
         match self.state {
             AnsiOscParserState::Params => {
+                // A stored ESC is always the last stored byte, because the byte
+                // after it either completes `ESC \` (and is then stripped) or
+                // ends the sequence here. Any byte after it other than `\`
+                // therefore makes it a bare ESC: the body so far is complete
+                // and the ESC starts a new escape sequence. Ignored C0 bytes
+                // never reach this point, so `ESC LF \` is still ST.
+                if b != 0x5c && self.params.last() == Some(&0x1b) {
+                    self.params.pop();
+                    self.state = AnsiOscParserState::Finished;
+                    return ParserOutcome::FinishedAtEsc;
+                }
+
                 self.params.push(b);
 
                 if is_osc_terminator(&self.params) {
@@ -204,8 +221,8 @@ impl AnsiOscParser {
 
                     // Remove exactly the terminator: one byte for BEL, two for
                     // `ESC \`. The two suffixes are disjoint (the last byte is
-                    // 0x07 or 0x5c), and any other trailing `\`, BEL-adjacent
-                    // ESC, etc. belongs to the body and must be preserved.
+                    // 0x07 or 0x5c), and a trailing `\` that does not follow
+                    // an ESC belongs to the body and must be preserved.
                     let terminator_len = if self.params.ends_with(&[0x1b, 0x5c]) {
                         2
                     } else {
@@ -213,13 +230,6 @@ impl AnsiOscParser {
                     };
                     self.params
                         .truncate(self.params.len().saturating_sub(terminator_len));
-
-                    // A body ending in ESC held that ESC uncounted while it
-                    // might have been the start of `ESC \`; if BEL then made
-                    // it body, the finished body can be one byte over the cap.
-                    if self.finished_body_exceeds_cap() {
-                        return self.drop_finished_over_cap();
-                    }
 
                     return ParserOutcome::Finished;
                 }
@@ -255,36 +265,9 @@ impl AnsiOscParser {
         ParserOutcome::Finished
     }
 
-    /// Whether a just-terminated body is longer than its cap. Only the BEL
-    /// terminator after an uncounted trailing ESC can make this true.
-    fn finished_body_exceeds_cap(&mut self) -> bool {
-        if self.params.len() <= self.limit.max_bytes() {
-            return false;
-        }
-        if self.limit == OscLimit::Default {
-            self.limit = OscLimit::for_body(&self.params);
-        }
-        self.params.len() > self.limit.max_bytes()
-    }
-
-    /// Drop a terminated body that is over its cap, exactly as an overflowed
-    /// sequence is dropped: no output, one payload-free warn, buffer released.
-    fn drop_finished_over_cap(&mut self) -> ParserOutcome {
-        // The stored length plus the one-byte BEL terminator.
-        let total = self.params.len().saturating_add(1);
-        tracing::warn!(
-            "OSC sequence over the {}-byte cap dropped: total length {total} bytes",
-            self.limit.max_bytes()
-        );
-        self.params = Vec::new();
-        self.intermediates = Vec::new();
-        self.state = AnsiOscParserState::OverflowFinished;
-        ParserOutcome::Finished
-    }
-
     /// Called only once the accumulated body is longer than the current cap and
     /// is not terminated. A trailing ESC may still be the start of the
-    /// terminator, so it is not counted. If the rest is still over the cap, the
+    /// terminator (and is never body once it is not), so it is not counted. If the rest is still over the cap, the
     /// body's OSC number picks the cap (52 the clipboard one, 1337 the large
     /// one) and, if it is still exceeded, the buffer is dropped.
     fn overflow_if_over_cap(&mut self) {
@@ -311,23 +294,32 @@ impl AnsiOscParser {
 
     /// Consume one body byte of an overflowed sequence (control bytes were
     /// already handled by `push`, exactly as within the cap); BEL and `ESC \`
-    /// end it with no output.
+    /// end it with no output, and so does a bare ESC (an ESC followed by any
+    /// other byte), which is reported as [`ParserOutcome::FinishedAtEsc`]
+    /// without consuming the byte.
     fn push_overflowed(&mut self, b: u8) -> ParserOutcome {
         let AnsiOscParserState::Overflow { total, prev } = &mut self.state else {
             return ParserOutcome::Continue;
         };
 
-        *total = total.saturating_add(1);
+        let bare_esc = *prev == PrevByte::Esc && b != 0x5c;
+        if !bare_esc {
+            *total = total.saturating_add(1);
+        }
         let terminated = b == 0x07 || (*prev == PrevByte::Esc && b == 0x5c);
         *prev = PrevByte::of(b);
 
-        if terminated {
+        if terminated || bare_esc {
             tracing::warn!(
                 "OSC sequence over the {}-byte cap dropped: total length {total} bytes",
                 self.limit.max_bytes()
             );
             self.state = AnsiOscParserState::OverflowFinished;
-            return ParserOutcome::Finished;
+            return if bare_esc {
+                ParserOutcome::FinishedAtEsc
+            } else {
+                ParserOutcome::Finished
+            };
         }
 
         ParserOutcome::Continue
@@ -352,26 +344,78 @@ impl AnsiOscParser {
 
         match self.state {
             AnsiOscParserState::Finished => {
-                // The OSC number is everything before the first `;`; the whole
-                // body (number included, terminator already stripped) is handed
-                // to the dispatcher so each target can parse what it needs.
-                let number_bytes = self.params.split(|b| *b == b';').next().unwrap_or_default();
+                let dispatched = self.dispatch_body(output);
 
-                let Ok(Some(type_number)) = parse_param_as::<AnsiOscToken>(number_bytes) else {
-                    return invalid_osc_params(&self.params, output);
-                };
+                // A bare ESC ended the sequence: the top-level parser must go
+                // on to parse the byte after that ESC, whatever the dispatch
+                // outcome. A dispatch failure has already pushed
+                // `TerminalOutput::Invalid`.
+                if push_result == ParserOutcome::FinishedAtEsc {
+                    if let ParserOutcome::Invalid(message) = &dispatched {
+                        debug!("Invalid OSC ended by a bare ESC: {message}");
+                    }
+                    return ParserOutcome::FinishedAtEsc;
+                }
 
-                let osc_target = OscTarget::from(&type_number);
-
-                dispatch_osc_target(&osc_target, &self.params, output)
+                dispatched
             }
             // An overflowed or cancelled sequence emits nothing; report exactly
-            // what `push` decided (`Continue`, or `Finished` on its end).
+            // what `push` decided (`Continue`, or `Finished` / `FinishedAtEsc`
+            // on its end).
             AnsiOscParserState::Overflow { .. }
             | AnsiOscParserState::OverflowFinished
             | AnsiOscParserState::Cancelled => push_result,
             AnsiOscParserState::Params => ParserOutcome::Continue,
         }
+    }
+
+    /// End the sequence at an 8-bit C1 ST (`0x9C`): the same as `ESC \` or
+    /// BEL. The top-level parser calls this only when 8-bit C1 controls are in
+    /// force (S8C1T); otherwise `0x9C` is an ordinary byte of the body, as it is
+    /// the continuation byte of some UTF-8 characters.
+    ///
+    /// A stored trailing ESC is dropped: it was an unfinished `ESC \`, not
+    /// body. An overflowed sequence is dropped, as at any other terminator.
+    pub fn terminate_c1_st(&mut self, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+        match self.state {
+            AnsiOscParserState::Params => {
+                if self.params.last() == Some(&0x1b) {
+                    self.params.pop();
+                }
+                self.state = AnsiOscParserState::Finished;
+                self.dispatch_body(output)
+            }
+            AnsiOscParserState::Overflow { total, .. } => {
+                tracing::warn!(
+                    "OSC sequence over the {}-byte cap dropped: total length {total} bytes",
+                    self.limit.max_bytes()
+                );
+                self.state = AnsiOscParserState::OverflowFinished;
+                ParserOutcome::Finished
+            }
+            AnsiOscParserState::Finished
+            | AnsiOscParserState::Cancelled
+            | AnsiOscParserState::OverflowFinished => {
+                ParserOutcome::Invalid("OSC parser received byte after termination".to_string())
+            }
+        }
+    }
+
+    /// Dispatch the accumulated body (the terminator already stripped).
+    ///
+    /// The OSC number is everything before the first `;`; the whole body
+    /// (number included) is handed to the dispatcher so each target can parse
+    /// what it needs.
+    fn dispatch_body(&self, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+        let number_bytes = self.params.split(|b| *b == b';').next().unwrap_or_default();
+
+        let Ok(Some(type_number)) = parse_param_as::<AnsiOscToken>(number_bytes) else {
+            return invalid_osc_params(&self.params, output);
+        };
+
+        let osc_target = OscTarget::from(&type_number);
+
+        dispatch_osc_target(&osc_target, &self.params, output)
     }
 }
 
@@ -1167,13 +1211,16 @@ mod tests {
     }
 
     #[test]
-    fn osc_body_ending_in_esc_terminated_by_bel_keeps_esc() {
-        // OSC 9 ; hi ESC BEL — the ESC belongs to the body, BEL is the terminator.
-        let output = feed_osc(b"9;hi\x1b\x07");
+    fn osc_body_ending_in_bare_esc_does_not_include_the_esc() {
+        // OSC 9 ; hi ESC BEL — the ESC is not followed by `\`, so it ends the
+        // string and starts a new escape sequence. It is not part of the body,
+        // and BEL is not the terminator but the byte after the ESC.
+        let (output, outcome) = feed_osc_with_outcome(b"9;hi\x1b\x07");
+        assert_eq!(outcome, ParserOutcome::FinishedAtEsc);
         assert_eq!(output.len(), 1);
         match &output[0] {
             TerminalOutput::OscResponse(AnsiOscType::Notify { body, .. }) => {
-                assert_eq!(body, "hi\u{1b}");
+                assert_eq!(body, "hi");
             }
             other => panic!("expected Notify, got {other:?}"),
         }
@@ -1193,11 +1240,15 @@ mod tests {
         }
         assert_eq!(st.params, b"0;a\\");
 
+        // A bare ESC is not part of the body either: ESC BEL ends the string at
+        // the ESC, and BEL is left for the new escape sequence.
         let mut esc_bel = AnsiOscParser::new();
+        let mut last = ParserOutcome::Continue;
         for &b in b"0;a\x1b\x07" {
-            esc_bel.push(b);
+            last = esc_bel.push(b);
         }
-        assert_eq!(esc_bel.params, b"0;a\x1b");
+        assert_eq!(last, ParserOutcome::FinishedAtEsc);
+        assert_eq!(esc_bel.params, b"0;a");
     }
 
     // ── ST terminator (ESC \) ───────────────────────────────────────────────
@@ -1653,26 +1704,25 @@ mod tests {
     }
 
     #[test]
-    fn cap_body_ending_in_esc_terminated_by_bel_is_dropped() {
-        // A body, then ESC (held uncounted), then BEL: the ESC
-        // becomes body. A MAX-byte body plus ESC is one over; MAX - 1 plus ESC
-        // is exactly at the cap.
-        let mut over = body_of_len(b"2;", MAX_OSC_BYTES);
-        over.extend_from_slice(b"\x1b\x07");
-        let (output, outcome) = feed_osc_with_outcome(&over);
-        assert_eq!(outcome, ParserOutcome::Finished);
-        assert_eq!(output, [], "a MAX + 1 body must not be dispatched");
-
-        let mut at_cap = body_of_len(b"2;", MAX_OSC_BYTES - 1);
+    fn cap_body_followed_by_a_bare_esc_is_dispatched_unless_over_the_cap() {
+        // The ESC is not body: a MAX-byte body then ESC is exactly at the cap
+        // and is dispatched; a MAX + 1 byte body is dropped.
+        let mut at_cap = body_of_len(b"2;", MAX_OSC_BYTES);
         at_cap.extend_from_slice(b"\x1b\x07");
         let (output, outcome) = feed_osc_with_outcome(&at_cap);
-        assert_eq!(outcome, ParserOutcome::Finished);
+        assert_eq!(outcome, ParserOutcome::FinishedAtEsc);
         let [TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(title))] = output.as_slice()
         else {
             panic!("a MAX body must be dispatched, got {output:?}");
         };
         // Dispatched (not dropped), then truncated to the title cap.
         assert_eq!(title.len(), MAX_TITLE_BYTES);
+
+        let mut over = body_of_len(b"2;", MAX_OSC_BYTES + 1);
+        over.extend_from_slice(b"\x1b\x07");
+        let (output, outcome) = feed_osc_with_outcome(&over);
+        assert_eq!(outcome, ParserOutcome::FinishedAtEsc);
+        assert_eq!(output, [], "a MAX + 1 body must not be dispatched");
     }
 
     /// Feed `OSC 2 ; <title> BEL` and return the single resulting title.
@@ -1739,32 +1789,34 @@ mod tests {
     }
 
     #[test]
-    fn raised_cap_body_ending_in_esc_terminated_by_bel_is_dropped_only_over_the_cap() {
-        // The held-ESC rule also applies under the raised caps (OSC 52 / 1337).
-        // Pre-filled so the test does not push 64 MiB byte by byte.
+    fn raised_cap_body_followed_by_a_bare_esc_is_dropped_only_over_the_cap() {
+        // The same holds under the raised caps (OSC 52 / 1337). Pre-filled so
+        // the test does not push 64 MiB byte by byte.
         for (prefix, limit, cap) in [
             (&b"52;c;"[..], OscLimit::Clipboard, MAX_OSC_CLIPBOARD_BYTES),
             (&b"1337;File=x:"[..], OscLimit::Large, MAX_OSC_LARGE_BYTES),
         ] {
-            let mut at_cap = parser_with_body(body_of_len(prefix, cap - 1));
+            let mut at_cap = parser_with_body(body_of_len(prefix, cap));
             at_cap.limit = limit;
             assert_eq!(at_cap.push(0x1b), ParserOutcome::Continue);
-            assert_eq!(at_cap.push(0x07), ParserOutcome::Finished);
+            assert_eq!(at_cap.push(0x07), ParserOutcome::FinishedAtEsc);
             assert_eq!(at_cap.state, AnsiOscParserState::Finished);
             assert_eq!(at_cap.params.len(), cap);
 
             let mut over = parser_with_body(body_of_len(prefix, cap));
             over.limit = limit;
+            assert_eq!(over.push(b'x'), ParserOutcome::Continue);
+            assert!(matches!(over.state, AnsiOscParserState::Overflow { .. }));
             assert_eq!(over.push(0x1b), ParserOutcome::Continue);
-            assert_eq!(over.push(0x07), ParserOutcome::Finished);
+            assert_eq!(over.push(0x07), ParserOutcome::FinishedAtEsc);
             assert_eq!(over.state, AnsiOscParserState::OverflowFinished);
             assert_eq!(over.params.capacity(), 0);
         }
     }
 
     #[test]
-    fn cap_body_ending_in_esc_terminated_by_bel_warns_without_payload() {
-        let mut over = body_of_len(b"2;SECRETMARK", MAX_OSC_BYTES);
+    fn cap_body_followed_by_a_bare_esc_warns_without_payload() {
+        let mut over = body_of_len(b"2;SECRETMARK", MAX_OSC_BYTES + 1);
         over.extend_from_slice(b"\x1b\x07");
         let events = crate::log_capture::capture(|| {
             let (output, _) = feed_osc_with_outcome(&over);
@@ -1960,20 +2012,51 @@ mod tests {
             parser
         };
 
-        // A lone backslash and an ESC followed by something else do not end it.
+        // A lone backslash does not end it.
         let mut parser = overflowed();
         assert_eq!(parser.push(b'\\'), ParserOutcome::Continue);
-        assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
-        assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
         assert_eq!(parser.push(b'\\'), ParserOutcome::Continue);
-        // ESC ESC \: the second ESC starts the terminator.
-        assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+        // ESC `\` is the real ST.
         assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
         assert_eq!(parser.push(b'\\'), ParserOutcome::Finished);
+        assert_eq!(parser.state, AnsiOscParserState::OverflowFinished);
 
         // BEL ends it.
         let mut parser = overflowed();
         assert_eq!(parser.push(0x07), ParserOutcome::Finished);
+    }
+
+    #[test]
+    fn overflowed_osc_ends_at_a_bare_esc() {
+        let overflowed = || {
+            let mut parser = parser_with_body(body_of_len(b"2;", MAX_OSC_BYTES));
+            assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+            assert!(matches!(parser.state, AnsiOscParserState::Overflow { .. }));
+            parser
+        };
+
+        // An ESC followed by anything but `\` ends it, dropped, with the
+        // following byte left unconsumed for the new escape sequence.
+        for next in [b'x', b'[', 0x1b, 0x07] {
+            let mut parser = overflowed();
+            assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+            assert_eq!(parser.push(next), ParserOutcome::FinishedAtEsc, "{next:#x}");
+            assert_eq!(parser.state, AnsiOscParserState::OverflowFinished);
+        }
+
+        // The byte after the ESC is not part of the reported total.
+        let mut parser = overflowed();
+        let events = crate::log_capture::capture(|| {
+            assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+            assert_eq!(parser.push(b'['), ParserOutcome::FinishedAtEsc);
+        });
+        let warns = crate::log_capture::warnings(&events);
+        assert_eq!(warns.len(), 1, "{events:?}");
+        let total = MAX_OSC_BYTES + 2;
+        assert!(
+            warns[0].1.contains(&format!("total length {total} bytes")),
+            "{warns:?}"
+        );
     }
 
     // ------------------------------------------------------------------

@@ -625,7 +625,6 @@ mod tests {
     ) -> Pane {
         let arc_swap = Arc::new(arc_swap::ArcSwap::from_pointee(TerminalSnapshot::empty()));
         let (input_tx, _input_rx) = crossbeam_channel::unbounded();
-        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
         let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
@@ -634,7 +633,6 @@ mod tests {
             arc_swap,
             reply_tx: Arc::new(input_tx.clone()),
             input_tx,
-            pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
             search_buffer_rx,

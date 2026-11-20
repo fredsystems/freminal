@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use crate::{
-    buffer::Buffer,
+    buffer::{Buffer, ImagePlacementMode, PlaceImageRequest},
     image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage},
     row::Row,
 };
@@ -48,7 +48,20 @@ fn place(
         animation: AnimationControl::default(),
     };
     buf.set_cursor_pos(Some(col), Some(row));
-    let _ = buf.place_image(image, 0, protocol, None, None, 0, None, instance, None);
+    let _ = buf.place_image(
+        image,
+        0,
+        PlaceImageRequest {
+            protocol,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: instance,
+            subcell_offset: None,
+            mode: ImagePlacementMode::Inline,
+        },
+    );
 }
 
 fn actual_image_cells(buf: &Buffer) -> usize {

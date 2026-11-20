@@ -1,4 +1,4 @@
-# freminal-shell-integration v4
+# freminal-shell-integration v5
 #
 # Freminal fish integration — installed under `vendor_conf.d/` and loaded
 # automatically by fish when Freminal prepends our resources directory to
@@ -181,7 +181,7 @@ if __freminal_should_init
             return 1
         end
 
-        function sudo -d "Wrap sudo to preserve terminfo"
+        function sudo -d "freminal: keep TERMINFO across sudo"
             if __freminal_sudo_is_edit $argv
                 command sudo $argv
             else

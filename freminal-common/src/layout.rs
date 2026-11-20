@@ -296,7 +296,7 @@ pub struct LayoutMeta {
 
 /// The raw deserialized layout file.
 ///
-/// Call [`Layout::from_file`] or [`Layout::from_str`] to parse, then
+/// Call [`Layout::from_file`] or [`Layout::from_str_content`] to parse, then
 /// [`Layout::validate`] to check structural correctness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Layout {

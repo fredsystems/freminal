@@ -14,11 +14,11 @@
 //! - `OSC 133 ; D [; exitcode] ; freminal=1 ; fid=<id> ST` — Command finished
 //! - `OSC 133 ; P ; k=<kind> ST` — Prompt property (kind: `i`=initial, `c`=continuation, `r`=right)
 //!
-//! Markers from foreign emitters (WezTerm, Starship, iTerm2, Kitty) that lack
+//! Markers from foreign emitters (`WezTerm`, Starship, iTerm2, Kitty) that lack
 //! `freminal=1` are silently dropped by [`parse_ftcs_params`] to prevent duplicate
 //! command blocks when multiple shell integrations are simultaneously active.
 //!
-//! The `P` (PromptProperty) marker does not require `freminal=1` — it is
+//! The `P` (`PromptProperty`) marker does not require `freminal=1` — it is
 //! informational only and carries no semantic effect on the buffer.
 
 use std::fmt;

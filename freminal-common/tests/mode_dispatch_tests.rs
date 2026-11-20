@@ -7,6 +7,7 @@ use freminal_common::buffer_states::mode::{Mode, SetMode};
 use freminal_common::buffer_states::modes::{
     allow_alt_screen::AllowAltScreen,
     allow_column_mode_switch::AllowColumnModeSwitch,
+    alt_sends_escape::AltSendsEscape,
     alternate_scroll::AlternateScroll,
     decanm::Decanm,
     decarm::Decarm,
@@ -23,11 +24,17 @@ use freminal_common::buffer_states::modes::{
     decsdm::Decsdm,
     dectcem::Dectcem,
     grapheme::GraphemeClustering,
+    hilite_mouse_tracking::HiliteMouseTracking,
+    kam::Kam,
     lnm::Lnm,
+    meta_sends_eighth_bit::MetaSendsEighthBit,
+    meta_sends_escape::MetaSendsEscape,
     mouse::{MouseEncoding, MouseTrack},
+    numlock_overrides_keypad::NumLockOverridesKeypad,
     private_color_registers::PrivateColorRegisters,
     reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
+    srm::Srm,
     sync_updates::SynchronizedUpdates,
     theme::Theming,
     unknown::{ModeNamespace, UnknownMode},
@@ -482,10 +489,14 @@ fn decquery_q2027_returns_grapheme_clustering_query() {
 
 #[test]
 fn unknown_q999_with_decquery_returns_unknown_query_stripped() {
-    // Params starting with '?' have the prefix stripped; DecQuery → UnknownQuery.
+    // Params starting with '?' have the prefix stripped; DecQuery → UnknownQuery
+    // in the DEC namespace.
     assert_eq!(
         dispatch(b"?999", SetMode::DecQuery),
-        Mode::UnknownQuery(vec![b'9', b'9', b'9'])
+        Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: vec![b'9', b'9', b'9'],
+        }
     );
 }
 
@@ -517,10 +528,14 @@ fn unknown_42_no_prefix_with_decset_returns_unknown_full_bytes() {
 
 #[test]
 fn unknown_42_no_prefix_with_decquery_returns_unknown_query_full_bytes() {
-    // Params without '?' are kept as-is; DecQuery → UnknownQuery.
+    // Params without '?' are kept as-is; DecQuery → UnknownQuery in the ANSI
+    // namespace.
     assert_eq!(
         dispatch(b"42", SetMode::DecQuery),
-        Mode::UnknownQuery(vec![b'4', b'2'])
+        Mode::UnknownQuery {
+            namespace: ModeNamespace::Ansi,
+            params: vec![b'4', b'2'],
+        }
     );
 }
 
@@ -639,29 +654,133 @@ fn decquery_q1046_returns_allow_alt_screen_query() {
     );
 }
 
-// ── ?1001 (Hilite Mouse Tracking) ─────────────────────────────────────────
+// ── ?1001 (Hilite Mouse Tracking — recognised, not implemented) ───────────
 
 #[test]
-fn decset_q1001_returns_mouse_mode_xtmsehilite() {
+fn decset_q1001_returns_hilite_mouse_tracking_enabled() {
     assert_eq!(
         dispatch(b"?1001", SetMode::DecSet),
-        Mode::MouseMode(MouseTrack::XtMseHilite)
+        Mode::HiliteMouseTracking(HiliteMouseTracking::Enabled)
     );
 }
 
 #[test]
-fn decrst_q1001_returns_mouse_mode_no_tracking() {
+fn decrst_q1001_returns_hilite_mouse_tracking_disabled() {
     assert_eq!(
         dispatch(b"?1001", SetMode::DecRst),
-        Mode::MouseMode(MouseTrack::NoTracking)
+        Mode::HiliteMouseTracking(HiliteMouseTracking::Disabled)
     );
 }
 
 #[test]
-fn decquery_q1001_returns_mouse_mode_query_1001() {
+fn decquery_q1001_returns_hilite_mouse_tracking_query() {
     assert_eq!(
         dispatch(b"?1001", SetMode::DecQuery),
-        Mode::MouseMode(MouseTrack::Query(1001))
+        Mode::HiliteMouseTracking(HiliteMouseTracking::Query)
+    );
+}
+
+#[test]
+fn q1001_is_never_a_mouse_mode() {
+    for set_mode in [SetMode::DecSet, SetMode::DecRst, SetMode::DecQuery] {
+        assert!(!matches!(dispatch(b"?1001", set_mode), Mode::MouseMode(_)));
+    }
+}
+
+// ── ANSI 2 (KAM) and 12 (SRM) — recognised, not implemented ───────────────
+
+#[test]
+fn ansi_2_dispatches_to_kam() {
+    assert_eq!(dispatch(b"2", SetMode::DecSet), Mode::Kam(Kam::Locked));
+    assert_eq!(dispatch(b"2", SetMode::DecRst), Mode::Kam(Kam::Unlocked));
+    assert_eq!(dispatch(b"2", SetMode::DecQuery), Mode::Kam(Kam::Query));
+}
+
+#[test]
+fn ansi_12_dispatches_to_srm() {
+    assert_eq!(dispatch(b"12", SetMode::DecSet), Mode::Srm(Srm::Set));
+    assert_eq!(dispatch(b"12", SetMode::DecRst), Mode::Srm(Srm::Reset));
+    assert_eq!(dispatch(b"12", SetMode::DecQuery), Mode::Srm(Srm::Query));
+}
+
+#[test]
+fn dec_private_2_and_12_stay_distinct_from_ansi_2_and_12() {
+    // `?2` is DECANM and `?12` is the cursor-blink mode, not KAM / SRM.
+    assert_eq!(
+        dispatch(b"?2", SetMode::DecSet),
+        Mode::Decanm(Decanm::new(&SetMode::DecSet))
+    );
+    assert_eq!(
+        dispatch(b"?12", SetMode::DecSet),
+        Mode::XtCBlink(XtCBlink::new(&SetMode::DecSet))
+    );
+}
+
+// ── ?1034 and ?1035 — recognised, not implemented ─────────────────────────
+
+#[test]
+fn q1034_dispatches_to_meta_sends_eighth_bit() {
+    assert_eq!(
+        dispatch(b"?1034", SetMode::DecSet),
+        Mode::MetaSendsEighthBit(MetaSendsEighthBit::Enabled)
+    );
+    assert_eq!(
+        dispatch(b"?1034", SetMode::DecRst),
+        Mode::MetaSendsEighthBit(MetaSendsEighthBit::Disabled)
+    );
+    assert_eq!(
+        dispatch(b"?1034", SetMode::DecQuery),
+        Mode::MetaSendsEighthBit(MetaSendsEighthBit::Query)
+    );
+}
+
+#[test]
+fn q1035_dispatches_to_numlock_overrides_keypad() {
+    assert_eq!(
+        dispatch(b"?1035", SetMode::DecSet),
+        Mode::NumLockOverridesKeypad(NumLockOverridesKeypad::Enabled)
+    );
+    assert_eq!(
+        dispatch(b"?1035", SetMode::DecRst),
+        Mode::NumLockOverridesKeypad(NumLockOverridesKeypad::Disabled)
+    );
+    assert_eq!(
+        dispatch(b"?1035", SetMode::DecQuery),
+        Mode::NumLockOverridesKeypad(NumLockOverridesKeypad::Query)
+    );
+}
+
+// ── ?1036 and ?1039 — Alt sends ESC (Task 147.24) ─────────────────────────
+
+#[test]
+fn q1036_dispatches_to_meta_sends_escape() {
+    assert_eq!(
+        dispatch(b"?1036", SetMode::DecSet),
+        Mode::MetaSendsEscape(MetaSendsEscape::Set)
+    );
+    assert_eq!(
+        dispatch(b"?1036", SetMode::DecRst),
+        Mode::MetaSendsEscape(MetaSendsEscape::Reset)
+    );
+    assert_eq!(
+        dispatch(b"?1036", SetMode::DecQuery),
+        Mode::MetaSendsEscape(MetaSendsEscape::Query)
+    );
+}
+
+#[test]
+fn q1039_dispatches_to_alt_sends_escape() {
+    assert_eq!(
+        dispatch(b"?1039", SetMode::DecSet),
+        Mode::AltSendsEscape(AltSendsEscape::Set)
+    );
+    assert_eq!(
+        dispatch(b"?1039", SetMode::DecRst),
+        Mode::AltSendsEscape(AltSendsEscape::Reset)
+    );
+    assert_eq!(
+        dispatch(b"?1039", SetMode::DecQuery),
+        Mode::AltSendsEscape(AltSendsEscape::Query)
     );
 }
 

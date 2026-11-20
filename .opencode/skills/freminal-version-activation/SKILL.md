@@ -55,7 +55,8 @@ These are the seams this codebase actually splits along:
   produce is sent as a typed `GuiReply` in `InputEvent::Reply` on the
   pane's input channel, and the handler frames it (Task 130); long-lived
   GUI-side consumers hold a `Weak` handle (`Pane::reply_tx`).
-  `Pane::pty_write_tx` is for layout startup-command injection only.
+  Layout startup commands go through `Pane::input_tx` as
+  `InputEvent::Key`, so they are recorded like typed input (Task 147.10).
   A new channel needs maintainer sign-off.
 - **Config options** follow the `freminal-config-options` wiring
   checklist as their own subtask, never bolted onto a feature subtask.

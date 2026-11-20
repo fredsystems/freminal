@@ -12,7 +12,7 @@ use criterion::{
 };
 
 use conv2::{ApproxFrom, RoundToZero};
-use freminal_buffer::buffer::Buffer;
+use freminal_buffer::buffer::{Buffer, ImagePlacementMode, PlaceImageRequest};
 use freminal_buffer::compact_row::CompactRow;
 use freminal_buffer::compressed_block::CompressedBlock;
 use freminal_buffer::image_store::{
@@ -313,13 +313,16 @@ fn build_eviction_buffer(scenario: EvictionScenario, limit: usize) -> Buffer {
             let _ = buf.place_image(
                 make_bench_image(1),
                 0,
-                ImageProtocol::Kitty,
-                None,
-                None,
-                0,
-                None,
-                1,
-                None,
+                PlaceImageRequest {
+                    protocol: ImageProtocol::Kitty,
+                    image_number: None,
+                    placement_id: None,
+                    z_index: 0,
+                    source_crop: None,
+                    placement_instance: 1,
+                    subcell_offset: None,
+                    mode: ImagePlacementMode::Inline,
+                },
             );
         }
         let text: Vec<TChar> = format!("line{i:06}")
@@ -968,8 +971,8 @@ fn bench_scrollback_render(c: &mut Criterion) {
 // ---------------------------------------------------------------
 fn bench_alternate_screen_switch(c: &mut Criterion) {
     // Measure the cost of entering and leaving the alternate screen on a
-    // populated buffer, in the shape `?1049h` / `?1049l` drive: DECSC, switch,
-    // clear on the way in; switch, DECRC on the way out. The IDs are the
+    // populated buffer, in the shape `?1049h` / `?1049l` drive: DECSC, cleared
+    // switch on the way in; switch, DECRC on the way out. The IDs are the
     // pre-131.5 ones so the before/after comparison lines up. Every routine
     // returns the buffer so criterion drops it outside the timed region: the
     // measurement is the switch, not the deallocation of two screens.
@@ -987,8 +990,7 @@ fn bench_alternate_screen_switch(c: &mut Criterion) {
             },
             |mut buf| {
                 buf.save_cursor();
-                buf.switch_to_alternate();
-                buf.clear_alternate_screen();
+                buf.switch_to_alternate_cleared();
                 // Returned, so the buffer is dropped outside the timed region.
                 buf
             },
@@ -1002,8 +1004,7 @@ fn bench_alternate_screen_switch(c: &mut Criterion) {
                 let mut buf = Buffer::new(80, 24);
                 buf.insert_text(&primary_data);
                 buf.save_cursor();
-                buf.switch_to_alternate();
-                buf.clear_alternate_screen();
+                buf.switch_to_alternate_cleared();
                 buf.insert_text(&alt_data);
                 buf
             },
@@ -1024,8 +1025,7 @@ fn bench_alternate_screen_switch(c: &mut Criterion) {
             || {
                 let mut buf = Buffer::new(80, 24);
                 buf.insert_text(&primary_data);
-                buf.switch_to_alternate();
-                buf.clear_alternate_screen();
+                buf.switch_to_alternate_cleared();
                 buf.insert_text(&alt_data);
                 buf.switch_to_primary();
                 buf

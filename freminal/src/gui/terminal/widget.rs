@@ -1522,6 +1522,9 @@ pub struct PaneRenderCache {
     /// each side independently avoids losing state when both are held and one
     /// is released.
     pub(super) super_state: super::input::SuperKeyState,
+    /// The modifiers at the end of the last input pass, carried into the next
+    /// one for typed text with no key event before it (`InputCarryState`).
+    pub(super) text_modifiers: egui::Modifiers,
     /// Last scroll amount processed.
     pub(super) previous_scroll_amount: f32,
     /// The effective cursor blink phase from the most recently rendered
@@ -1586,6 +1589,12 @@ pub struct PaneRenderCache {
     /// and a full rebuild is required.  `None` before the first rebuild or
     /// after [`Self::invalidate_theme_cache`].
     pub(super) previous_screen_inversion: Option<ScreenInversion>,
+    /// The background opacity from the last full vertex rebuild. It selects
+    /// the pane base colour under DECSCNM, which decides which cell
+    /// backgrounds are baked, so a change means every vertex of this pane is
+    /// stale and a full rebuild is required.  `None` before the first rebuild
+    /// or after [`Self::invalidate_theme_cache`].
+    pub(super) previous_bg_opacity: Option<f32>,
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild. Logical row
     /// numbers (Task 125.17), so it is stable across eviction and scrolling.
@@ -1824,6 +1833,14 @@ pub struct PaneRenderCache {
 }
 
 impl PaneRenderCache {
+    /// Record a frame whose pane input was suppressed (a modal, menu, search
+    /// overlay or drag). No key event reached the input path, so the
+    /// modifiers carried for text are taken from this frame: an Alt released
+    /// while a modal was open must not prefix text typed after it closes.
+    pub(super) const fn observe_suppressed_frame(&mut self, modifiers: egui::Modifiers) {
+        self.text_modifiers = modifiers;
+    }
+
     /// Create a new cache with default initial values.
     #[must_use]
     pub fn new() -> Self {
@@ -1831,6 +1848,7 @@ impl PaneRenderCache {
             previous_mouse_state: None,
             previous_key: None,
             super_state: super::input::SuperKeyState::default(),
+            text_modifiers: egui::Modifiers::NONE,
             previous_scroll_amount: 0.0,
             previous_cursor_blink_phase: CursorBlinkPhase::On,
             previous_cursor_focus: CursorFocus::Focused,
@@ -1843,6 +1861,7 @@ impl PaneRenderCache {
             previous_theme: None,
             previous_resolved_colors: None,
             previous_screen_inversion: None,
+            previous_bg_opacity: None,
             previous_selection: None,
             previous_screen_selection: None,
             previous_selection_screen_rows: None,
@@ -1953,6 +1972,7 @@ impl PaneRenderCache {
         self.previous_theme = None;
         self.previous_resolved_colors = None;
         self.previous_screen_inversion = None;
+        self.previous_bg_opacity = None;
     }
 
     /// Force a full vertex rebuild on the next frame by clearing the cached
@@ -3218,6 +3238,7 @@ impl FreminalTerminalWidget {
         };
 
         if suppressors.any() {
+            cache.observe_suppressed_frame(ui.input(|input_state| input_state.modifiers));
             let request_scroll_repaint = if suppressors.scroll_passes_through(pane_focus_now) {
                 let result = ui.input(|input_state| {
                     scroll_overlay_passthrough(
@@ -3289,6 +3310,7 @@ impl FreminalTerminalWidget {
                         previous_key: cache.previous_key,
                         scroll_amount: cache.previous_scroll_amount,
                         super_state: cache.super_state,
+                        text_modifiers: cache.text_modifiers,
                     },
                 })
             });
@@ -3297,6 +3319,7 @@ impl FreminalTerminalWidget {
             cache.previous_key = result.carry.previous_key;
             cache.previous_scroll_amount = result.carry.scroll_amount;
             cache.super_state = result.carry.super_state;
+            cache.text_modifiers = result.carry.text_modifiers;
             let clipboard_pending = result.clipboard_pending;
             deferred_actions = result.deferred_actions;
 
@@ -3516,6 +3539,7 @@ impl FreminalTerminalWidget {
                     layout: &layout,
                     fold_epoch,
                     command_blocks_config,
+                    bg_opacity,
                 },
                 view_state,
                 FrameDirtyGeometry {
@@ -3911,6 +3935,7 @@ impl FreminalTerminalWidget {
                     // the cursor's variable length (issue #432).
                     let cursor_range = build_background_instances(
                         &BackgroundFrame {
+                            opacity: bg_opacity,
                             shaped_lines: &rendered_shaped_lines,
                             cell_width: cell_w,
                             cell_height: cell_h,
@@ -3983,7 +4008,9 @@ impl FreminalTerminalWidget {
                     rs_ref.bg_opacity = bg_opacity;
                     rs_ref.base_fill = PaneBackground::base_fill_for(
                         snap.theme.background,
-                        snap.resolved_colors.background,
+                        &snap.resolved_colors,
+                        snap.screen_inversion,
+                        bg_opacity,
                     );
                     rs_ref.bg_image_opacity = bg_image_opacity;
                     rs_ref.bg_image_mode = bg_image_mode;
@@ -3999,6 +4026,7 @@ impl FreminalTerminalWidget {
                     cache.previous_theme = Some(snap.theme);
                     cache.previous_resolved_colors = Some(Arc::clone(&snap.resolved_colors));
                     cache.previous_screen_inversion = Some(snap.screen_inversion);
+                    cache.previous_bg_opacity = Some(bg_opacity);
                     // Captured BEFORE the overwrite below so the damage
                     // build a few lines down can still see where THIS
                     // frame's selection was painted last time (Task
@@ -6014,6 +6042,7 @@ mod patch_cursor_only_deco_verts_tests {
         let mut deco = Vec::new();
         let range = build_background_instances(
             &BackgroundFrame {
+                opacity: 1.0,
                 shaped_lines: &lines,
                 cell_width: CELL_W,
                 cell_height: CELL_H,

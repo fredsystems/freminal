@@ -506,6 +506,31 @@ fn decrpm_unknown_mode_in_7bit_mode_is_unchanged() {
 }
 
 #[test]
+fn decrpm_unknown_ansi_mode_in_7bit_mode_has_no_question_mark() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[99$p");
+    assert_eq!(resp, b"\x1b[99;0$y");
+}
+
+#[test]
+fn decrpm_unknown_ansi_mode_in_8bit_mode_has_no_question_mark() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[99$p");
+    assert_eq!(resp, b"\x9b99;0$y");
+    assert!(!contains_7bit_csi(&resp));
+}
+
+#[test]
+fn decrpm_unknown_ansi_and_dec_modes_with_same_number_are_distinct() {
+    let (mut state, rx) = make_state();
+    let ansi = feed_and_collect_bytes(&mut state, &rx, b"\x1b[9999$p");
+    let dec = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?9999$p");
+    assert_eq!(ansi, b"\x1b[9999;0$y");
+    assert_eq!(dec, b"\x1b[?9999;0$y");
+}
+
+#[test]
 fn kitty_keyboard_query_in_8bit_mode_is_0x9b_question_flags_u() {
     let (mut state, rx) = make_state();
     state.handle_incoming_data(b"\x1b G"); // S8C1T
@@ -807,5 +832,243 @@ fn querying_a_terminal_state_mode_never_changes_stored_modes() {
             changed,
             "{label}: a DECRQM must not change the stored state"
         );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// KAM (2), SRM (12), ?1001, ?1034, ?1035: recognised, not implemented
+// (Task 147.21). Set and reset change nothing and write nothing; DECRQM
+// answers Ps=0, in the ANSI form for KAM/SRM and the DEC form for the rest.
+// ═══════════════════════════════════════════════════════════════════════════
+
+struct NotImplementedMode {
+    label: &'static str,
+    set: &'static [u8],
+    reset: &'static [u8],
+    query: &'static [u8],
+    /// The 7-bit DECRPM reply.
+    expected: &'static [u8],
+}
+
+const NOT_IMPLEMENTED_MODES: [NotImplementedMode; 5] = [
+    NotImplementedMode {
+        label: "KAM (2)",
+        set: b"\x1b[2h",
+        reset: b"\x1b[2l",
+        query: b"\x1b[2$p",
+        expected: b"\x1b[2;0$y",
+    },
+    NotImplementedMode {
+        label: "SRM (12)",
+        set: b"\x1b[12h",
+        reset: b"\x1b[12l",
+        query: b"\x1b[12$p",
+        expected: b"\x1b[12;0$y",
+    },
+    NotImplementedMode {
+        label: "?1001",
+        set: b"\x1b[?1001h",
+        reset: b"\x1b[?1001l",
+        query: b"\x1b[?1001$p",
+        expected: b"\x1b[?1001;0$y",
+    },
+    NotImplementedMode {
+        label: "?1034",
+        set: b"\x1b[?1034h",
+        reset: b"\x1b[?1034l",
+        query: b"\x1b[?1034$p",
+        expected: b"\x1b[?1034;0$y",
+    },
+    NotImplementedMode {
+        label: "?1035",
+        set: b"\x1b[?1035h",
+        reset: b"\x1b[?1035l",
+        query: b"\x1b[?1035$p",
+        expected: b"\x1b[?1035;0$y",
+    },
+];
+
+#[test]
+fn not_implemented_modes_set_and_reset_write_nothing_and_change_nothing() {
+    for mode in &NOT_IMPLEMENTED_MODES {
+        let (label, set, reset) = (mode.label, mode.set, mode.reset);
+        let (mut state, rx) = make_state();
+        let before = format!("{:?}", state.modes);
+
+        let set_reply = feed_and_collect_bytes(&mut state, &rx, set);
+        assert!(set_reply.is_empty(), "{label}: set must not reply");
+        assert_eq!(
+            format!("{:?}", state.modes),
+            before,
+            "{label}: set must not change stored mode state"
+        );
+
+        let reset_reply = feed_and_collect_bytes(&mut state, &rx, reset);
+        assert!(reset_reply.is_empty(), "{label}: reset must not reply");
+        assert_eq!(
+            format!("{:?}", state.modes),
+            before,
+            "{label}: reset must not change stored mode state"
+        );
+    }
+}
+
+#[test]
+fn not_implemented_modes_decrqm_is_not_recognised_in_7bit_mode() {
+    for mode in &NOT_IMPLEMENTED_MODES {
+        let (label, set, reset, query, expected) =
+            (mode.label, mode.set, mode.reset, mode.query, mode.expected);
+        let (mut state, rx) = make_state();
+
+        let default = feed_and_collect_bytes(&mut state, &rx, query);
+        assert_eq!(default, expected, "{label}: default DECRQM");
+
+        let _ = feed_and_collect_bytes(&mut state, &rx, set);
+        let after_set = feed_and_collect_bytes(&mut state, &rx, query);
+        assert_eq!(after_set, expected, "{label}: DECRQM after set");
+
+        let _ = feed_and_collect_bytes(&mut state, &rx, reset);
+        let after_reset = feed_and_collect_bytes(&mut state, &rx, query);
+        assert_eq!(after_reset, expected, "{label}: DECRQM after reset");
+    }
+}
+
+#[test]
+fn not_implemented_ansi_modes_decrqm_in_8bit_mode_uses_0x9b_without_question_mark() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let kam = feed_and_collect_bytes(&mut state, &rx, b"\x1b[2$p");
+    assert_eq!(kam, b"\x9b2;0$y");
+    assert!(!contains_7bit_csi(&kam));
+    let srm = feed_and_collect_bytes(&mut state, &rx, b"\x1b[12$p");
+    assert_eq!(srm, b"\x9b12;0$y");
+    assert!(!contains_7bit_csi(&srm));
+}
+
+#[test]
+fn not_implemented_dec_modes_decrqm_in_8bit_mode_uses_0x9b_with_question_mark() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    for (number, expected) in [
+        ("1001", &b"\x9b?1001;0$y"[..]),
+        ("1034", &b"\x9b?1034;0$y"[..]),
+        ("1035", &b"\x9b?1035;0$y"[..]),
+    ] {
+        let query = format!("\x1b[?{number}$p");
+        let resp = feed_and_collect_bytes(&mut state, &rx, query.as_bytes());
+        assert_eq!(resp, expected, "?{number}");
+        assert!(!contains_7bit_csi(&resp));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ?1036 (meta sends escape) and ?1039 (alt sends escape) — Task 147.24.
+// Real modes: DECRQM reports the stored state as Ps=1 / Ps=2. ?1036 defaults
+// to set, ?1039 to reset, and both return to their defaults on RIS and DECSTR.
+// ═══════════════════════════════════════════════════════════════════════════
+
+struct AltEscapeMode {
+    label: &'static str,
+    set: &'static [u8],
+    reset: &'static [u8],
+    query: &'static [u8],
+    /// The DECRPM reply in the default state.
+    default_reply: &'static str,
+    /// The sequence that leaves the default state, and the reply after it.
+    away: &'static [u8],
+    away_reply: &'static str,
+}
+
+const ALT_ESCAPE_MODES: [AltEscapeMode; 2] = [
+    AltEscapeMode {
+        label: "?1036",
+        set: b"\x1b[?1036h",
+        reset: b"\x1b[?1036l",
+        query: b"\x1b[?1036$p",
+        default_reply: "\x1b[?1036;1$y",
+        away: b"\x1b[?1036l",
+        away_reply: "\x1b[?1036;2$y",
+    },
+    AltEscapeMode {
+        label: "?1039",
+        set: b"\x1b[?1039h",
+        reset: b"\x1b[?1039l",
+        query: b"\x1b[?1039$p",
+        default_reply: "\x1b[?1039;2$y",
+        away: b"\x1b[?1039h",
+        away_reply: "\x1b[?1039;1$y",
+    },
+];
+
+#[test]
+fn alt_escape_modes_report_their_defaults() {
+    for mode in &ALT_ESCAPE_MODES {
+        let (mut state, rx) = make_state();
+        assert_eq!(
+            feed_and_collect(&mut state, &rx, mode.query),
+            mode.default_reply,
+            "{}",
+            mode.label
+        );
+    }
+}
+
+#[test]
+fn alt_escape_modes_report_set_and_reset_truthfully() {
+    for mode in &ALT_ESCAPE_MODES {
+        let label = mode.label;
+        let (mut state, rx) = make_state();
+
+        let _ = feed_and_collect(&mut state, &rx, mode.set);
+        assert_eq!(
+            feed_and_collect(&mut state, &rx, mode.query),
+            format!("\x1b[{label};1$y"),
+            "{label} after set"
+        );
+
+        let _ = feed_and_collect(&mut state, &rx, mode.reset);
+        assert_eq!(
+            feed_and_collect(&mut state, &rx, mode.query),
+            format!("\x1b[{label};2$y"),
+            "{label} after reset"
+        );
+    }
+}
+
+#[test]
+fn alt_escape_modes_return_to_their_defaults_on_ris_and_decstr() {
+    for reset_sequence in [&b"\x1bc"[..], &b"\x1b[!p"[..]] {
+        for mode in &ALT_ESCAPE_MODES {
+            let label = mode.label;
+            let (mut state, rx) = make_state();
+
+            let _ = feed_and_collect(&mut state, &rx, mode.away);
+            assert_eq!(
+                feed_and_collect(&mut state, &rx, mode.query),
+                mode.away_reply,
+                "{label} moved off its default"
+            );
+
+            let _ = feed_and_collect(&mut state, &rx, reset_sequence);
+            assert_eq!(
+                feed_and_collect(&mut state, &rx, mode.query),
+                mode.default_reply,
+                "{label} after {reset_sequence:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn alt_escape_modes_decrqm_in_8bit_mode_uses_0x9b() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    for (number, expected) in [
+        ("1036", &b"\x9b?1036;1$y"[..]),
+        ("1039", &b"\x9b?1039;2$y"[..]),
+    ] {
+        let query = format!("\x1b[?{number}$p");
+        let resp = feed_and_collect_bytes(&mut state, &rx, query.as_bytes());
+        assert_eq!(resp, expected, "?{number}");
     }
 }

@@ -767,7 +767,7 @@ pub struct PasteGuardConfig {
     /// Regex patterns (Rust [`regex`] syntax) treated as dangerous. Matched
     /// only when [`patterns`](Self::patterns) is `true`.
     ///
-    /// Defaults to [`default_paste_guard_patterns`].
+    /// Defaults to `default_paste_guard_patterns`.
     pub pattern_list: Vec<String>,
 }
 
@@ -1120,7 +1120,7 @@ impl FreminalToastRouting {
 /// [`NotificationsConfig`], so a user can silence e.g. layout toasts while
 /// keeping clipboard toasts. These are freminal's own UI events, distinct
 /// from the terminal-application-driven notifications (OSC 9/777/99/133)
-/// modelled by [`NotificationKind`]/[`NotificationRouting`].
+/// modelled by [`NotificationKind`](crate::buffer_states::window_manipulation::NotificationKind)/[`NotificationRouting`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreminalToastCategory {
     /// Local selection copied to the system clipboard (Ctrl+C / menu Copy).
@@ -1557,7 +1557,7 @@ pub fn layout_library_dir() -> Option<PathBuf> {
 /// the packager.
 ///
 /// Callers that want to copy the bundled scripts onto disk (i.e.
-/// [`shell_integration::sync_to_disk`]) must only do so on the
+/// `shell_integration::sync_to_disk`) must only do so on the
 /// [`UserWritable`](Self::UserWritable) variant — writing into a
 /// packaging-provided path (e.g. `/usr/share/freminal/shell-integration/`)
 /// would either fail or, worse, succeed and silently mutate files owned

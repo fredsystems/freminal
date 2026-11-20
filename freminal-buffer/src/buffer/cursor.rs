@@ -21,6 +21,21 @@ use crate::row::{RowJoin, RowOrigin};
 use super::clamped_offset;
 use crate::buffer::Buffer;
 
+/// Whether a saved cursor was in the pending-wrap position.
+///
+/// The live cursor encodes pending wrap as `pos.x` at the effective wrap column
+/// (`width`, or `scroll_region_right + 1` under DECLRMM), one past the last
+/// column that can be written. A save keeps the column clamped to the last
+/// writable column and records the pending state separately, so the saved
+/// column is always a real column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::buffer) enum SavedWrapState {
+    /// The cursor sat on a real column; the next print stays on the row.
+    Settled,
+    /// The cursor had written the last column; the next print wraps.
+    Pending,
+}
+
 /// A DECSC-saved cursor.
 ///
 /// DECSC saves the cursor's *screen* position, not a place in the content
@@ -32,13 +47,23 @@ use crate::buffer::Buffer;
 /// `cursor.pos` is therefore in **screen coordinates** (row 0 is the top of
 /// the visible window), unlike the live cursor, whose `pos.y` indexes the
 /// retained rows. Because the saved row never names a stored row, scrolling,
-/// eviction, reflow and a switch between the primary and alternate screens
-/// cannot invalidate it; a resize only matters through the clamp on restore.
+/// eviction and a switch between the primary and alternate screens cannot
+/// invalidate it.
+///
+/// A resize is the exception: it changes which screen row holds a given
+/// cell (reflow re-wraps it, a taller window pulls rows back from
+/// scrollback, a shorter one pushes them out), so the slot follows its cell
+/// through [`Buffer::set_size`]. See [`SavedCursorPin`].
 ///
 /// Each screen has its own slot (`Buffer::saved_cursor` for the active screen,
 /// `ParkedScreen::saved_cursor` for the parked one), so a switch parks the
 /// outgoing screen's slot with it rather than carrying it across; a DECSC on
 /// one screen is never restored by a DECRC on the other.
+///
+/// DECSC also saves the pending-wrap flag and DECRC restores it (xterm
+/// `CursorSave`/`CursorRestore` keep `do_wrap` in `DECSC_FLAGS`; Ghostty and
+/// `WezTerm` do the same). A resize that leaves the saved cell short of the
+/// right edge converts pending wrap into the column after the cell.
 #[derive(Debug, Clone)]
 pub(in crate::buffer) struct SavedCursor {
     /// The cursor state at the time of the save, with `pos` in screen
@@ -47,9 +72,108 @@ pub(in crate::buffer) struct SavedCursor {
     /// The origin-mode (DECOM) state at the time of the save. xterm's
     /// `DECSC_FLAGS` include `ORIGIN`, so DECRC restores it.
     pub(in crate::buffer) decom: Decom,
+    /// Whether the cursor was in the pending-wrap position at the time of the
+    /// save. When `Pending`, `cursor.pos.x` is the right-edge column
+    /// (`wrap_column_for_row(..) - 1` at save time).
+    pub(in crate::buffer) wrap: SavedWrapState,
+}
+
+/// Where a screen's saved cursor sits for the duration of a resize.
+///
+/// The slot is kept in screen coordinates, which a resize invalidates, so
+/// [`Buffer::set_size`] pins the saved cell to its row number and column
+/// first, carries that through the reflow, height change and eviction like
+/// the live cursor, and reads it back as screen coordinates afterwards
+/// ([`Buffer::settle_saved_cursor`]). This is Ghostty's `saved_cursor_pin`
+/// (`Screen.zig` `resize`); xterm's `AdjustSavedCursor` is the same idea for
+/// the one case it handles, rows pulled back from scrollback.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::buffer) enum SavedCursorPin {
+    /// The saved cell, as a row of the screen's row store and a column.
+    /// Row numbers survive eviction and popped rows; a reflow translates it.
+    Cell { row: RowNumber, x: usize },
+    /// The reflow could not place the cell.
+    Lost,
 }
 
 impl Buffer {
+    /// The column at which a print on buffer row `row_idx` wraps, as
+    /// `insert_text` computes it: `scroll_region_right + 1` while DECLRMM is
+    /// enabled, otherwise the screen width, with the span halved on a
+    /// double-width row (`row_wrap_bounds`). A cursor sitting at this column
+    /// has a pending wrap.
+    pub(in crate::buffer) fn wrap_column_for_row(&self, row_idx: usize) -> usize {
+        let (base_wrap_col, base_wrap_start_col) =
+            if matches!(self.declrmm_enabled, Declrmm::Enabled) {
+                (self.scroll_region_right + 1, self.scroll_region_left)
+            } else {
+                (self.width, 0)
+            };
+        super::row_wrap_bounds(
+            self.row_is_double_width(row_idx),
+            base_wrap_col,
+            base_wrap_start_col,
+        )
+        .0
+    }
+
+    /// Pin the saved cursor's cell ahead of a resize, or `None` when there is
+    /// nothing to follow: no saved cursor, or one saved below every stored
+    /// row (blank screen space no text occupies), which keeps its screen
+    /// position.
+    pub(in crate::buffer) fn pin_saved_cursor(&self) -> Option<SavedCursorPin> {
+        let saved = self.saved_cursor.as_ref()?;
+        let index = self.visible_window_start(0) + saved.cursor.pos.y;
+        (index < self.rows.len()).then(|| SavedCursorPin::Cell {
+            row: self.rows.number_of(index),
+            x: saved.cursor.pos.x,
+        })
+    }
+
+    /// Read a pinned saved cursor back as screen coordinates, once the
+    /// resize has settled the dimensions and the rows.
+    ///
+    /// When the cell left the active area (evicted, or in scrollback now) the
+    /// slot goes to the top-left with no pending wrap, as Ghostty does. A
+    /// cell held in pending wrap that is no longer in the last column loses
+    /// the pending state and its column advances by one, so the next print
+    /// lands where it would have wrapped to (Ghostty `Screen.resize`).
+    pub(in crate::buffer) fn settle_saved_cursor(&mut self, pin: Option<SavedCursorPin>) {
+        let Some(pin) = pin else {
+            return;
+        };
+        let screen_y = match pin {
+            SavedCursorPin::Cell { row, .. } => row
+                .rows_after(self.rows.base())
+                .and_then(|index| index.checked_sub(self.visible_window_start(0)))
+                .filter(|&y| y < self.height),
+            SavedCursorPin::Lost => None,
+        };
+        let last_screen_column = self.width.saturating_sub(1);
+        let last_column = screen_y.map_or(last_screen_column, |y| {
+            self.wrap_column_for_row(self.visible_window_start(0) + y)
+                .saturating_sub(1)
+        });
+        let Some(saved) = self.saved_cursor.as_mut() else {
+            return;
+        };
+        if let (SavedCursorPin::Cell { x, .. }, Some(y)) = (pin, screen_y) {
+            saved.cursor.pos.y = y;
+            // A pending wrap survives only while its cell is exactly at the
+            // edge; a cell that settled left or right of it becomes the next
+            // column (bounded by the screen), as Ghostty's resize does.
+            if saved.wrap == SavedWrapState::Pending && x != last_column {
+                saved.cursor.pos.x = (x + 1).min(last_screen_column);
+                saved.wrap = SavedWrapState::Settled;
+            } else {
+                saved.cursor.pos.x = x.min(last_screen_column);
+            }
+        } else {
+            saved.cursor.pos = CursorPos::default();
+            saved.wrap = SavedWrapState::Settled;
+        }
+    }
+
     /// Logical number of the oldest retained row of the active screen.
     ///
     /// Row `i` of [`Self::rows`] is numbered `row_base() + i`. Advances when
@@ -112,7 +236,8 @@ impl Buffer {
     /// screen-relative translation.
     ///
     /// The position is clamped to the current buffer dimensions.  Used by
-    /// DECSDM to restore the cursor after `place_image` moves it.
+    /// kitty `C=1` and iTerm2 `doNotMoveCursor` to restore the cursor after
+    /// `place_image` moves it.
     pub fn set_cursor_pos_raw(&mut self, pos: CursorPos) {
         self.cursor.pos.x = if self.width > 0 {
             pos.x.min(self.width - 1)
@@ -122,7 +247,7 @@ impl Buffer {
         self.cursor.pos.y = pos.y.min(self.rows.len().saturating_sub(1));
     }
 
-    /// Set the [`LineWidth`] attribute on the row under the cursor.
+    /// Set the [`LineWidth`](crate::row::LineWidth) attribute on the row under the cursor.
     ///
     /// This is the buffer-level primitive called by the terminal handler in
     /// response to `ESC # 3` (double-height top), `ESC # 4` (double-height
@@ -260,14 +385,31 @@ impl Buffer {
 
     /// Implements DECSC – Save Cursor.
     ///
-    /// Saves the cursor's **screen** position (see [`SavedCursor`]) together
-    /// with its associated `CursorState` and the DECOM (origin mode) state.
+    /// Saves the cursor's **screen** position (see `SavedCursor`) together
+    /// with its associated `CursorState`, the DECOM (origin mode) state and
+    /// whether the cursor is in the pending-wrap position (`x` at the
+    /// effective wrap column of its row, see `wrap_column_for_row`).
     pub fn save_cursor(&mut self) {
         let mut cursor = self.cursor.clone();
         cursor.pos = self.cursor_screen_pos();
+        let edge = self.wrap_column_for_row(self.cursor.pos.y);
+        let pending = if self.declrmm_enabled == Declrmm::Enabled {
+            // A cursor positioned right of the margin is not pending wrap; it
+            // is simply outside the margins.
+            cursor.pos.x == edge
+        } else {
+            cursor.pos.x >= edge
+        };
+        let wrap = if edge > 0 && pending {
+            cursor.pos.x = edge - 1;
+            SavedWrapState::Pending
+        } else {
+            SavedWrapState::Settled
+        };
         self.saved_cursor = Some(SavedCursor {
             cursor,
             decom: self.decom_enabled,
+            wrap,
         });
     }
 
@@ -283,11 +425,16 @@ impl Buffer {
     /// with `sc->saved == False`, Ghostty `restoreCursor`).
     ///
     /// The saved position is screen-relative, so the cursor returns to the
-    /// same screen row and column however much output has scrolled, evicted
-    /// or reflowed the content in between (xterm `CursorRestore`). The
-    /// position is clamped to the current screen dimensions, so a resize
-    /// between save and restore never produces an out-of-bounds cursor, and
-    /// the cursor is never placed in off-screen scrollback.
+    /// same screen row and column however much output has scrolled or evicted
+    /// the content in between (xterm `CursorRestore`). A resize in between
+    /// moves the slot with its cell (see `SavedCursorPin`), and the position
+    /// is clamped to the current screen dimensions, so the cursor is never
+    /// out of bounds nor placed in off-screen scrollback.
+    ///
+    /// A save made in the pending-wrap position restores pending wrap, so the
+    /// next printed character wraps (xterm, Ghostty, `WezTerm`). That holds
+    /// while the saved column is the right edge; a resize that leaves it
+    /// elsewhere has already turned the pending wrap into the next column.
     ///
     /// The slot is per screen: each screen has its own DECSC slot, parked and
     /// restored with the screen (xterm `sc[]`, Ghostty `saved_cursor` per
@@ -298,14 +445,22 @@ impl Buffer {
         let saved = self.saved_cursor.clone().unwrap_or_else(|| SavedCursor {
             cursor: CursorState::default(),
             decom: Decom::NormalCursor,
+            wrap: SavedWrapState::Settled,
         });
         let buffer_y = self.buffer_row_for_screen_row(saved.cursor.pos.y);
 
         self.cursor = saved.cursor;
         self.decom_enabled = saved.decom;
-        // Clamp to current dimensions after restore.
+        // Clamp to current dimensions after restore; pending wrap survives
+        // only while the saved column is still the right edge.
         if self.width > 0 {
-            self.cursor.pos.x = self.cursor.pos.x.min(self.width - 1);
+            let edge = self.wrap_column_for_row(buffer_y);
+            let at_edge = self.cursor.pos.x + 1 == edge;
+            self.cursor.pos.x = if saved.wrap == SavedWrapState::Pending && at_edge {
+                edge
+            } else {
+                self.cursor.pos.x.min(self.width - 1)
+            };
         }
         self.cursor.pos.y = buffer_y;
         self.debug_assert_invariants();

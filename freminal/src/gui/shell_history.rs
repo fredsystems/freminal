@@ -505,7 +505,7 @@ pub fn spawn_loader<S: ::std::hash::BuildHasher + Send + 'static>(
 /// (it arrives in terminal output), so it is only read when its basename is
 /// a known history file name (`.bash_history`, `.zsh_history`, `.zhistory`,
 /// `.histfile`, `fish_history`, ...), and never through a symlink; see
-/// [`load_from_path`].  [`detect_shell_kind`] on `program` picks the parser
+/// `load_from_path`.  [`detect_shell_kind`] on `program` picks the parser
 /// when the shell is bash, zsh or fish, otherwise the basename does.
 ///
 /// Sequence-tagged CAS guarantees an `spawn_loader_with_path` publication

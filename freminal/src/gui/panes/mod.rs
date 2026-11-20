@@ -28,7 +28,6 @@ use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::geometry::{Point, Rect, point};
-use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, SearchCorpus, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
@@ -148,11 +147,6 @@ pub struct Pane {
     /// the channel disconnect.
     pub reply_tx: Arc<Sender<InputEvent>>,
 
-    /// Sender for raw bytes to this pane's PTY, for layout startup-command
-    /// injection only. GUI-originated replies (window reports, OSC 52, OSC 99)
-    /// go through `input_tx` as `InputEvent::Reply`.
-    pub pty_write_tx: Sender<PtyWrite>,
-
     /// Receiver for window manipulation commands from this pane's PTY thread.
     pub window_cmd_rx: Receiver<WindowCommand>,
 
@@ -212,7 +206,7 @@ pub struct Pane {
 
     /// Counters for window commands sent by the PTY thread and not yet drained
     /// by the GUI (148.C9, 148.RC2).  The GUI releases one per command it drains
-    /// in [`crate::gui::rendering::handle_window_manipulation`]; the PTY thread
+    /// in `crate::gui::rendering::handle_window_manipulation`; the PTY thread
     /// stops queueing a class at its cap (`MAX_OUTSTANDING_REPORTS`,
     /// `MAX_OUTSTANDING_VIEWPORT_COMMANDS`).
     pub window_cmd_budget: WindowCommandBudget,
@@ -230,7 +224,7 @@ pub struct Pane {
 
     /// OS process ID of the PTY child shell for this pane.
     ///
-    /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
+    /// Used for CWD discovery via `crate::gui::platform::read_cwd` when
     /// saving layouts or building recording topology snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
@@ -336,7 +330,6 @@ impl Pane {
             arc_swap: channels.arc_swap,
             reply_tx: Arc::new(channels.input_tx.clone()),
             input_tx: channels.input_tx,
-            pty_write_tx: channels.pty_write_tx,
             window_cmd_rx: channels.window_cmd_rx,
             clipboard_rx: channels.clipboard_rx,
             search_buffer_rx: channels.search_buffer_rx,
@@ -380,7 +373,7 @@ impl Pane {
     /// Record the extracted command text for a [`CommandBlockId`].
     ///
     /// Caller is responsible for extracting the text from the snapshot
-    /// (typically via [`crate::gui::command_history::extract_command_text`])
+    /// (typically via `crate::gui::command_history::extract_command_text`)
     /// before calling this.  Storing an entry whose `id` is not in
     /// [`Self::recent_commands`] is harmless but wasteful; the typical
     /// pattern is to call this immediately after [`Self::push_recent_command`].
@@ -1201,7 +1194,7 @@ impl PaneTree {
 
     /// Split the pane identified by `target_id` using a pre-built `Pane`.
     ///
-    /// This is a lower-level variant of [`split`] for callers that need to
+    /// This is a lower-level variant of [`Self::split`] for callers that need to
     /// pre-allocate the `PaneId` before acquiring other borrows.  The caller is
     /// responsible for ensuring `new_pane.id` was obtained from the same
     /// [`PaneIdGenerator`] that manages this tree.
@@ -1338,7 +1331,7 @@ impl PaneTree {
     ///
     /// `cwd_fn` is called for each leaf pane id and should return the current
     /// working directory of that pane as a string (typically via
-    /// [`crate::gui::platform::read_cwd`]).  Returning `None` omits the
+    /// `crate::gui::platform::read_cwd`).  Returning `None` omits the
     /// `directory` field.
     #[must_use]
     pub fn to_layout_panes<F>(
@@ -1356,12 +1349,12 @@ impl PaneTree {
         out
     }
 
-    /// Serialise the pane tree as a [`PaneTreeSnapshot`] for inclusion in a
+    /// Serialise the pane tree as a `PaneTreeSnapshot` for inclusion in a
     /// FREC recording's initial topology.
     ///
     /// `cwd_fn` is called for each leaf pane id and should return the current
     /// working directory of that pane as a string (typically via
-    /// [`crate::gui::platform::read_cwd`]).  `None` omits the `cwd` field on
+    /// `crate::gui::platform::read_cwd`).  `None` omits the `cwd` field on
     /// the leaf.
     ///
     /// `shell_fn` is called for each leaf pane id and should return the
@@ -1756,7 +1749,6 @@ mod tests {
     fn dummy_pane(id: PaneId, title: &str) -> Pane {
         let arc_swap = Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
         let (input_tx, _input_rx) = crossbeam_channel::unbounded();
-        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
         let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
@@ -1768,7 +1760,6 @@ mod tests {
             arc_swap,
             reply_tx: Arc::new(input_tx.clone()),
             input_tx,
-            pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
             search_buffer_rx,
@@ -1841,7 +1832,6 @@ mod tests {
         use std::time::Duration;
 
         let (input_tx, input_rx) = crossbeam_channel::unbounded::<InputEvent>();
-        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
         let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
@@ -1851,7 +1841,6 @@ mod tests {
         let channels = crate::gui::pty::TabChannels {
             arc_swap: Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty())),
             input_tx,
-            pty_write_tx,
             window_cmd_rx,
             clipboard_rx,
             search_buffer_rx,

@@ -1,5 +1,34 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-11-20 — Task 147 (v0.13.0 correctness cleanup). Added: the
+multi-byte designators (`ESC ( % 5`) as not planned (Task 147 review). Closed and
+removed: the DECRC scroll-region clamp row (a decision, not a gap: DECRC with
+DECOM set clamps to the screen only, as kitty, Ghostty and WezTerm do; xterm alone
+also clamps to the bottom and right margins, not the top or left); "DECSC saved
+state" (147.6: the pending-wrap flag is saved); "Saved cursor on resize,
+alternate active" (147.18: the saved cursor follows its text through a resize
+and reflow); "Sixel placement under DECSDM" (147.19: the image is drawn at the
+top-left, clipped, with no scrolling and no cursor move, as xterm); the whole
+charset section's open items (147.20: SO / SI, LS2 / LS3, `ESC ) C` / `ESC * C`
+and G3 now work through a full G0 to G3, GL, GR and single-shift model); the
+"DECRQM for ANSI modes" section (147.1: unknown ANSI modes answer in the ANSI
+form, issue #528); the "Mode changes take effect per read" paragraph (147.2:
+S8C1T, DECANM and RIS govern the next byte); and, from the 8-bit C1 section, the
+event-encoding sentence (147.3, 147.4: key, focus, mouse and bracketed-paste
+introducers honour S8C1T) and the UTF-8 title sentence. That last one is closed
+as matching xterm, the only reference terminal with S8C1T: it sends raw UTF-8
+title and icon replies in S8C1T mode (`charproc.c:8950-8973`,
+`ptydata.c:614-629`). Recorded as not planned, with the reasons in
+`ESCAPE_SEQUENCE_COVERAGE.md`: KAM, SRM, `?1001`, `?1034` and `?1035`
+(147.21; the `?1034` row described `?1036` and is corrected), the HP escapes
+`ESC F`, `ESC l` and `ESC m` (147.23), XTSMTITLE / XTRMTITLE (147.9), and the
+96-character charset designators and GR application to bytes `0x80` and above
+(147.20). New open row: macOS Option as Alt (Task 152; 147.24 shipped `?1036`
+without the macOS half). Alt on text keys is no longer dropped on the legacy
+keyboard path (147.24); under a kitty keyboard flag it still is (Task 137).
+XTSMGRAPHICS, `?1036` and `?1039` need no gap row. The XTGETTCAP expansion (147.22)
+moved to Task 151.
+
 Last updated: 2026-11-19 — Task 151 (own `TERM` and terminfo). The "XTGETTCAP
 capability expansion" row in "Priority 2 — Polish" is removed (it was Task 147.22,
 which moved to Task 151.2): `indn`, `rin` <!-- codespell:ignore rin -->
@@ -355,7 +384,7 @@ implemented (Tasks 13, 100) but **not conformant**: the 2026-10-08 audit found a
 30 deviations, tracked by Tasks 135 and 136 (v0.13.1). The Kitty keyboard protocol
 (Task 35, the Task 101 encoding-only wins, and Task 114's raw-winit delivery of
 keypad/media/print/pause/menu keys) has a sound encoder, but the GUI layer feeding it
-drops Alt/Super on text keys and modified Enter; that is Task 137 (v0.13.1). The
+drops Super on text keys, Alt on text keys while a kitty flag is active (legacy Alt+text sends ESC since Task 147.24) and modified Enter; that is Task 137 (v0.13.1). The
 lock-key half of Task 114 was reverted (see below). OSC 99 is conformant with kitty 0.49.2
 (Task 138, v0.13.0, including 138.C4 and 138.C5), and so is OSC 22 pointer shapes
 (Task 139, v0.13.0). Underlines and SGR parity (Task 140, v0.13.0) are closed. The
@@ -371,22 +400,22 @@ remaining gaps are:
   transition events (reverted — not producible uniformly across platforms),
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
   (no platform source) — all tracked upstream, unscheduled
-- **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
-- **DECRQM for ANSI modes:** a query for an unknown ANSI mode is answered in
-  the DEC-private form (issue #528); LNM and IRM are correct since Task 130
-- **Rare/low-priority:** SRM and KAM standard modes, ?1034, functional ?1001
-  hilite tracking, DECSCA/selective-erase (no per-cell protected bit),
-  SGR 8 conceal (parsed, ignored);
-  three narrow xterm divergences in cursor save/restore (DECOM scroll-region
-  re-clamp, the pending-wrap flag, resize with the alternate screen active) and
-  Sixel placement under DECSDM (see below)
+- **macOS Option as Alt:** Option keeps composing characters on macOS; `?1036`
+  prefixes ESC for Alt on the other platforms (Task 152, v0.13.1)
+- **Charset gaps:** only the 96-character designators and GR application to bytes
+  `0x80` and above, both not planned (G0 to G3, SO/SI and single shifts work since
+  Task 147.20)
+- **Rare/low-priority, not planned:** KAM, SRM, `?1001`, `?1034` and `?1035`
+  (recognised, not implemented), the HP escapes `ESC F` / `ESC l` / `ESC m`,
+  XTSMTITLE / XTRMTITLE, DECSCA/selective-erase (no per-cell protected bit) and
+  SGR 8 conceal (parsed, ignored)
 - **UI work:** OSC 133 command-block gutter rendering (v0.9.0 Task 73; markers,
   storage, navigation, fold/copy/hover/duration all complete under Task 72)
 
 Legend:
 
-- **Importance:** 🟩 High | 🟨 Medium | ⬜ Low / optional
-- **Type:** 🚧 Partial (mode tracked, no renderer effect) | ⬜ Not implemented
+- **Importance:** `high` | `medium` | `low` / optional | `not planned`
+- **Type:** `partial` (mode tracked, no renderer effect) | `not implemented`
 - **Planned:** Version / task that will close the gap, or `—` if unscheduled
 
 ---
@@ -402,15 +431,15 @@ the prior panel-fill-only white inversion.
 
 ## OSC Gaps
 
-| Sequence          | Importance | Type | Planned          | Notes                                                                                                                                                                                                                                     |
-| ----------------- | ---------- | ---- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| OSC 66            | ⬜         | ⬜   | v0.13.3 Task 104 | Kitty text sizing — not implemented; the handler is a vestigial no-op that warn-logs/silently consumes the payload. Not a Contour code (Contour uses `CSI ? 996 n` / `?2031`). DECRPM ?2031 is the adaptive-theme query path we implement |
-| OSC 21            | 🟨         | ⬜   | v0.13.2 Task 144 | Kitty color control — missing; payloads are warn-logged by the unknown-OSC path. Also owns `@alpha` (the colour-spec parser does not accept it), `cursor_text` and `visual_bell`, whose only setter is OSC 21                             |
-| OSC 30001 / 30101 | ⬜         | ⬜   | v0.13.2 Task 144 | Kitty colour stack push / pop — missing (with `CSI # P` / `# Q` / `# R`; see CSI Gaps)                                                                                                                                                    |
-| OSC 5113          | 🟨         | ⬜   | v0.13.3 Task 102 | Kitty file transfer — missing; chunks are warn-logged                                                                                                                                                                                     |
-| OSC 5522          | 🟨         | ⬜   | v0.13.3 Task 146 | Kitty clipboard — missing; payloads are warn-logged. OSC 52 selection parameter, clear and binary data are also Task 146                                                                                                                  |
-| OSC 72            | ⬜         | ⬜   | v0.13.4 Task 105 | Kitty drag and drop — missing; spec stable upstream, blocked locally by winit 0.30's DnD API                                                                                                                                              |
-| OSC 133 UI        | 🟨         | 🚧   | v0.9.0 Task 73   | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73                                                                                                        |
+| Sequence          | Importance | Type            | Planned          | Notes                                                                                                                                                                                                                                     |
+| ----------------- | ---------- | --------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OSC 66            | low        | not implemented | v0.13.3 Task 104 | Kitty text sizing — not implemented; the handler is a vestigial no-op that warn-logs/silently consumes the payload. Not a Contour code (Contour uses `CSI ? 996 n` / `?2031`). DECRPM ?2031 is the adaptive-theme query path we implement |
+| OSC 21            | medium     | not implemented | v0.13.2 Task 144 | Kitty color control — missing; payloads are warn-logged by the unknown-OSC path. Also owns `@alpha` (the colour-spec parser does not accept it), `cursor_text` and `visual_bell`, whose only setter is OSC 21                             |
+| OSC 30001 / 30101 | low        | not implemented | v0.13.2 Task 144 | Kitty colour stack push / pop — missing (with `CSI # P` / `# Q` / `# R`; see CSI Gaps)                                                                                                                                                    |
+| OSC 5113          | medium     | not implemented | v0.13.3 Task 102 | Kitty file transfer — missing; chunks are warn-logged                                                                                                                                                                                     |
+| OSC 5522          | medium     | not implemented | v0.13.3 Task 146 | Kitty clipboard — missing; payloads are warn-logged. OSC 52 selection parameter, clear and binary data are also Task 146                                                                                                                  |
+| OSC 72            | low        | not implemented | v0.13.4 Task 105 | Kitty drag and drop — missing; spec stable upstream, blocked locally by winit 0.30's DnD API                                                                                                                                              |
+| OSC 133 UI        | medium     | partial         | v0.9.0 Task 73   | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73                                                                                                        |
 
 ---
 
@@ -419,29 +448,20 @@ the prior panel-fill-only white inversion.
 DECDWL/DECDHL rendering, the auto-wrap column on double-width/height rows, and
 DECSLRM margin confinement (ECH/ICH/DCH/IL/DL, SU/SD, and margin-triggered
 IND/RI/LF/NEL) are all implemented and correct (see
-`ESCAPE_SEQUENCE_COVERAGE.md`). The remaining entries are narrow divergences
-from xterm in **cursor save/restore**, found while verifying DECSC's
-screen-relative position (Task 125.C6). They apply equally to DECSC/DECRC
-(`ESC 7` / `ESC 8`), SCOSC/SCORC (`CSI s` / `CSI u`) and `?1048`, which share
-one machinery. The saved position itself is correct (screen-relative, clamped
-to the screen on restore). Since Task 131 the save slot is per screen, DECSC
-saves the SGR rendition, DECOM and the character set, and DECRC with nothing
-saved homes the cursor with default state, so the earlier entries for those are
-gone. Reference: xterm `cursor.c` (`CursorSave`, `CursorRestore`, `CursorSave2`,
-`AdjustSavedCursor`) and `screen.c`.
+`ESCAPE_SEQUENCE_COVERAGE.md`). Cursor save/restore (DECSC/DECRC, SCOSC/SCORC
+and `?1048`/`?1049`, which share one slot per screen) has no open divergence
+from xterm tracked here: Task 147 closed the pending-wrap flag (147.6) and the
+saved cursor on resize (147.18), and decided that DECRC with DECOM set clamps
+to the screen only. That matches kitty, Ghostty and WezTerm; xterm alone also
+clamps to the bottom and right margins (not the top or left). The one thing
+the slot does not save is DECSCA protection, which is unsupported (below).
 
-| Behaviour                                | Importance | Type | Planned     | Notes                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ---------------------------------------- | ---------- | ---- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DECRC scroll-region clamp                | ⬜         | 🚧   | Task 147.17 | xterm clamps the position restored by DECRC to the scroll region when the restored origin mode is on. Freminal saves and restores DECOM itself (Task 131.C1) but clamps to the screen only, so a position saved under a different DECSTBM state can land outside the region it would be in xterm.                                                                                                        |
-| DECSC saved state                        | ⬜         | 🚧   | Task 147.6  | Besides the position, xterm saves the pending-wrap flag (`do_wrap`) and DECSCA protection in its `DECSC_FLAGS`. Freminal saves the position, the SGR rendition (weight, decorations, colours), DECOM and the character set per screen (Task 131.C1), and keeps an open OSC 8 hyperlink out of the save (as xterm, kitty and Ghostty do); it does not save the pending-wrap flag (DECSCA is unsupported). |
-| Saved cursor on resize, alternate active | ⬜         | 🚧   | Task 147.18 | xterm adjusts the main screen's saved cursor when the terminal is resized while the alternate screen is active (`AdjustSavedCursor`). Freminal clamps a saved screen position to the new size only when it is restored.                                                                                                                                                                                  |
-
-One further gap, unrelated to cursor save/restore, surfaced during the DECSTR
+One gap, unrelated to cursor save/restore, surfaced during the DECSTR
 (Soft Terminal Reset, issue #507) audit:
 
-| Feature                                    | Importance | Type | Planned | Notes                                                                                                                                                                                                                                                                                                       |
-| ------------------------------------------ | ---------- | ---- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DECSCA / selective erase (protected cells) | ⬜         | ⬜   | —       | No per-cell protected-character bit exists in the buffer's cell model, so DECSCA (`CSI Ps " q`) is recognised and ignored (Task 128; before, it was misrouted to DECSCUSR and changed the cursor style); DECSED (`CSI ? Ps J`) and DECSEL (`CSI ? Ps K`) selective erase are unimplemented as a consequence |
+| Feature                                    | Importance | Type            | Planned | Notes                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------ | ---------- | --------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DECSCA / selective erase (protected cells) | low        | not implemented | —       | No per-cell protected-character bit exists in the buffer's cell model, so DECSCA (`CSI Ps " q`) is recognised and ignored (Task 128; before, it was misrouted to DECSCUSR and changed the cursor style); DECSED (`CSI ? Ps J`) and DECSEL (`CSI ? Ps K`) selective erase are unimplemented as a consequence |
 
 ---
 
@@ -450,8 +470,8 @@ One further gap, unrelated to cursor save/restore, surfaced during the DECSTR
 The kitty keyboard protocol is **not yet 1:1 compliant**. The 2026-10-08 audit found
 the encoder machinery sound (Task 35, the Task 101 encoding-only wins, and Task 114's
 raw-winit delivery of keypad operators/directional/KP_Begin, media keys, and
-PrintScreen/Pause/Menu) but the GUI layer feeding it is not: Alt/Super are never applied
-to text keys, modified Enter is dropped, Enter/Tab/Backspace/Escape carry no modifiers,
+PrintScreen/Pause/Menu) but the GUI layer feeding it is not: Super is never applied to
+text keys, Alt is applied to them only on the legacy path (Task 147.24), modified Enter is dropped, Enter/Tab/Backspace/Escape carry no modifiers,
 key identity comes from typed text, the flag-4 shifted-key rule is violated, and F13–F35
 are unreachable. That work is **Task 137 (v0.13.1)**, which also needs architecture
 sign-off. Separately, the **lock-state half of Task 114 was reverted** because it cannot
@@ -473,39 +493,42 @@ be produced correctly or uniformly:
   `NamedKey::AltGraph`, which carries no physical-key identity to intercept).
 - **hyper/meta modifier bits** have no source on any platform freminal targets.
 
-| Feature                                 | Importance | Type | Planned          | Notes                                                                                                                                                                                  |
-| --------------------------------------- | ---------- | ---- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| caps_lock / num_lock modifier state     | 🟨         | ⬜   | —                | Bits 64 / 128 — no uniform cross-platform source (Wayland compositor-consumed; Win/macOS level-only query). Reverted; tracked upstream (egui#3653, winit#1426)                         |
-| CapsLock / NumLock / ScrollLock as keys | ⬜         | ⬜   | —                | `CSI 57358 u` / `57359 u` / `57360 u` — transition not observable off X11 (Wayland consumes; Win/macOS give a level, not an edge). Declined; tracked upstream                          |
-| ISO_Level3/5_Shift                      | ⬜         | ⬜   | —                | `CSI 57453 u` / `57454 u` — no winit `KeyCode` variant (winit 0.30.13; closest is the logical `NamedKey::AltGraph`); blocked on upstream winit, unscheduled                            |
-| hyper / meta modifier bits              | ⬜         | ⬜   | —                | Modifier bits 16 / 32 — no platform source on any target; `KeyModifiers` fields exist but stay `0`                                                                                     |
-| Kitty keyboard conformance (GUI layer)  | 🟩         | 🚧   | v0.13.1 Task 137 | Alt/Super never applied to text keys; modified Enter dropped; Enter/Tab/BS/Esc carry no modifiers; key identity from typed text; flag-4 shifted-key rule violated; F13–F35 unreachable |
+| Feature                                 | Importance | Type            | Planned          | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------------------- | ---------- | --------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| caps_lock / num_lock modifier state     | medium     | not implemented | —                | Bits 64 / 128 — no uniform cross-platform source (Wayland compositor-consumed; Win/macOS level-only query). Reverted; tracked upstream (egui#3653, winit#1426)                                                                                                                                                                                                                                                                           |
+| CapsLock / NumLock / ScrollLock as keys | low        | not implemented | —                | `CSI 57358 u` / `57359 u` / `57360 u` — transition not observable off X11 (Wayland consumes; Win/macOS give a level, not an edge). Declined; tracked upstream                                                                                                                                                                                                                                                                            |
+| ISO_Level3/5_Shift                      | low        | not implemented | —                | `CSI 57453 u` / `57454 u` — no winit `KeyCode` variant (winit 0.30.13; closest is the logical `NamedKey::AltGraph`); blocked on upstream winit, unscheduled                                                                                                                                                                                                                                                                              |
+| hyper / meta modifier bits              | low        | not implemented | —                | Modifier bits 16 / 32 — no platform source on any target; `KeyModifiers` fields exist but stay `0`                                                                                                                                                                                                                                                                                                                                       |
+| Kitty keyboard conformance (GUI layer)  | high       | partial         | v0.13.1 Task 137 | Super never applied to text keys; Alt applied only on the legacy path (Task 147.24), not under a kitty flag; modified Enter dropped; Enter/Tab/BS/Esc carry no modifiers; key identity from typed text; flag-4 shifted-key rule violated; F13–F35 unreachable                                                                                                                                                                            |
+| macOS Option as Alt                     | medium     | not implemented | v0.13.1 Task 152 | Option keeps composing characters on macOS (Option+b types the composed character), so `?1036` prefixes ESC for Alt on the other platforms only. A `[keyboard] macos_option_as_alt` option was built in Task 147.24, found not to work (egui supplies the Option-composed character, so `both` sent `ESC` plus that character) and removed; Task 152 carries the base key through the windowing layer and adds per-side `left` / `right` |
+| Application keypad modifiers            | low        | not implemented | v0.13.1 Task 137 | Application-keypad keys (DECPAM) send the plain VT220 `SS3` form with no modifier parameter; xterm adds one (`SS3 <mod> <final>`, `input.c:1394-1396`). In VT52 mode the keypad keys should send `ESC ? <final>` (xterm `input.c:855-859`); freminal sends the ANSI forms                                                                                                                                                                |
+| `modifyOtherKeys` Alt+letter            | low        | partial         | v0.13.1 Task 137 | Under `modifyOtherKeys`, xterm sends some Alt+letter keys as `CSI 27 ; mod ; code ~`; freminal always uses the ESC prefix for them                                                                                                                                                                                                                                                                                                       |
 
 ---
 
 ## Charset / G-Set Gaps
 
-| Feature               | Importance | Type | Planned     | Notes                                                                                      |
-| --------------------- | ---------- | ---- | ----------- | ------------------------------------------------------------------------------------------ |
-| SO (0x0E) — Shift Out | ⬜         | 🚧   | Task 147.20 | Parsed; selects G1 into GL, but G1 rendering is not implemented                            |
-| SI (0x0F) — Shift In  | ⬜         | 🚧   | Task 147.20 | Parsed; restores G0 into GL — no effect since G1 rendering is absent                       |
-| ESC n (LS2)           | ⬜         | 🚧   | Task 147.20 | Invoke G2 as GL — parsed, no functional effect                                             |
-| ESC o (LS3)           | ⬜         | ⬜   | Task 147.20 | Invoke G3 as GL — parsed, no functional effect                                             |
-| ESC \                 | / \} / \~  | ⬜   | 🚧          | —                                                                                          |
-| ESC ) C / ESC \* C    | ❌         | ⬜   | Task 147.20 | G1/G2 arbitrary charset designation — not planned (ESC ) B / G1=ASCII works since Task 22) |
+G0 to G3 take ASCII (`B`), UK (`A`) and DEC Special Graphics (`0`) through
+`ESC ( ) * + C`; GL is switched by SO, SI, `ESC n` and `ESC o`, and a single shift
+(`ESC N` / `ESC O`, and `0x8E` / `0x8F` under S8C1T) maps the next character
+(Task 147.20). DECSC saves the whole state; RIS and DECSTR reset it. Only two
+things are not done, and both are deliberate:
 
-G0 with DEC Special Graphics (`ESC ( 0`) and US ASCII (`ESC ( B`) both work correctly, and
-`ESC ) B` (G1=ASCII) was fixed in Task 22; these are the overwhelmingly common cases.
+| Feature                           | Importance  | Type            | Planned | Notes                                                                                                                                                                                                                         |
+| --------------------------------- | ----------- | --------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ESC - C` / `ESC . C` / `ESC / C` | not planned | not implemented | —       | 96-character set designation (G1 / G2 / G3). No modern reference implements it: Ghostty has a TODO; kitty and WezTerm lack it                                                                                                 |
+| Multi-byte designators            | not planned | not implemented | —       | `ESC ( % 5`, `ESC ( " 4`, `ESC ( & 4` and the like (DEC Supplemental, Hebrew, Cyrillic): recognised and ignored, slot unchanged. xterm implements some (`charproc.c` `CASE_SCS_PERCENT` / `_DQUOTE` / `_AMPRSND`)             |
+| GR applied to `0x80` and above    | not planned | partial         | —       | `ESC ~` / `ESC }` / `ESC \|` (LS1R / LS2R / LS3R) are tracked, saved and restored, but never applied: those bytes are UTF-8, and xterm in UTF-8 mode and Ghostty do not apply GR either (`ptydata.c:94`, `Terminal.zig:1660`) |
 
 ---
 
 ## ESC Gaps
 
-| Sequence | Importance | Type | Planned     | Notes                                                             |
-| -------- | ---------- | ---- | ----------- | ----------------------------------------------------------------- |
-| ESC F    | ⬜         | 🚧   | Task 147.23 | Cursor to lower-left of screen — parsed with debug log, no effect |
-| ESC l    | ⬜         | 🚧   | Task 147.23 | Memory Lock — parsed with debug log, no effect                    |
-| ESC m    | ⬜         | 🚧   | Task 147.23 | Memory Unlock — parsed with debug log, no effect                  |
+| Sequence | Importance  | Type            | Planned | Notes                                                                                                                                                                                                                                                                        |
+| -------- | ----------- | --------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ESC F    | not planned | not implemented | —       | Cursor to lower-left (HP). Recognised and ignored with a `debug!` log. xterm acts only when `hpLowerleftBugCompat` is set, and it defaults to off (`charproc.c:448,3982-3990`); kitty, Ghostty and WezTerm ignore it (Task 147.23). VT52 `ESC F` is a separate, working path |
+| ESC l    | not planned | not implemented | —       | Memory Lock (HP). Recognised and ignored with a `debug!` log. xterm sets the top margin at the cursor row (`charproc.c:4759-4770`); kitty, Ghostty and WezTerm ignore it (Task 147.23)                                                                                       |
+| ESC m    | not planned | not implemented | —       | Memory Unlock (HP). Recognised and ignored with a `debug!` log. xterm clears the top margin (`charproc.c:4759-4770`); kitty, Ghostty and WezTerm ignore it (Task 147.23)                                                                                                     |
 
 ---
 
@@ -515,49 +538,48 @@ Kitty and xterm extensions that are missing. Since Task 128 the CSI router match
 prefix, intermediate and final byte together, so each sequence below is recognised and
 ignored (warn-logged, no output) until its task lands; none of them misroutes any more.
 
-| Sequence                                                                   | Importance | Type | Planned          | Notes                                                                                                                                                                |
-| -------------------------------------------------------------------------- | ---------- | ---- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CSI Ps + T` (unscroll)                                                    | 🟨         | ⬜   | v0.13.2 Task 142 | Recognised and ignored since Task 128 (before, it executed as SD)                                                                                                    |
-| `CSI … $ r` (DECCARA), `CSI Ps * x` (DECSACE)                              | 🟨         | ⬜   | v0.13.2 Task 143 | Both recognised and ignored since Task 128 (before, `CSI … $ r` was routed to DECSTBM and `CSI * x` wrote an unsolicited DECREQTPARM reply)                          |
-| `CSI Ps # P` / `# Q` / `# R` (XTPUSHCOLORS / XTPOPCOLORS / XTREPORTCOLORS) | ⬜         | ⬜   | v0.13.2 Task 144 | Recognised and ignored since Task 128 (before, `CSI # P` was routed to DCH and deleted characters)                                                                   |
-| `CSI ? Pm s` / `CSI ? Pm r` (XTSAVE / XTRESTORE)                           | ⬜         | ⬜   | v0.13.2 Task 141 | Missing, including the bare `CSI ? s` / `CSI ? r` forms. Recognised and ignored since Task 128 (before, they were routed to DECSLRM / DECSTBM and failed as Invalid) |
-| `CSI 22 J`                                                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Move screen to scrollback, then ED 2; no `EraseDisplayMode` variant. Prerequisite for multiple cursors                                                               |
-| `CSI < 288 ; x ; y M` (mouse-leave report)                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Not sent on window leave or pane-to-pane transitions under SGR-pixel mouse encoding                                                                                  |
-| `CSI > … SP q` (multiple cursors)                                          | 🟨         | ⬜   | v0.13.2 Task 103 | Missing. Recognised and ignored since 126.3 (before, it triggered an unsolicited XTVERSION reply); Task 128 makes this a routing rule                                |
-| `CSI … $ t` (DECRARA)                                                      | ⬜         | ⬜   | —                | Not implemented and not planned. Recognised and ignored since Task 128 (before, it was handled as a window operation)                                                |
-| `CSI 8 m` (SGR conceal)                                                    | ⬜         | ⬜   | —                | Parsed to `Conceal` and ignored by `apply_sgr`; text stays visible. The terminfo entry does not declare `invis` (Task 151.3)                                         |
+| Sequence                                                                   | Importance  | Type            | Planned          | Notes                                                                                                                                                                |
+| -------------------------------------------------------------------------- | ----------- | --------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CSI Ps + T` (unscroll)                                                    | medium      | not implemented | v0.13.2 Task 142 | Recognised and ignored since Task 128 (before, it executed as SD)                                                                                                    |
+| `CSI … $ r` (DECCARA), `CSI Ps * x` (DECSACE)                              | medium      | not implemented | v0.13.2 Task 143 | Both recognised and ignored since Task 128 (before, `CSI … $ r` was routed to DECSTBM and `CSI * x` wrote an unsolicited DECREQTPARM reply)                          |
+| `CSI Ps # P` / `# Q` / `# R` (XTPUSHCOLORS / XTPOPCOLORS / XTREPORTCOLORS) | low         | not implemented | v0.13.2 Task 144 | Recognised and ignored since Task 128 (before, `CSI # P` was routed to DCH and deleted characters)                                                                   |
+| `CSI ? Pm s` / `CSI ? Pm r` (XTSAVE / XTRESTORE)                           | low         | not implemented | v0.13.2 Task 141 | Missing, including the bare `CSI ? s` / `CSI ? r` forms. Recognised and ignored since Task 128 (before, they were routed to DECSLRM / DECSTBM and failed as Invalid) |
+| `CSI 22 J`                                                                 | low         | not implemented | v0.13.2 Task 141 | Move screen to scrollback, then ED 2; no `EraseDisplayMode` variant. Prerequisite for multiple cursors                                                               |
+| `CSI < 288 ; x ; y M` (mouse-leave report)                                 | low         | not implemented | v0.13.2 Task 141 | Not sent on window leave or pane-to-pane transitions under SGR-pixel mouse encoding                                                                                  |
+| `CSI > … SP q` (multiple cursors)                                          | medium      | not implemented | v0.13.2 Task 103 | Missing. Recognised and ignored since 126.3 (before, it triggered an unsolicited XTVERSION reply); Task 128 makes this a routing rule                                |
+| `CSI … $ t` (DECRARA)                                                      | low         | not implemented | —                | Not implemented and not planned. Recognised and ignored since Task 128 (before, it was handled as a window operation)                                                |
+| `CSI > Pm t` / `CSI > Pm T` (XTSMTITLE / XTRMTITLE)                        | not planned | not implemented | —                | Recognised and ignored without a warning, as kitty, Ghostty and WezTerm do (Task 147.9)                                                                              |
+| `CSI 8 m` (SGR conceal)                                                    | low         | not implemented | —                | Parsed to `Conceal` and ignored by `apply_sgr`; text stays visible. The terminfo entry does not declare `invis` (Task 151.3)                                         |
 
 ---
 
 ## CSI Standard Mode Gaps
 
-| Mode | Name                       | Importance | Planned     | Notes                                                                                                 |
-| ---- | -------------------------- | ---------- | ----------- | ----------------------------------------------------------------------------------------------------- |
-| 2    | KAM — Keyboard Action Mode | ⬜         | Task 147.21 | Not implemented; no keyboard-lock state exists in freminal (surfaced by the DECSTR audit, issue #507) |
-| 12   | SRM — Send/Receive Mode    | ⬜         | Task 147.21 | Not implemented; rare in practice                                                                     |
+Both modes are typed and recognised: set and reset log at `debug!` and change
+nothing, and DECRQM answers `Ps = 0` in the ANSI form (`CSI Pa ; 0 $ y`).
 
-LNM (mode 20) and IRM (mode 4) are implemented.
+| Mode | Name                       | Importance  | Planned | Notes                                                                                                                                                                                                            |
+| ---- | -------------------------- | ----------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2    | KAM — Keyboard Action Mode | not planned | —       | kitty and WezTerm do not implement it. Ghostty enforces it only behind `vt-kam-allowed`, which is off by default because letting any program lock the keyboard is hostile; xterm alone enforces it (Task 147.21) |
+| 12   | SRM — Send/Receive Mode    | not planned | —       | kitty and WezTerm do not implement it and Ghostty stores it with no consumer. On a modern tty the kernel echoes, so turning local echo on would only double every character (Task 147.21)                        |
 
-### DECRQM for ANSI modes (`CSI Pa $ p`)
-
-Part of the ANSI-mode form of DECRQM is still handled incorrectly (issue #528).
-It should be answered `CSI Pa ; Ps $ y`, without the `?` that the DEC-private
-form (`CSI ? Pd ; Ps $ y`) carries. LNM (`CSI 20 $ p`, 130.C1) and IRM
-(`CSI 4 $ p`, Task 130 review) are correct, and a query no longer overwrites the
-stored mode.
-
-| Behaviour              | Importance | Type | Planned    | Notes                                                                                                                                             |
-| ---------------------- | ---------- | ---- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ANSI-form reply prefix | ⬜         | 🚧   | Task 147.1 | Unknown ANSI modes answer `CSI ? Pa ; 0 $ y` because `Mode::UnknownQuery` drops the namespace. (LNM answers `CSI 20 ; Ps $ y` since Task 130.C1.) |
+LNM (mode 20) and IRM (mode 4) are implemented, and DECRQM answers every ANSI-mode
+query in the ANSI form `CSI Pa ; Ps $ y`, an unknown mode included (Task 147.1,
+issue #528).
 
 ---
 
 ## DEC Private Mode Gaps
 
-| Mode  | Name           | Importance | Type | Planned     | Notes                                                                |
-| ----- | -------------- | ---------- | ---- | ----------- | -------------------------------------------------------------------- |
-| ?1001 | Hilite Mouse   | ⬜         | 🚧   | Task 147.21 | Mode parsed/stored; obsolete hilite tracking not functionally active |
-| ?1034 | Interpret Meta | ⬜         | ⬜   | Task 147.21 | Meta key sends ESC prefix — not recognized                           |
+`?1001`, `?1034` and `?1035` are typed and recognised: set and reset log at
+`debug!` and change nothing, and DECRQM answers `Ps = 0`.
+
+| Mode  | Name                                     | Importance  | Type            | Planned | Notes                                                                                                                                                                                                     |
+| ----- | ---------------------------------------- | ----------- | --------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ?1001 | Hilite Mouse                             | not planned | not implemented | —       | kitty, Ghostty and WezTerm do not implement it, and WezTerm's docs warn that it can hang the terminal. The old alias to `?1000` is removed, so `?1001h` followed by a click sends no report (Task 147.21) |
+| ?1034 | Meta Sets Eighth Bit                     | not planned | not implemented | —       | Ghostty, WezTerm and kitty do not implement it, and it conflicts with UTF-8 input. (This row used to describe the ESC prefix, which is `?1036`, implemented.) (Task 147.21)                               |
+| ?1035 | NumLock Overrides the Application Keypad | not planned | not implemented | —       | winit exposes no NumLock state (Task 114.11), so the mode cannot be honoured. If lock state becomes available it belongs with Task 137 K14 (Task 147.21)                                                  |
+| ?1039 | Alt Sends Escape                         | low         | partial         | —       | Stored and reported by DECRQM, with no further effect, as in Ghostty (Task 147.24)                                                                                                                        |
 
 Fully implemented and removed from prior gap lists during v0.3.0–v0.7.0:
 `?2 (DECANM/VT52)`, `?66 (DECNKM)`, `?67 (DECBKM)`, `?69 (DECLRMM)`, `?1007 (AlternateScroll)`,
@@ -577,12 +599,11 @@ negative-z layering, and the wrong cursor-after-placement rule). They are tracke
 by Task 135 (conformance) and Task 136 (placement model and z-layers), both
 v0.13.1.
 
-| Behaviour                                   | Importance | Type | Planned          | Notes                                                                                                                                                                                                                                                                                                                                                                         |
-| ------------------------------------------- | ---------- | ---- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Sixel placement under DECSDM                | ⬜         | 🚧   | Task 147.19      | With sixel scrolling disabled (DECSDM, `?80` set) xterm draws the image at the top-left of the screen and does not move the text cursor. Freminal draws it at the cursor position and then restores the cursor to the image origin. The text cursor does not move in either; only the image position differs.                                                                 |
-| Kitty graphics conformance                  | 🟩         | 🚧   | v0.13.1 Task 135 | About 30 deviations: replies to id-less commands, text and erase destroy image tiles, `S=`/`O=` ignored for files, `CSI 14 t` reports the OS window rectangle for every pane                                                                                                                                                                                                  |
-| Kitty graphics placement model and z-layers | 🟩         | 🚧   | v0.13.1 Task 136 | Placing an image pre-clears others below; no negative-z layering; cursor-after-placement rule wrong                                                                                                                                                                                                                                                                           |
-| Kitty kitten transport (`DCS @kitty-…`)     | ⬜         | ⬜   | —                | Not implemented and not planned: private kitten plumbing (`@kitty-print`, `echo`, `ssh`, `ask`, `clone`, `edit`) and the `@kitty-cmd` remote-control API are out of scope (`PLAN_VERSION_130.md` Out of scope). Consumed silently since Task 129.14: no warn, and a dedicated debug line with the length only (the generic, bounded `DCS received` debug line still applies). |
+| Behaviour                                   | Importance | Type            | Planned          | Notes                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------- | ---------- | --------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Kitty graphics conformance                  | high       | partial         | v0.13.1 Task 135 | About 30 deviations: replies to id-less commands, text and erase destroy image tiles, `S=`/`O=` ignored for files, `CSI 14 t` reports the OS window rectangle for every pane                                                                                                                                                                                                  |
+| Kitty graphics placement model and z-layers | high       | partial         | v0.13.1 Task 136 | Placing an image pre-clears others below; no negative-z layering; cursor-after-placement rule wrong                                                                                                                                                                                                                                                                           |
+| Kitty kitten transport (`DCS @kitty-…`)     | low        | not implemented | —                | Not implemented and not planned: private kitten plumbing (`@kitty-print`, `echo`, `ssh`, `ask`, `clone`, `edit`) and the `@kitty-cmd` remote-control API are out of scope (`PLAN_VERSION_130.md` Out of scope). Consumed silently since Task 129.14: no warn, and a dedicated debug line with the length only (the generic, bounded `DCS received` debug line still applies). |
 
 Task 100 added the Kitty graphics feature surface — animation,
 image-number references, relative placements, storage quotas + eviction,
@@ -598,14 +619,7 @@ Kitty handler; non-Kitty APCs are logged and ignored, which is spec-compliant.
 8-bit C1 controls (0x80–0x9F), in particular 0x9B as a one-byte CSI introducer, are supported
 **only when S8C1T mode is active** (`ESC SP G`). The default is 7-bit (S7C1T). Modern terminal
 output universally uses 7-bit sequences, so the default is appropriate. The remaining gap is
-that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13; since Task 130 so do DECRPM, `CSI ? u` and every GUI-originated reply (window reports, title/icon reports, OSC 52, OSC 99). VT52 `ESC / Z` stays 7-bit by definition. **Not covered:** terminal-to-application _event_ encodings (mouse reports, focus in/out `CSI I` / `CSI O`, and key encodings) are still emitted in the 7-bit form whatever the S8C1T state (Task 147.3–147.5; recorded by the Task 130 adversarial review). Also, in S8C1T mode a reply that echoes UTF-8 text (a title or icon label) can contain bytes in 0x80–0x9F as continuation bytes of a multi-byte character (e.g. `Ĝ` is `C4 9C`), which a strict 8-bit consumer could misread as a C1 control. xterm, the only reference terminal with S8C1T, sends the same raw bytes; the entry is closed as matching xterm by Task 147.17.
-
-**Mode changes take effect per read.** A read from the PTY is parsed in one pass before any of
-it is applied, so a change of parser mode (S8C1T / S7C1T, DECANM entering or leaving VT52, and
-the parser half of RIS) affects the _next_ read: bytes after the change in the same read were
-already parsed under the old mode. Applications that switch mode and then immediately emit
-sequences in the new mode within one write can be misread. Fixed by Task 147.2; recorded by the Task
-131 adversarial review.
+that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13; since Task 130 so do DECRPM, `CSI ? u` and every GUI-originated reply (window reports, title/icon reports, OSC 52, OSC 99). VT52 `ESC / Z` stays 7-bit by definition. Every CSI or SS3 introducer the terminal generates (key reports, focus, mouse, bracketed-paste markers, kitty `CSI u`, `modifyOtherKeys`) honours S8C1T since Task 147.4, as in xterm. VT52 mode and Alt-prefixed text stay 7-bit.
 
 ---
 
@@ -626,23 +640,19 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 2 — Polish
 
-| Item                            | Rationale                                                                      | Planned                 |
-| ------------------------------- | ------------------------------------------------------------------------------ | ----------------------- |
-| ANSI-mode DECRQM (`CSI Pa $ p`) | Unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps" | Task 147.1 (issue #528) |
+| Item                | Rationale                                              | Planned          |
+| ------------------- | ------------------------------------------------------ | ---------------- |
+| macOS Option as Alt | Option keeps composing characters; see "Keyboard Gaps" | v0.13.1 Task 152 |
 
 ### Priority 3 — Low priority / optional
 
-| Item                     | Rationale                                           | Planned                    |
-| ------------------------ | --------------------------------------------------- | -------------------------- |
-| SO/SI + G1 rendering     | Almost never used in practice since UTF-8 took over | Task 147.20                |
-| SRM standard mode        | Extremely rare in modern terminal output            | Task 147.21                |
-| DECSC/DECRC xterm parity | Three narrow divergences; see Buffer Semantics Gaps | Task 147.6, 147.17, 147.18 |
-| Sixel placement (DECSDM) | xterm draws at screen home; Freminal at the cursor  | Task 147.19                |
-| KAM standard mode        | Rare; no keyboard-lock state exists in freminal     | Task 147.21                |
-| ?1001 hilite tracking    | Obsolete mouse mode                                 | Task 147.21                |
-| ?1034 interpret-meta key | Niche compatibility                                 | Task 147.21                |
-| DECSCA / selective erase | No per-cell protected-character bit in buffer model | —                          |
-| 8-bit C1 default on      | Modern terminals always use 7-bit sequences         | —                          |
+| Item                                                  | Rationale                                                                                       | Planned     |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ----------- |
+| KAM, SRM, `?1001`, `?1034`, `?1035`                   | Recognised, not implemented; reasons under "CSI Standard Mode Gaps" and "DEC Private Mode Gaps" | Not planned |
+| HP `ESC F` / `ESC l` / `ESC m`, XTSMTITLE / XTRMTITLE | Recognised and ignored, as kitty, Ghostty and WezTerm do                                        | Not planned |
+| 96-character designators, GR on `0x80` and above      | No modern reference implements them; those bytes are UTF-8                                      | Not planned |
+| DECSCA / selective erase                              | No per-cell protected-character bit in buffer model                                             | —           |
+| 8-bit C1 default on                                   | Modern terminals always use 7-bit sequences                                                     | —           |
 
 ---
 

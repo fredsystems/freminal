@@ -99,7 +99,6 @@ use freminal::gui::pty::{CommandFinishedEvent, TabChannels, WindowCommandBudget}
 use freminal::gui::renderer::WindowPostRenderer;
 use freminal::gui::shell_history::new_seeded_history;
 use freminal_common::geometry::{Rect, point};
-use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, SearchCorpus, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
@@ -136,7 +135,6 @@ fn make_bench_pane(id: PaneId) -> Pane {
     let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
         Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
     let (input_tx, _input_rx) = crossbeam_channel::unbounded::<InputEvent>();
-    let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
     let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded::<WindowCommand>();
     let (_clipboard_tx, clipboard_rx) = crossbeam_channel::unbounded::<String>();
     let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::unbounded::<SearchCorpus>();
@@ -147,7 +145,6 @@ fn make_bench_pane(id: PaneId) -> Pane {
     let channels = TabChannels {
         arc_swap,
         input_tx,
-        pty_write_tx,
         window_cmd_rx,
         clipboard_rx,
         search_buffer_rx,

@@ -159,7 +159,7 @@ pub struct GpuTimingReport {
     /// most recently completed sample (either phase) -- the "query
     /// latency in frames" the plan calls for reporting.
     ///
-    /// Unit: pane-local drawn frames, i.e. [`PaneGpuTimingProfile::frame`]
+    /// Unit: pane-local drawn frames, i.e. `PaneGpuTimingProfile::frame`
     /// ticks -- incremented once per [`PaneGpuTimingProfile::begin_frame`]
     /// call, which runs only when this pane's own `PaintCallback` is
     /// invoked. An idle pane may draw rarely (or not at all for long
@@ -170,7 +170,7 @@ pub struct GpuTimingReport {
     /// milliseconds or window frames.
     pub last_latency_frames: u64,
     /// Cumulative samples rejected because the ring was at
-    /// [`RING_CAPACITY`] when issued (never blocks; see
+    /// `RING_CAPACITY` when issued (never blocks; see
     /// [`GpuQueryRing::dropped_sample_count`]).
     pub dropped_sample_count: u64,
     /// Samples still pending (issued, result not yet available) as of the
@@ -280,10 +280,10 @@ impl PaneGpuTimingProfile {
     /// Detect GPU timer capability from the real desktop GL version and
     /// extension set, and cache the active `GL_RENDERER` string.
     ///
-    /// Reads `GL_VERSION` via [`Gl::get_parameter_string`], parses it with
+    /// Reads `GL_VERSION` via `Gl::get_parameter_string`, parses it with
     /// `freminal_windowing::gpu_profiling::parse_gl_version_string` (125.7's
     /// pure parser, written explicitly for this real-caller path -- see its
-    /// doc), and reads the extension set via [`Gl::supported_extensions`]
+    /// doc), and reads the extension set via `Gl::supported_extensions`
     /// only when the version parses; if it does not, capability is
     /// conservatively [`GpuTimerCapability::Unavailable`] rather than
     /// guessed. Idempotent: safe to call more than once (only ever done
@@ -440,7 +440,7 @@ impl PaneGpuTimingProfile {
     }
 
     /// Issue one start/end pair to the ring, destroying both handles
-    /// immediately if the ring is at [`RING_CAPACITY`] and rejects it --
+    /// immediately if the ring is at `RING_CAPACITY` and rejects it --
     /// `GpuQueryRing::issue`'s `DroppedRingFull` hands ownership straight
     /// back for exactly this reason (see that variant's doc).
     fn issue(

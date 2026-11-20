@@ -3,14 +3,13 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 #![allow(clippy::module_name_repetitions)]
-use std::borrow::Cow;
-
 use conv2::ConvUtil;
 use egui::{Modifiers, PointerButton, Vec2};
-use freminal_common::buffer_states::modes::mouse::{MouseEncoding, MouseTrack};
-use freminal_terminal_emulator::input::{
-    TerminalInput, collect_text, raw_ascii_bytes_to_terminal_input,
+use freminal_common::buffer_states::modes::{
+    mouse::{MouseEncoding, MouseTrack},
+    s8c1t::S8c1t,
 };
+use freminal_terminal_emulator::input::Introducer;
 
 /// Snapshot of the mouse button and position state from the previous frame.
 ///
@@ -153,7 +152,6 @@ pub const fn motion_track_wants_report(
         MouseTrack::NoTracking
         | MouseTrack::XtMsex10
         | MouseTrack::XtMseX11
-        | MouseTrack::XtMseHilite
         | MouseTrack::Query(_) => false,
     }
 }
@@ -171,7 +169,7 @@ pub const fn motion_track_wants_report(
 /// stream needs its own independent report history, since two panes'
 /// terminal content are entirely unrelated. The held pointer BUTTON is
 /// deliberately NOT here — see
-/// [`PerWindowState::held_pointer_button`](super::window::PerWindowState::held_pointer_button)'s
+/// `PerWindowState::held_pointer_button`'s
 /// doc for why that is window-owned instead: a physical button press and
 /// its matching release are events on the SAME OS pointer device,
 /// independent of which pane happens to be active at either moment, and
@@ -283,7 +281,8 @@ pub fn handle_pointer_button(
     current_state: &PreviousMouseState,
     mouse_track: &MouseTrack,
     encoding: &MouseEncoding,
-) -> Option<Cow<'static, [TerminalInput]>> {
+    s8c1t: S8c1t,
+) -> Option<Vec<u8>> {
     match mouse_track {
         MouseTrack::XtMsex10 => {
             if current_state.button_pressed {
@@ -294,24 +293,22 @@ pub fn handle_pointer_button(
                     &current_state.mouse_position,
                     false,
                     encoding,
+                    s8c1t,
                 ));
             }
             None
         }
-        // XtMseHilite (?1001) is an X11-era protocol that highlights the region
-        // between press and release at the X11 window level.  Freminal does not
-        // implement X11 highlighting, so we report events the same as XtMseX11.
-        MouseTrack::XtMseX11
-        | MouseTrack::XtMseHilite
-        | MouseTrack::XtMseBtn
-        | MouseTrack::XtMseAny => Some(encode_x11_mouse_button(
-            button,
-            current_state.button_pressed,
-            current_state.modifiers,
-            &current_state.mouse_position,
-            false,
-            encoding,
-        )),
+        MouseTrack::XtMseX11 | MouseTrack::XtMseBtn | MouseTrack::XtMseAny => {
+            Some(encode_x11_mouse_button(
+                button,
+                current_state.button_pressed,
+                current_state.modifiers,
+                &current_state.mouse_position,
+                false,
+                encoding,
+                s8c1t,
+            ))
+        }
         MouseTrack::NoTracking | MouseTrack::Query(_) => None,
     }
 }
@@ -373,7 +370,8 @@ pub fn handle_pointer_moved(
     previous_state: Option<&PreviousMouseState>,
     mouse_track: &MouseTrack,
     encoding: &MouseEncoding,
-) -> Option<Cow<'static, [TerminalInput]>> {
+    s8c1t: S8c1t,
+) -> Option<Vec<u8>> {
     // Task 124.3a: `?1016` (SgrPixels) motion must be distinguishable at
     // pixel granularity — two moves that stay within one cell must still
     // compare unequal — so the position-changed check is granularity-aware
@@ -396,6 +394,7 @@ pub fn handle_pointer_moved(
         &current_state.mouse_position,
         true,
         encoding,
+        s8c1t,
     ))
 }
 
@@ -409,19 +408,34 @@ pub fn handle_pointer_scroll(
     current_state: &PreviousMouseState,
     mouse_track: &MouseTrack,
     encoding: &MouseEncoding,
-) -> Option<Cow<'static, [TerminalInput]>> {
+    s8c1t: S8c1t,
+) -> Option<Vec<u8>> {
     match mouse_track {
-        MouseTrack::XtMseX11
-        | MouseTrack::XtMseHilite
-        | MouseTrack::XtMseBtn
-        | MouseTrack::XtMseAny => encode_x11_mouse_wheel(
-            delta,
-            current_state.modifiers,
-            &current_state.mouse_position,
-            encoding,
-        ),
+        MouseTrack::XtMseX11 | MouseTrack::XtMseBtn | MouseTrack::XtMseAny => {
+            encode_x11_mouse_wheel(
+                delta,
+                current_state.modifiers,
+                &current_state.mouse_position,
+                encoding,
+                s8c1t,
+            )
+        }
         MouseTrack::NoTracking | MouseTrack::XtMsex10 | MouseTrack::Query(_) => None,
     }
+}
+
+/// A CSI-introduced mouse report: the S8C1T-aware introducer, then `body`.
+///
+/// Mouse reports are not key events: every function in this module returns
+/// the finished wire bytes, which the caller sends raw rather than through
+/// the key encoder (which would re-encode each byte under kitty flag 8).
+fn csi_report(s8c1t: S8c1t, body: &[u8]) -> Vec<u8> {
+    Introducer::Csi.frame(s8c1t, body)
+}
+
+/// A CSI-introduced SGR-style (`CSI <`) mouse report with a text body.
+fn csi_sgr_report(s8c1t: S8c1t, cb: usize, x: usize, y: usize, final_char: char) -> Vec<u8> {
+    csi_report(s8c1t, format!("<{cb};{x};{y}{final_char}").as_bytes())
 }
 
 fn encode_mouse_for_x11(button: &MouseEvent, pressed: bool) -> usize {
@@ -502,7 +516,8 @@ fn encode_x11_mouse_wheel(
     modifiers: Modifiers,
     pos: &FreminalMousePosition,
     encoding: &MouseEncoding,
-) -> Option<Cow<'static, [TerminalInput]>> {
+    s8c1t: S8c1t,
+) -> Option<Vec<u8>> {
     // Guard: ignore events with no vertical scroll component.  The terminal
     // mouse wheel protocol only defines vertical scroll (buttons 64/65).  If
     // `delta.y` is zero we must bail out *before* encoding, because:
@@ -532,9 +547,7 @@ fn encode_x11_mouse_wheel(
             let x = pos.x_as_character_column + 1 + padding;
             let y = pos.y_as_character_row + 1 + padding;
             let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
-            Some(raw_ascii_bytes_to_terminal_input(&[
-                b'\x1b', b'[', b'M', cb, x, y,
-            ]))
+            Some(csi_report(s8c1t, &[b'M', cb, x, y]))
         }
         MouseEncoding::SgrPixels => {
             // Task 124.3a: same SGR framing as `?1006`, but `x`/`y` are
@@ -543,7 +556,7 @@ fn encode_x11_mouse_wheel(
             let cb = button_code + modifiers_code;
             let x = pos.x_as_physical_pixel + 1;
             let y = pos.y_as_physical_pixel + 1;
-            Some(collect_text(&format!("\x1b[<{cb};{x};{y}M")))
+            Some(csi_sgr_report(s8c1t, cb, x, y, 'M'))
         }
         MouseEncoding::Sgr | MouseEncoding::Utf8 => {
             // SGR encoding: coordinates are decimal text — do NOT truncate to
@@ -552,7 +565,7 @@ fn encode_x11_mouse_wheel(
             let cb = button_code + modifiers_code;
             let x = pos.x_as_character_column + 1;
             let y = pos.y_as_character_row + 1;
-            Some(collect_text(&format!("\x1b[<{cb};{x};{y}M")))
+            Some(csi_sgr_report(s8c1t, cb, x, y, 'M'))
         }
     }
 }
@@ -564,7 +577,8 @@ fn encode_x11_mouse_button(
     pos: &FreminalMousePosition,
     report_motion: bool,
     encoding: &MouseEncoding,
-) -> Cow<'static, [TerminalInput]> {
+    s8c1t: S8c1t,
+) -> Vec<u8> {
     //Normal tracking mode sends an escape sequence on both button press and release. Modifier key (shift, ctrl, meta) information is also sent. It is enabled by specifying parameter 1000 to DECSET. On button press or release, xterm sends CSI M C b C x C y . The low two bits of C b encode button information: 0=MB1 pressed, 1=MB2 pressed, 2=MB3 pressed, 3=release. The next three bits encode the modifiers which were down when the button was pressed and are added together: 4=Shift, 8=Meta, 16=Control
 
     let padding = if *encoding == MouseEncoding::X11 {
@@ -592,7 +606,7 @@ fn encode_x11_mouse_button(
             let x = pos.x_as_character_column + 1 + padding;
             let y = pos.y_as_character_row + 1 + padding;
             let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
-            raw_ascii_bytes_to_terminal_input(&[b'\x1b', b'[', b'M', cb, x, y])
+            csi_report(s8c1t, &[b'M', cb, x, y])
         }
         MouseEncoding::SgrPixels => {
             // Task 124.3a: same SGR framing as `?1006`, but `x`/`y` are
@@ -600,10 +614,7 @@ fn encode_x11_mouse_button(
             // terminal content area's top-left, not cell column/row.
             let x = pos.x_as_physical_pixel + 1;
             let y = pos.y_as_physical_pixel + 1;
-            collect_text(&format!(
-                "\x1b[<{cb};{x};{y}{}",
-                if pressed { "M" } else { "m" }
-            ))
+            csi_sgr_report(s8c1t, cb, x, y, if pressed { 'M' } else { 'm' })
         }
         MouseEncoding::Sgr | MouseEncoding::Utf8 => {
             // SGR text encoding: coordinates are decimal — do NOT truncate to u8.
@@ -611,10 +622,7 @@ fn encode_x11_mouse_button(
             // output if we truncated before formatting.
             let x = pos.x_as_character_column + 1;
             let y = pos.y_as_character_row + 1;
-            collect_text(&format!(
-                "\x1b[<{cb};{x};{y}{}",
-                if pressed { "M" } else { "m" }
-            ))
+            csi_sgr_report(s8c1t, cb, x, y, if pressed { 'M' } else { 'm' })
         }
     }
 }
@@ -623,17 +631,6 @@ fn encode_x11_mouse_button(
 mod tests {
     use super::*;
     use egui::Vec2;
-
-    // Helper: extract the raw bytes from a Cow<[TerminalInput]> for comparison.
-    fn inputs_to_bytes(inputs: &[TerminalInput]) -> Vec<u8> {
-        inputs
-            .iter()
-            .map(|i| match i {
-                TerminalInput::Ascii(b) => *b,
-                other => panic!("unexpected TerminalInput variant: {other:?}"),
-            })
-            .collect()
-    }
 
     // ── Regression tests: correct encoding is used based on separate encoding param ──
 
@@ -647,11 +644,12 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         )
         .expect("SGR button press should produce output");
 
-        // The whole sequence must arrive as a single Cow slice.
-        let bytes = inputs_to_bytes(result.as_ref());
+        // The whole sequence must arrive as a single contiguous report.
+        let bytes = result;
         // Expected: ESC [ < 0 ; 5 ; 3 M  (1-based, col+1=5, row+1=3)
         let expected = b"\x1b[<0;5;3M";
         assert_eq!(
@@ -672,10 +670,11 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         )
         .expect("wide-terminal SGR button press should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert!(
             s.contains(";301;"),
@@ -695,10 +694,11 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         )
         .expect("wide-terminal SGR scroll should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert!(
             s.ends_with(";261M"),
@@ -719,6 +719,7 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         );
         assert!(
             result.is_none(),
@@ -736,6 +737,7 @@ mod tests {
             &state,
             &MouseTrack::XtMseX11,
             &MouseEncoding::X11,
+            S8c1t::SevenBit,
         );
         assert!(
             result.is_none(),
@@ -754,12 +756,13 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         );
         assert!(
             result.is_some(),
             "non-zero SGR scroll should produce output"
         );
-        let bytes = inputs_to_bytes(result.unwrap().as_ref());
+        let bytes = result.unwrap();
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button code 64 for scroll-up, 1-based coords (5+1=6, 5+1=6)
         assert_eq!(s, "\x1b[<64;6;6M", "SGR scroll-up sequence wrong: {s:?}");
@@ -777,6 +780,7 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         );
         assert!(
             result.is_none(),
@@ -794,6 +798,7 @@ mod tests {
             &state,
             &MouseTrack::XtMseX11,
             &MouseEncoding::X11,
+            S8c1t::SevenBit,
         );
         assert!(
             result.is_none(),
@@ -813,9 +818,10 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         )
         .expect("unit scroll-up should produce output");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button 64 = scroll up, col 3+1=4, row 7+1=8
         assert_eq!(s, "\x1b[<64;4;8M", "SGR unit scroll-up wrong: {s:?}");
@@ -831,9 +837,10 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         )
         .expect("unit scroll-down should produce output");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button 65 = scroll down, col 3+1=4, row 7+1=8
         assert_eq!(s, "\x1b[<65;4;8M", "SGR unit scroll-down wrong: {s:?}");
@@ -849,9 +856,10 @@ mod tests {
             &state,
             &MouseTrack::XtMseX11,
             &MouseEncoding::X11,
+            S8c1t::SevenBit,
         )
         .expect("unit scroll-up X11 should produce output");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         // X11: ESC [ M <cb> <x> <y>
         // cb = 32 (padding) + 64 (button) = 96
         // x = 0 + 1 + 32 = 33
@@ -869,9 +877,10 @@ mod tests {
             &state,
             &MouseTrack::XtMseX11,
             &MouseEncoding::X11,
+            S8c1t::SevenBit,
         )
         .expect("unit scroll-down X11 should produce output");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         // cb = 32 + 65 = 97 = 'a'
         assert_eq!(bytes, b"\x1b[Ma!!", "X11 unit scroll-down wrong: {bytes:?}");
     }
@@ -888,6 +897,7 @@ mod tests {
             &state,
             &MouseTrack::NoTracking,
             &MouseEncoding::X11,
+            S8c1t::SevenBit,
         );
         assert!(
             result.is_none(),
@@ -911,10 +921,11 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         )
         .expect("any-tracking + SGR encoding should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Must be SGR format, not X11 binary
         assert!(
@@ -941,10 +952,11 @@ mod tests {
             Some(&previous),
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         )
         .expect("any-tracking + SGR encoding should produce motion output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert!(
             s.starts_with("\x1b[<"),
@@ -965,10 +977,11 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         )
         .expect("any-tracking + SGR encoding should produce scroll output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert!(
             s.starts_with("\x1b[<"),
@@ -989,10 +1002,11 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::X11,
+            S8c1t::SevenBit,
         )
         .expect("any-tracking + X11 encoding should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         // Must be X11 binary format: ESC [ M <cb> <x> <y>
         assert_eq!(
             bytes[0..3],
@@ -1044,7 +1058,6 @@ mod tests {
             MouseTrack::NoTracking,
             MouseTrack::XtMsex10,
             MouseTrack::XtMseX11,
-            MouseTrack::XtMseHilite,
             MouseTrack::Query(1000),
         ] {
             assert!(!motion_track_wants_report(
@@ -1123,10 +1136,11 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::SgrPixels,
+            S8c1t::SevenBit,
         )
         .expect("SgrPixels button press should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         // 1-based pixel coords: 37+1=38, 19+1=20. Cell coords (5, 3) must
         // NOT appear.
         assert_eq!(bytes, b"\x1b[<0;38;20M");
@@ -1142,10 +1156,11 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::SgrPixels,
+            S8c1t::SevenBit,
         )
         .expect("SgrPixels scroll should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // Button 64 = scroll up, 1-based pixel coords 124, 46.
         assert_eq!(s, "\x1b[<64;124;46M");
@@ -1172,10 +1187,11 @@ mod tests {
             Some(&previous),
             &MouseTrack::XtMseAny,
             &MouseEncoding::SgrPixels,
+            S8c1t::SevenBit,
         )
         .expect("SgrPixels motion should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // motion bit = 32, button 0 -> cb = 32; pixel coords 201, 101.
         assert_eq!(s, "\x1b[<32;201;101m");
@@ -1205,6 +1221,7 @@ mod tests {
             Some(&start),
             &MouseTrack::XtMseAny,
             &MouseEncoding::SgrPixels,
+            S8c1t::SevenBit,
         )
         .expect("first sub-cell move should report");
         let second = handle_pointer_moved(
@@ -1212,11 +1229,12 @@ mod tests {
             Some(&mid),
             &MouseTrack::XtMseAny,
             &MouseEncoding::SgrPixels,
+            S8c1t::SevenBit,
         )
         .expect("second sub-cell move should report");
 
-        let first_bytes = inputs_to_bytes(first.as_ref());
-        let second_bytes = inputs_to_bytes(second.as_ref());
+        let first_bytes = first;
+        let second_bytes = second;
         assert_ne!(
             first_bytes, second_bytes,
             "two distinct sub-cell pixel positions must produce two distinct reports"
@@ -1236,10 +1254,11 @@ mod tests {
             &state,
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
         )
         .expect("SGR button press should produce output");
 
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let expected = b"\x1b[<0;5;3M";
         assert_eq!(
             bytes, expected,
@@ -1312,10 +1331,15 @@ mod tests {
             FreminalMousePosition::new(0, 0),
             Modifiers::default(),
         );
-        let result =
-            handle_pointer_moved(&current, None, &MouseTrack::XtMseAny, &MouseEncoding::Sgr)
-                .expect("first motion at the cell origin must report under XtMseAny");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let result = handle_pointer_moved(
+            &current,
+            None,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
+        )
+        .expect("first motion at the cell origin must report under XtMseAny");
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         // motion bit 32, button 0 (Primary, not held) -> cb=32; 1-based
         // coords (0+1, 0+1) = (1, 1). Lowercase 'm' since button not held.
@@ -1336,9 +1360,10 @@ mod tests {
             None,
             &MouseTrack::XtMseAny,
             &MouseEncoding::SgrPixels,
+            S8c1t::SevenBit,
         )
         .expect("first motion at the pixel origin must report under XtMseAny/SgrPixels");
-        let bytes = inputs_to_bytes(result.as_ref());
+        let bytes = result;
         let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
         assert_eq!(s, "\x1b[<32;1;1m");
     }
@@ -1355,11 +1380,230 @@ mod tests {
             FreminalMousePosition::new(0, 0),
             Modifiers::default(),
         );
-        let result =
-            handle_pointer_moved(&current, None, &MouseTrack::XtMseBtn, &MouseEncoding::Sgr);
+        let result = handle_pointer_moved(
+            &current,
+            None,
+            &MouseTrack::XtMseBtn,
+            &MouseEncoding::Sgr,
+            S8c1t::SevenBit,
+        );
         assert!(
             result.is_none(),
             "?1002 must not report a first motion with no button held, got: {result:?}"
+        );
+    }
+
+    // ── Task 147.4: the CSI introducer follows S8C1T ─────────────────────
+    //
+    // One row per mouse encoder. The 8-bit column is written out in full,
+    // not derived from the 7-bit one.
+
+    fn mouse_position() -> FreminalMousePosition {
+        // Cell (col 4, row 2); physical pixel (40, 30).
+        FreminalMousePosition::new_with_pixels(4, 2, 40, 30)
+    }
+
+    fn state(pressed: bool) -> PreviousMouseState {
+        PreviousMouseState::new(
+            PointerButton::Primary,
+            pressed,
+            mouse_position(),
+            Modifiers::default(),
+        )
+    }
+
+    struct MouseRow {
+        name: &'static str,
+        encoding: MouseEncoding,
+        seven_bit: &'static [u8],
+        eight_bit: &'static [u8],
+    }
+
+    fn assert_mouse_rows(
+        rows: &[MouseRow],
+        encode: impl Fn(&MouseEncoding, S8c1t) -> Option<Vec<u8>>,
+    ) {
+        for r in rows {
+            for (mode, expected) in [
+                (S8c1t::SevenBit, r.seven_bit),
+                (S8c1t::EightBit, r.eight_bit),
+            ] {
+                let out = encode(&r.encoding, mode)
+                    .unwrap_or_else(|| panic!("{}: {mode:?} produced no report", r.name));
+                assert_eq!(out, expected, "{}: {mode:?}", r.name);
+            }
+        }
+    }
+
+    #[test]
+    fn button_reports_follow_s8c1t() {
+        let rows = [
+            MouseRow {
+                name: "X11 press",
+                encoding: MouseEncoding::X11,
+                seven_bit: b"\x1b[M %#",
+                eight_bit: b"\x9bM %#",
+            },
+            MouseRow {
+                name: "SGR press",
+                encoding: MouseEncoding::Sgr,
+                seven_bit: b"\x1b[<0;5;3M",
+                eight_bit: b"\x9b<0;5;3M",
+            },
+            MouseRow {
+                name: "SGR-pixel press",
+                encoding: MouseEncoding::SgrPixels,
+                seven_bit: b"\x1b[<0;41;31M",
+                eight_bit: b"\x9b<0;41;31M",
+            },
+        ];
+        assert_mouse_rows(&rows, |encoding, mode| {
+            handle_pointer_button(
+                PointerButton::Primary,
+                &state(true),
+                &MouseTrack::XtMseX11,
+                encoding,
+                mode,
+            )
+        });
+    }
+
+    #[test]
+    fn button_release_reports_follow_s8c1t() {
+        let rows = [
+            MouseRow {
+                name: "X11 release",
+                encoding: MouseEncoding::X11,
+                seven_bit: b"\x1b[M#%#",
+                eight_bit: b"\x9bM#%#",
+            },
+            MouseRow {
+                name: "SGR release",
+                encoding: MouseEncoding::Sgr,
+                seven_bit: b"\x1b[<0;5;3m",
+                eight_bit: b"\x9b<0;5;3m",
+            },
+            MouseRow {
+                name: "SGR-pixel release",
+                encoding: MouseEncoding::SgrPixels,
+                seven_bit: b"\x1b[<0;41;31m",
+                eight_bit: b"\x9b<0;41;31m",
+            },
+        ];
+        assert_mouse_rows(&rows, |encoding, mode| {
+            handle_pointer_button(
+                PointerButton::Primary,
+                &state(false),
+                &MouseTrack::XtMseX11,
+                encoding,
+                mode,
+            )
+        });
+    }
+
+    #[test]
+    fn motion_reports_follow_s8c1t() {
+        let rows = [
+            MouseRow {
+                name: "X11 motion",
+                encoding: MouseEncoding::X11,
+                seven_bit: b"\x1b[MC%#",
+                eight_bit: b"\x9bMC%#",
+            },
+            MouseRow {
+                name: "SGR motion",
+                encoding: MouseEncoding::Sgr,
+                seven_bit: b"\x1b[<32;5;3m",
+                eight_bit: b"\x9b<32;5;3m",
+            },
+            MouseRow {
+                name: "SGR-pixel motion",
+                encoding: MouseEncoding::SgrPixels,
+                seven_bit: b"\x1b[<32;41;31m",
+                eight_bit: b"\x9b<32;41;31m",
+            },
+        ];
+        assert_mouse_rows(&rows, |encoding, mode| {
+            handle_pointer_moved(&state(false), None, &MouseTrack::XtMseAny, encoding, mode)
+        });
+    }
+
+    #[test]
+    fn wheel_reports_follow_s8c1t() {
+        let rows = [
+            MouseRow {
+                name: "X11 wheel up",
+                encoding: MouseEncoding::X11,
+                seven_bit: b"\x1b[M`%#",
+                eight_bit: b"\x9bM`%#",
+            },
+            MouseRow {
+                name: "SGR wheel up",
+                encoding: MouseEncoding::Sgr,
+                seven_bit: b"\x1b[<64;5;3M",
+                eight_bit: b"\x9b<64;5;3M",
+            },
+            MouseRow {
+                name: "SGR-pixel wheel up",
+                encoding: MouseEncoding::SgrPixels,
+                seven_bit: b"\x1b[<64;41;31M",
+                eight_bit: b"\x9b<64;41;31M",
+            },
+        ];
+        assert_mouse_rows(&rows, |encoding, mode| {
+            handle_pointer_scroll(
+                Vec2::new(0.0, 1.0),
+                &state(false),
+                &MouseTrack::XtMseX11,
+                encoding,
+                mode,
+            )
+        });
+    }
+
+    // ── Task 147.21: `?1001` is not a mouse-tracking level ───────────────
+
+    fn pane_terminal_state() -> freminal_terminal_emulator::state::internal::TerminalState {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        freminal_terminal_emulator::state::internal::TerminalState::new(tx, None)
+    }
+
+    #[test]
+    fn hilite_tracking_set_then_click_sends_no_report() {
+        let mut terminal = pane_terminal_state();
+        terminal.handle_incoming_data(b"\x1b[?1001h");
+
+        assert_eq!(terminal.modes.mouse_tracking, MouseTrack::NoTracking);
+        let report = handle_pointer_button(
+            PointerButton::Primary,
+            &state(true),
+            &terminal.modes.mouse_tracking,
+            &terminal.modes.mouse_encoding,
+            S8c1t::SevenBit,
+        );
+        assert_eq!(report, None, "?1001h must not make a click report");
+    }
+
+    #[test]
+    fn hilite_tracking_set_leaves_the_active_tracking_mode_alone() {
+        let mut terminal = pane_terminal_state();
+        terminal.handle_incoming_data(b"\x1b[?1000h\x1b[?1001h");
+
+        assert_eq!(terminal.modes.mouse_tracking, MouseTrack::XtMseX11);
+        let report = handle_pointer_button(
+            PointerButton::Primary,
+            &state(true),
+            &terminal.modes.mouse_tracking,
+            &terminal.modes.mouse_encoding,
+            S8c1t::SevenBit,
+        );
+        assert!(report.is_some(), "?1000 tracking must still report clicks");
+
+        terminal.handle_incoming_data(b"\x1b[?1001l");
+        assert_eq!(
+            terminal.modes.mouse_tracking,
+            MouseTrack::XtMseX11,
+            "?1001l must not reset the active tracking mode"
         );
     }
 }

@@ -20,7 +20,7 @@
 //!   toast passes without a GUI event loop, for use with the GL recording
 //!   facade (Task 123); see its module docs for what it does and does not
 //!   represent.
-//! - [`shaders`] — GLSL source string constants for the four shader passes
+//! - `shaders` — GLSL source string constants for the four shader passes
 //!   (decoration, background, foreground, image).
 //! - [`vertex`] — CPU-side vertex/instance builders, `FgRenderOptions`, and helpers.
 //!   Contains the full test suite for vertex generation logic.
@@ -35,14 +35,14 @@
 //!   shader (issue #433). Companion to `toast_pass`; see `toast_text_pass`
 //!   module docs.
 //! - `profiling` (feature `frame-profiling`, Task 125.4) — the live
-//!   render-work profiling foundation: [`profiling::RenderWorkClass`],
-//!   [`profiling::ChangedRowBucket`], [`profiling::UploadByteCounts`], and
-//!   [`profiling::LiveRenderProfile`]'s pane-frame-token state machine.
+//!   render-work profiling foundation: `profiling::RenderWorkClass`,
+//!   `profiling::ChangedRowBucket`, `profiling::UploadByteCounts`, and
+//!   `profiling::LiveRenderProfile`'s pane-frame-token state machine.
 //!   Not yet wired to any renderer/widget call site — see that module's
 //!   docs.
 //! - `gpu_profiling` (feature `gpu-profiling`, Task 125.8) — the per-pane
 //!   asynchronous GPU timestamp-query adapter,
-//!   [`gpu_profiling::PaneGpuTimingProfile`], built over 125.7's
+//!   `gpu_profiling::PaneGpuTimingProfile`, built over 125.7's
 //!   `freminal_windowing::gpu_profiling::GpuQueryRing`. Wired into
 //!   [`gpu::TerminalRenderer`]'s init/draw/destroy lifecycle; see that
 //!   module's docs for the exact upload/draw timestamp boundaries.

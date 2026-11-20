@@ -16,8 +16,8 @@
 //!     most terminal applications (including nano) expect.
 
 use freminal_common::buffer_states::modes::{
-    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm,
+    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm, lnm::Lnm,
+    s8c1t::S8c1t,
 };
 use freminal_terminal_emulator::input::{
     KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput, TerminalInputPayload,
@@ -28,12 +28,12 @@ use freminal_terminal_emulator::input::{
 fn payload_bytes(input: &TerminalInput) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -360,12 +360,12 @@ fn ctrl_c_and_ctrl_x_are_different() {
 fn payload_bytes_decckm(input: &TerminalInput) -> Vec<u8> {
     match input.to_payload(
         Decckm::Application,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -571,12 +571,12 @@ fn key_modifiers_all_combinations() {
 fn payload_bytes_mok2(input: &TerminalInput) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -619,12 +619,12 @@ fn ctrl_a_modify_other_keys_level_0() {
 fn ctrl_a_modify_other_keys_level_1() {
     match TerminalInput::Ctrl(b'A').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         1,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
@@ -649,12 +649,12 @@ fn arrow_up_unaffected_by_modify_other_keys() {
 fn payload_bytes_aek(input: &TerminalInput) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -713,12 +713,12 @@ fn enter_unaffected_by_application_escape_key() {
 fn ctrl_b_modify_other_keys_level_1() {
     match TerminalInput::Ctrl(b'B').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         1,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x02),
@@ -731,12 +731,12 @@ fn ctrl_b_modify_other_keys_level_1() {
 fn ctrl_z_modify_other_keys_level_1() {
     match TerminalInput::Ctrl(b'Z').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         1,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x1A),
@@ -794,12 +794,12 @@ fn ctrl_space_modify_other_keys_level_2() {
 fn escape_with_both_mok2_and_aek() {
     match TerminalInput::Escape.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
@@ -816,12 +816,12 @@ fn escape_with_both_mok2_and_aek() {
 fn ctrl_c_with_both_mok2_and_aek() {
     match TerminalInput::Ctrl(b'c').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
@@ -836,12 +836,12 @@ fn ctrl_c_with_both_mok2_and_aek() {
 fn ctrl_a_with_aek_and_mok0() {
     match TerminalInput::Ctrl(b'A').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => assert_eq!(b, 0x01),
@@ -858,12 +858,12 @@ fn ctrl_a_with_aek_and_mok0() {
 fn backspace_decbkm_set_sends_bs() {
     match TerminalInput::Backspace.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
@@ -878,12 +878,12 @@ fn backspace_decbkm_set_sends_bs() {
 fn backspace_decbkm_reset_sends_del() {
     match TerminalInput::Backspace.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
@@ -905,12 +905,12 @@ fn backspace_decbkm_reset_sends_del() {
 fn enter_lnm_reset_sends_cr() {
     match TerminalInput::Enter.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
@@ -930,12 +930,12 @@ fn enter_lnm_reset_sends_cr() {
 fn enter_lnm_set_sends_cr_lf() {
     match TerminalInput::Enter.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::NewLine,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Many(bs) => {
@@ -956,12 +956,12 @@ fn enter_lnm_set_sends_cr_lf() {
 fn linefeed_unaffected_by_lnm_set() {
     match TerminalInput::LineFeed.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::NewLine,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
@@ -982,12 +982,12 @@ fn linefeed_unaffected_by_lnm_set() {
 fn payload_bytes_kkp(input: &TerminalInput, flags: u32) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
         flags,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -1199,13 +1199,14 @@ fn kkp_flag_2_plus_disambiguate_ctrl_a() {
     );
 }
 
-/// KKP flag 4 + `REPORT_ALL` (12): plain ASCII gets CSI u encoding with
-/// alternate key fields: `CSI 97:65:97 u` (codepoint:shifted:base).
+/// KKP flag 4 + `REPORT_ALL` (12): plain ASCII gets CSI u encoding with no
+/// alternate key fields: the shifted key is reported only when Shift is among
+/// the modifiers, and a plain `a` has none.
 #[test]
 fn kkp_flag_4_plus_report_all_ascii() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ascii(b'a'), 4 | 8),
-        b"\x1b[97:65:97u"
+        b"\x1b[97u"
     );
 }
 
@@ -1225,12 +1226,12 @@ fn kkp_flag_4_plus_report_all_ascii() {
 fn payload_bytes_kkp_meta(input: &TerminalInput, flags: u32, meta: &KeyEventMeta) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsDel,
         Lnm::LineFeed,
         flags,
+        S8c1t::SevenBit,
         meta,
     ) {
         TerminalInputPayload::Single(b) => vec![b],
@@ -1348,33 +1349,30 @@ fn kkp_flag_4_uppercase_a() {
     );
 }
 
-/// Flag 4 + flag 8: digit '1' → CSI 49:33:49u
-/// (codepoint 49='1', shifted 33='!', base 49).
+/// Flag 4 + flag 8: digit '1' → CSI 49u (no Shift, so no shifted key).
 #[test]
 fn kkp_flag_4_digit_1() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ascii(b'1'), 4 | 8),
-        b"\x1b[49:33:49u"
+        b"\x1b[49u"
     );
 }
 
-/// Flag 4 + flag 8: semicolon ';' → CSI 59:58:59u
-/// (codepoint 59=';', shifted 58=':', base 59).
+/// Flag 4 + flag 8: semicolon ';' → CSI 59u (no Shift, so no shifted key).
 #[test]
 fn kkp_flag_4_semicolon() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ascii(b';'), 4 | 8),
-        b"\x1b[59:58:59u"
+        b"\x1b[59u"
     );
 }
 
-/// Flag 4 + flag 8: Ctrl+A → CSI 97;5u (no shifted form for Ctrl).
-/// Ctrl+letter codepoint is lowercase letter — same shifted mapping as ASCII.
+/// Flag 4 + flag 8: Ctrl+A → CSI 97;5u (Shift is not held, so no shifted key).
 #[test]
 fn kkp_flag_4_ctrl_a() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ctrl(b'A'), 4 | 8),
-        b"\x1b[97:65:97;5u"
+        b"\x1b[97;5u"
     );
 }
 
@@ -1389,12 +1387,12 @@ fn kkp_flag_4_space_no_shifted() {
     );
 }
 
-/// Flag 4 + flag 1 (no `report_all`): Ctrl+C → CSI 99:67:99;5u.
+/// Flag 4 + flag 1 (no `report_all`): Ctrl+C → CSI 99;5u.
 #[test]
 fn kkp_flag_4_disambiguate_ctrl_c() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ctrl(b'C'), 1 | 4),
-        b"\x1b[99:67:99;5u"
+        b"\x1b[99;5u"
     );
 }
 
@@ -1478,9 +1476,9 @@ fn kkp_flag_16_multi_char_text() {
 // ===========================================================================
 
 /// All flags (1|2|4|16): Ctrl+A repeat with text "x" → full CSI u encoding.
-/// CSI 97:65:97 ; 5:2 ; 120 u
-///   codepoint=97, shifted=65, base=97, modifier=5 (Ctrl), event=2 (repeat),
-///   text codepoint=120 ('x').
+/// CSI 97 ; 5:2 ; 120 u
+///   codepoint=97, modifier=5 (Ctrl, no Shift so no shifted key), event=2
+///   (repeat), text codepoint=120 ('x').
 #[test]
 fn kkp_all_flags_ctrl_a_repeat_with_text() {
     let meta = KeyEventMeta {
@@ -1489,7 +1487,7 @@ fn kkp_all_flags_ctrl_a_repeat_with_text() {
     };
     assert_eq!(
         payload_bytes_kkp_meta(&TerminalInput::Ctrl(b'A'), 1 | 2 | 4 | 16, &meta),
-        b"\x1b[97:65:97;5:2;120u"
+        b"\x1b[97;5:2;120u"
     );
 }
 
@@ -1522,7 +1520,7 @@ fn kkp_flags_8_4_16_uppercase_a_with_text() {
     );
 }
 
-/// Flags 8|2|4: 'a' repeat, no text → CSI 97:65:97;1:2u.
+/// Flags 8|2|4: 'a' repeat, no text → CSI 97;1:2u.
 #[test]
 fn kkp_flags_8_2_4_repeat_no_text() {
     let meta = KeyEventMeta {
@@ -1531,7 +1529,7 @@ fn kkp_flags_8_2_4_repeat_no_text() {
     };
     assert_eq!(
         payload_bytes_kkp_meta(&TerminalInput::Ascii(b'a'), 8 | 2 | 4, &meta),
-        b"\x1b[97:65:97;1:2u"
+        b"\x1b[97;1:2u"
     );
 }
 
@@ -1621,12 +1619,13 @@ fn ascii_a_unaffected_by_mok2() {
 fn kkp_takes_precedence_over_mok2() {
     match TerminalInput::Ctrl(b'A').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2, // MOK level 2
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
-        1, // KKP flag 1
+        1,
+        S8c1t::SevenBit,
+        // KKP flag 1
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {
@@ -1641,12 +1640,12 @@ fn kkp_takes_precedence_over_mok2() {
 fn ctrl_a_with_aek_and_mok2() {
     match TerminalInput::Ctrl(b'A').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
         Lnm::LineFeed,
         0,
+        S8c1t::SevenBit,
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Owned(bs) => {

@@ -72,7 +72,7 @@
 //!   unpainted first, using the raw/class it was itself started with.
 //! - [`LiveRenderProfile::complete`] only finalizes the record when the
 //!   supplied token equals the currently outstanding one. A late
-//!   completion (for a token superseded by a newer [`start`] call), a
+//!   completion (for a token superseded by a newer `start` call), a
 //!   duplicate completion (the same token completed twice), or an
 //!   out-of-order completion (a token that was never the outstanding one)
 //!   are all silently ignored and reported back to the caller as `false` --
@@ -80,7 +80,7 @@
 //!   below for one scenario each.
 //! - [`LiveRenderProfile::take_flush_signal`] is a single, consumable
 //!   signal shared by both finalizers: whichever of a stale-token sweep
-//!   inside [`start`] or a matching [`complete`] happens to be the one
+//!   inside `start` or a matching `complete` happens to be the one
 //!   that finalizes the observation which crosses a
 //!   [`LiveRenderProfile::FLUSH_EVERY`] boundary latches it, and whichever
 //!   caller (in `widget.rs`, both `show()` right after `start` and the
@@ -605,7 +605,7 @@ pub struct LiveRenderProfile {
     /// classification intact.
     pending: Option<PendingObservation>,
     /// The most recently finalized records, bounded to
-    /// [`Self::RECORD_QUEUE_CAPACITY`] entries (oldest evicted first).
+    /// `Self::RECORD_QUEUE_CAPACITY` entries (oldest evicted first).
     records: VecDeque<PaneFrameRecord>,
     /// Cumulative [`RawRebuildDecision`] occurrence counts since creation
     /// (Task 125.5).
@@ -785,7 +785,7 @@ impl LiveRenderProfile {
     }
 
     /// Increment [`Self::observation_count`] for one finalized observation
-    /// (painted or unpainted) and latch [`Self::flush_signal`] if this
+    /// (painted or unpainted) and latch `Self::flush_signal` if this
     /// observation crosses a [`Self::FLUSH_EVERY`] boundary. Shared by
     /// [`Self::complete`] and [`Self::finalize_unpainted`] so either
     /// finalizer can trigger the same flush signal (Task 125.5 regression
@@ -798,7 +798,7 @@ impl LiveRenderProfile {
     }
 
     /// Push a finalized record, evicting the oldest entry first if the
-    /// queue is already at [`Self::RECORD_QUEUE_CAPACITY`].
+    /// queue is already at `Self::RECORD_QUEUE_CAPACITY`.
     fn push_record(&mut self, record: PaneFrameRecord) {
         if self.records.len() >= Self::RECORD_QUEUE_CAPACITY {
             self.records.pop_front();
@@ -818,7 +818,7 @@ impl LiveRenderProfile {
     }
 
     /// The most recently finalized records, oldest first, bounded to
-    /// [`Self::RECORD_QUEUE_CAPACITY`] entries.
+    /// `Self::RECORD_QUEUE_CAPACITY` entries.
     #[must_use]
     pub fn records(&self) -> std::collections::vec_deque::Iter<'_, PaneFrameRecord> {
         self.records.iter()
@@ -881,7 +881,7 @@ impl LiveRenderProfile {
     /// Returns `true` at most once per crossed [`Self::FLUSH_EVERY`]
     /// boundary: whichever finalizer crossed it -- [`Self::complete`] or
     /// the stale-token sweep inside [`Self::start`] -- latches
-    /// [`Self::flush_signal`], and whichever caller invokes this method
+    /// `Self::flush_signal`, and whichever caller invokes this method
     /// first afterward observes `true` and clears it; every other caller
     /// (including a second call from the SAME caller) observes `false`
     /// until the next boundary is crossed. This is why the signal is a

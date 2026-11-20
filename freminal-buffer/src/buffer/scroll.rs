@@ -29,7 +29,7 @@ use crate::{
 use crate::buffer::Buffer;
 
 impl Buffer {
-    /// Return the [`LineWidth`] for each row in the visible window.
+    /// Return the [`LineWidth`](crate::row::LineWidth) for each row in the visible window.
     ///
     /// The returned vector has `min(term_height, row_count)` entries, one per
     /// visible row in top-to-bottom order.  Used by `build_snapshot` to thread
@@ -40,7 +40,7 @@ impl Buffer {
     }
 
     /// Like [`Self::visible_line_widths`] but extends the window upward by
-    /// `extra_rows` (see [`Self::visible_window_bounds`]). The returned vector
+    /// `extra_rows` (see `Self::visible_window_bounds`). The returned vector
     /// has one entry per row in the extended window, top-to-bottom.
     #[must_use]
     pub fn visible_line_widths_extended(
@@ -189,7 +189,7 @@ impl Buffer {
     }
 
     /// Like [`Self::any_visible_dirty`] but checks the window extended upward
-    /// by `extra_rows` (see [`Self::visible_window_bounds`]).
+    /// by `extra_rows` (see `Self::visible_window_bounds`).
     #[must_use]
     pub fn any_visible_dirty_extended(&self, scroll_offset: usize, extra_rows: usize) -> bool {
         if self.rows.is_empty() || self.height == 0 {
@@ -216,7 +216,7 @@ impl Buffer {
     }
 
     /// Like [`Self::visible_image_placements`] but extends the window upward by
-    /// `extra_rows` (see [`Self::visible_window_bounds`]). The returned vector
+    /// `extra_rows` (see `Self::visible_window_bounds`). The returned vector
     /// has `window_rows * width` entries in row-major order, matching the
     /// extended `visible_chars` layout.
     #[must_use]
@@ -778,6 +778,7 @@ mod image_count_tests {
     use std::sync::Arc;
 
     use crate::{
+        buffer::{ImagePlacementMode, PlaceImageRequest},
         image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
         row::Row,
     };
@@ -803,7 +804,20 @@ mod image_count_tests {
             root_gap_ms: 0,
             animation: AnimationControl::default(),
         };
-        let _ = buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+        let _ = buf.place_image(
+            image,
+            0,
+            PlaceImageRequest {
+                protocol: ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+                mode: ImagePlacementMode::Inline,
+            },
+        );
         assert_eq!(buf.image_cell_count, 1);
         buf
     }

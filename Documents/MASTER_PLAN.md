@@ -25,7 +25,7 @@ and plan document maintenance rules.
 | v0.11.1 | Correctness Fixes                        | `PLAN_VERSION_111.md`                                                 | 115–117                   | Complete    |
 | v0.12.0 | Scrollback Memory & Performance          | `PLAN_VERSION_120.md`                                                 | 118–125                   | Complete    |
 | v0.13.0 | Kitty: Foundations & Safety              | `PLAN_VERSION_130.md`                                                 | 126–132, 138–140, 147–151 | In progress |
-| v0.13.1 | Kitty: Shipped-Protocol Conformance      | `PLAN_VERSION_130.md`                                                 | 134–137                   | Planned     |
+| v0.13.1 | Kitty: Shipped-Protocol Conformance      | `PLAN_VERSION_130.md`                                                 | 134–137, 152              | Planned     |
 | v0.13.2 | Kitty: Small & Medium New Protocols      | `PLAN_VERSION_130.md`                                                 | 103, 141–145              | Planned     |
 | v0.13.3 | Kitty: Text Sizing, Transfer & Clipboard | `PLAN_VERSION_130.md`                                                 | 102, 104, 133, 146        | Planned     |
 | v0.13.4 | Kitty: Drag & Drop                       | `PLAN_VERSION_130.md`                                                 | 105                       | Planned     |
@@ -247,11 +247,12 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 144 | Color Control (OSC 21) & Colour Stack       | `PLAN_VERSION_130.md` (Task 144)              | Planned       | Tasks 128–130, 132            |
 | 145 | Kitty Shell-Integration Compatibility       | `PLAN_VERSION_130.md` (Task 145)              | Planned       | Task 129; decision            |
 | 146 | Kitty Clipboard (OSC 5522)                  | `PLAN_VERSION_130.md` (Task 146)              | Planned       | Tasks 129, 130, 133           |
-| 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | Planned       | Tasks 130, 131                |
+| 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | Pending merge | Tasks 130, 131                |
 | 148 | Security & Fuzz Findings Remediation        | `PLAN_VERSION_130.md` (Task 148)              | Complete      | None                          |
 | 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | Complete      | Task 138                      |
 | 150 | Desktop Notification Backend Extraction     | `PLAN_VERSION_130.md` (Task 150)              | Complete      | Task 149                      |
-| 151 | Own TERM & Terminfo Distribution            | `PLAN_VERSION_130.md` (Task 151)              | Pending merge | Task 140                      |
+| 151 | Own TERM & Terminfo Distribution            | `PLAN_VERSION_130.md` (Task 151)              | Complete      | Task 140                      |
+| 152 | macOS Option as Alt & Per-Side Alt          | `PLAN_VERSION_130.md` (Task 152)              | Planned       | Task 147; Task 137 coord.     |
 
 ---
 
@@ -506,9 +507,9 @@ media, ISO-level shifts, print/pause/menu keys) via a raw-winit intercept; the l
 was reverted and is tracked separately. All target stable kitty specs; v0.11.0 keyboard ships
 "substantially compliant, remainder tracked (Task 114)".
 
-**Tasks 102–105 and 126–151 (v0.13.x, kitty compliance):** see `PLAN_VERSION_130.md`. It has
+**Tasks 102–105 and 126–152 (v0.13.x, kitty compliance):** see `PLAN_VERSION_130.md`. It has
 the audit, the common-work analysis, the milestone split, and the per-task stubs. Tasks
-126–132, 138, 139, 140, 147, 148, 149 and 150 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
+126–132, 138, 139, 140, 147, 148, 149, 150 and 151 are fully decomposed; Task 152 is a stub. Task 126 lands first (safety gate). Then Task 127 (#531) and
 Task 128 (CSI dispatch foundation) run in parallel worktrees. The earlier breakdowns of
 Tasks 102–104 were superseded by enriched stubs after the audit found factual errors in them.
 Tasks 102 and 103 were originally planned for v0.12.0 and moved to v0.13.0 when v0.12.0 was
@@ -853,7 +854,8 @@ Update this section as tasks complete:
 | 150  | 2026-10-22 | 2026-10-22 | 150.1-150.10, C1-C26, two review passes; merged via PR #576 (`c359cf3d`)           |
 | 139  | 2026-11-19 | 2026-11-19 | 139.1-139.5, C1-C3, two review passes; merged via PR #586 (`9fb9d63a`)             |
 | 140  | 2026-11-19 | 2026-11-19 | 140.1-140.5, C1-C6, two review passes; merged via PR #587 (`13f73832`)             |
-| 151  | 2026-11-19 |            | 151.1-151.12, C1-C4, two review passes; PR pending                                 |
+| 151  | 2026-11-19 | 2026-11-20 | 151.1-151.12, C1-C8, two review passes; merged via PR #588 (`2ee931b8`)            |
+| 147  | 2026-11-19 |            | All subtasks + C1-C5, adversarial and confirmation reviews; PR pending             |
 
 ---
 
@@ -876,7 +878,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
 - `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0, complete, merged via PR #526)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
-- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–151; audit + 126–132, 138–140, 147–150 decomposed)
+- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–152; audit + 126–132, 138–140, 147–151 decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
 - `Documents/PLAN_VERSION_150.md` — v0.15.0 "Remote" (stub, Task 86)
 - `Documents/PLAN_VERSION_160.md` — v0.16.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)

@@ -31,6 +31,9 @@ use freminal_common::buffer_states::modes::dectcem::Dectcem;
 use freminal_common::buffer_states::modes::irm::Irm;
 use freminal_common::buffer_states::terminal_output::{TabClearMode, TerminalOutput};
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+use freminal_common::buffer_states::xtsmgraphics::{
+    GraphicsAttributeAction, GraphicsAttributeItem,
+};
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::sgr::SelectGraphicRendition;
 use freminal_terminal_emulator::ansi::ParserOutcome;
@@ -260,7 +263,7 @@ fn intermediate_routes() -> Vec<Route> {
     ]
 }
 
-/// Keys with a private-marker prefix (`?`, `>`, `<`, `=`) (12 keys).
+/// Keys with a private-marker prefix (`?`, `>`, `<`, `=`) (15 keys).
 fn private_prefix_routes() -> Vec<Route> {
     vec![
         // `?` prefix.
@@ -291,6 +294,16 @@ fn private_prefix_routes() -> Vec<Route> {
             b'u',
             b"",
             vec![TerminalOutput::KittyKeyboardQuery],
+        ),
+        route(
+            Some(b'?'),
+            b"",
+            b'S',
+            b"1;1;0",
+            vec![TerminalOutput::GraphicsAttributeRequest {
+                item: GraphicsAttributeItem::ColorRegisters,
+                action: GraphicsAttributeAction::Read,
+            }],
         ),
         route(
             Some(b'?'),
@@ -328,6 +341,8 @@ fn private_prefix_routes() -> Vec<Route> {
             b"5",
             vec![TerminalOutput::KittyKeyboardPush(5)],
         ),
+        route(Some(b'>'), b"", b't', b"0;1", vec![TerminalOutput::Skipped]),
+        route(Some(b'>'), b"", b'T', b"0;1", vec![TerminalOutput::Skipped]),
         // `<` prefix.
         route(
             Some(b'<'),
@@ -435,10 +450,10 @@ fn matrix_prefix_x_intermediate_x_final() {
         }
     }
 
-    // 34 plain + 3 intermediate + 5 `?` + 4 `>` + 1 `<` + 2 `=` = 49 keys.
-    assert_eq!(routes.len(), 49, "routed table size drifted");
+    // 34 plain + 3 intermediate + 6 `?` + 6 `>` + 1 `<` + 2 `=` = 52 keys.
+    assert_eq!(routes.len(), 52, "routed table size drifted");
     assert_eq!(
-        routed_seen, 49,
+        routed_seen, 52,
         "a routed key was not reached by the matrix"
     );
     assert!(unrouted_count > 10_000, "matrix did not cover enough keys");

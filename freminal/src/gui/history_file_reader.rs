@@ -167,7 +167,7 @@ fn open_history_file(path: &Path, symlinks: SymlinkPolicy) -> Result<File, Histo
 /// [`HistoryReadError::SymlinkRefused`] if `symlinks` is
 /// [`SymlinkPolicy::Refuse`] and the final component is a symlink, and
 /// [`HistoryReadError::Io`] for any other I/O failure.  On Windows,
-/// [`HistoryReadError::NotLocalPath`] is returned, before the filesystem is
+/// `HistoryReadError::NotLocalPath` is returned, before the filesystem is
 /// touched, for any path that is not drive-letter absolute.
 pub fn read_history_file(
     path: &Path,

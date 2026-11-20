@@ -37,12 +37,12 @@
 //!
 //! # What lives here today
 //!
-//! This module now holds the `Gl` facade ([`facade`], re-exported as
+//! This module now holds the `Gl` facade (`facade`, re-exported as
 //! [`Gl`]), the frozen call surface ([`surface`]) — the enumerated, audited
 //! list of every `glow::HasContext` method freminal calls, plus the
 //! test-time guard that keeps that enumeration honest until the migration
 //! lands — and, behind the `gl-recording` feature, the recording backend
-//! ([`recording`]). Migrating the five call sites above onto `Gl` is still
+//! (`recording`). Migrating the five call sites above onto `Gl` is still
 //! 123.4/123.5.
 
 // Task 123 subtask 123.6b: two pairs of `#[inline(never)]` wrappers whose

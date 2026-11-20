@@ -42,10 +42,7 @@ type VisibleImages = (
 
 // Re-export input types from `input` so existing `interface::` import paths
 // continue to compile without modification.
-pub use crate::input::{
-    KeyModifiers, TerminalInput, TerminalInputPayload, collect_text,
-    raw_ascii_bytes_to_terminal_input,
-};
+pub use crate::input::{KeyModifiers, TerminalInput, TerminalInputPayload, collect_text};
 
 use conv2::ValueFrom;
 
@@ -64,7 +61,8 @@ use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::{
     alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
     decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
-    mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket,
+    meta_sends_escape::MetaSendsEscape, mouse::MouseEncoding, mouse::MouseTrack,
+    rl_bracket::RlBracket, s8c1t::S8c1t,
 };
 use freminal_common::buffer_states::row_number::RowNumber;
 
@@ -86,6 +84,8 @@ struct SnapshotModeFields {
     backarrow_sends_bs: Decbkm,
     alternate_scroll: AlternateScroll,
     line_feed_mode: Lnm,
+    s8c1t: S8c1t,
+    meta_sends_escape: MetaSendsEscape,
     kitty_keyboard_flags: u32,
 }
 
@@ -499,18 +499,6 @@ impl TerminalEmulator {
             deferred_changes: DeferredChangeFlags::default(),
         };
         Ok((ret, pty_rx))
-    }
-
-    /// Return a clone of the PTY write sender.
-    ///
-    /// Used by `main.rs` to pass the real write channel to the GUI before the
-    /// emulator is moved into the PTY consumer thread.  The GUI uses it only
-    /// to inject layout startup commands as `PtyWrite::Write`.  Replies to
-    /// terminal queries do not use it: the GUI sends them through
-    /// `InputEvent::Reply` (Task 130), so the PTY thread frames them.
-    #[must_use]
-    pub fn clone_write_tx(&self) -> crossbeam_channel::Sender<PtyWrite> {
-        self.write_tx.clone()
     }
 
     /// Return the child-exit receiver from the PTY I/O layer.
@@ -1064,6 +1052,8 @@ impl TerminalEmulator {
             backarrow_sends_bs: mode_fields.backarrow_sends_bs,
             alternate_scroll: mode_fields.alternate_scroll,
             line_feed_mode: mode_fields.line_feed_mode,
+            s8c1t: mode_fields.s8c1t,
+            meta_sends_escape: mode_fields.meta_sends_escape,
             kitty_keyboard_flags: mode_fields.kitty_keyboard_flags,
             cwd,
             shell_histfile,
@@ -1210,6 +1200,8 @@ impl TerminalEmulator {
             backarrow_sends_bs: self.internal.modes.backarrow_key_mode,
             alternate_scroll: self.internal.modes.alternate_scroll,
             line_feed_mode: self.internal.modes.line_feed_mode,
+            s8c1t: *self.internal.handler.s8c1t_mode(),
+            meta_sends_escape: self.internal.modes.meta_sends_escape,
             kitty_keyboard_flags: self.internal.handler.kitty_keyboard_flags(),
         }
     }
@@ -1448,6 +1440,30 @@ mod tests {
         }
     }
 
+    // ── build_snapshot: S8C1T ─────────────────────────────────────────────────
+
+    #[test]
+    fn build_snapshot_carries_s8c1t_mode() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::SevenBit);
+
+        emu.handle_incoming_data(b"\x1b G");
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::EightBit);
+
+        emu.handle_incoming_data(b"\x1b F");
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::SevenBit);
+    }
+
+    #[test]
+    fn build_snapshot_s8c1t_is_reset_by_ris() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"\x1b G");
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::EightBit);
+
+        emu.handle_incoming_data(b"\x1bc");
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::SevenBit);
+    }
+
     // ── build_snapshot: cache invalidation ────────────────────────────────────
 
     #[test]
@@ -1665,7 +1681,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    // ── clone_write_tx / write_raw_bytes ──────────────────────────────────────
+    // ── write_raw_bytes ──────────────────────────────────────
 
     #[test]
     fn write_raw_bytes_succeeds() {
@@ -1679,20 +1695,6 @@ mod tests {
             Ok(PtyWrite::Write(bytes)) => {
                 assert_eq!(bytes, b"hello pty");
             }
-            other => panic!("expected PtyWrite::Write, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn clone_write_tx_can_send() {
-        let (emu, rx) = TerminalEmulator::new_headless(None);
-        while rx.try_recv().is_ok() {}
-
-        let tx = emu.clone_write_tx();
-        tx.send(PtyWrite::Write(b"via clone".to_vec())).unwrap();
-
-        match rx.try_recv() {
-            Ok(PtyWrite::Write(bytes)) => assert_eq!(bytes, b"via clone"),
             other => panic!("expected PtyWrite::Write, got: {other:?}"),
         }
     }

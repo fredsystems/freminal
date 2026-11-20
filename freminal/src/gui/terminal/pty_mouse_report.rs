@@ -28,14 +28,14 @@
 use crossbeam_channel::Sender;
 
 use freminal_common::buffer_states::modes::mouse::MouseTrack;
-use freminal_terminal_emulator::{input::KeyEventMeta, io::InputEvent, snapshot::TerminalSnapshot};
+use freminal_terminal_emulator::{io::InputEvent, snapshot::TerminalSnapshot};
 
 use crate::gui::mouse::{PreviousMouseState, handle_pointer_moved};
 use crate::gui::published_frame_state::PanePointerReportInputs;
 use crate::gui::view_state::ViewState;
 
 use super::coords::encode_egui_mouse_pos;
-use super::input::{InputModes, send_terminal_inputs};
+use super::input::send_mouse_report;
 
 /// Task 124.3a (review correction #6): whether `inputs`' cell dimensions
 /// and pixels-per-point are safe to feed into [`encode_egui_mouse_pos`].
@@ -139,9 +139,9 @@ pub(in crate::gui) fn maybe_send_immediate_motion_report(
         previous.as_ref(),
         &snap.mouse_tracking,
         &snap.mouse_encoding,
+        snap.s8c1t,
     ) {
-        let modes = InputModes::from_snapshot(snap);
-        send_terminal_inputs(bytes.as_ref(), input_tx, &modes, &KeyEventMeta::PRESS);
+        send_mouse_report(bytes, input_tx);
     }
 
     report.position = Some(position);
@@ -684,5 +684,35 @@ mod tests {
              first motion and report again -- not be compared against the \
              pre-loss baseline"
         );
+    }
+
+    // ── Task 147.C1: a mouse report is not a key event ─────────────────
+
+    #[test]
+    fn motion_report_is_sent_raw_under_kitty_report_all_keys() {
+        for (flags, encoding, expected) in [
+            (8, MouseEncoding::Sgr, &b"\x1b[<32;2;1m"[..]),
+            (1 | 2 | 8, MouseEncoding::Sgr, b"\x1b[<32;2;1m"),
+            (8, MouseEncoding::X11, b"\x1b[MC\"!"),
+            (1 | 2 | 8, MouseEncoding::X11, b"\x1b[MC\"!"),
+        ] {
+            let mut f = fixture(MouseTrack::XtMseAny, encoding.clone());
+            f.snap.kitty_keyboard_flags = flags;
+            maybe_send_immediate_motion_report(
+                &mut f.view_state,
+                &f.snap,
+                &f.input_tx,
+                Some(clean_report_inputs()),
+                None,
+                egui::pos2(10.0, 10.0),
+                egui::Modifiers::default(),
+            );
+            assert_eq!(
+                sent_bytes(&f.input_rx).as_deref(),
+                Some(expected),
+                "kitty flags {flags}, {encoding:?}"
+            );
+            assert_eq!(sent_bytes(&f.input_rx), None, "one message per report");
+        }
     }
 }
