@@ -8046,6 +8046,12 @@ Stale stub text was corrected at the same time:
 - **147.29 (done).** `resolve_anchor` takes `ToastOriginWindow { This, Other }`;
   `layout_positioned` maps a matching window to `This`, a foreign or missing origin to
   `Other`. The six `resolve_anchor_*` tests are ported unchanged in behaviour.
+- **147.26 (done).** The query items' real users are `gpu-profiling` and the `gl-recording`
+  tests (the plan said `frame-profiling`); the seven `Gl` methods, `RecordingState::next_query`
+  and its four query methods are gated on those. No `allow(dead_code)`. `clippy_gl_pixel_only`
+  (`-p freminal --features gl-pixel --all-targets`, `-D warnings`) runs from `cargo xtask check`
+  (the CI `check` matrix) and `cargo xtask lint`/`ci`; the weekly `gl-pixel` workflow only
+  runs tests.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

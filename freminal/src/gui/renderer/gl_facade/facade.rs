@@ -327,7 +327,7 @@ impl Gl<'_> {
     /// (`glow::TIMESTAMP`). Fabricates a deterministic handle under
     /// `gl-recording`, in the same per-type monotonic-counter style as the
     /// other six `create_*` methods above.
-    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    #[cfg(any(feature = "gpu-profiling", all(test, feature = "gl-recording")))]
     pub(crate) unsafe fn create_query(&self) -> Result<glow::Query, String> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.create_query() },
@@ -409,7 +409,7 @@ impl Gl<'_> {
     /// exactly once for every handle a [`freminal_windowing::gpu_profiling::GpuQueryRing`]
     /// ever accepted, once its result has been read or the ring is torn
     /// down -- see that type's `GpuQuerySource::destroy_query` contract.
-    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    #[cfg(any(feature = "gpu-profiling", all(test, feature = "gl-recording")))]
     pub(crate) unsafe fn delete_query(&self, query: glow::Query) {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.delete_query(query) },
@@ -570,7 +570,7 @@ impl Gl<'_> {
     /// parameter (in practice, only `glow::RENDERER`), the `gl-recording`
     /// arm reports a fixed placeholder -- its value is never parsed, only
     /// logged.
-    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    #[cfg(any(feature = "gpu-profiling", all(test, feature = "gl-recording")))]
     pub(crate) unsafe fn get_parameter_string(&self, parameter: u32) -> String {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.get_parameter_string(parameter) },
@@ -628,7 +628,7 @@ impl Gl<'_> {
     /// default) otherwise -- unlike the shader/program query methods
     /// above, a fabricated "always available" answer here would make the
     /// no-premature-read invariant untestable.
-    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    #[cfg(any(feature = "gpu-profiling", all(test, feature = "gl-recording")))]
     pub(crate) unsafe fn get_query_parameter_u32(&self, query: glow::Query, parameter: u32) -> u32 {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.get_query_parameter_u32(query, parameter) },
@@ -654,7 +654,7 @@ impl Gl<'_> {
     /// no-premature-read invariant is enforced by
     /// `freminal_windowing::gpu_profiling::GpuQueryRing`, not by this
     /// facade method).
-    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    #[cfg(any(feature = "gpu-profiling", all(test, feature = "gl-recording")))]
     pub(crate) unsafe fn get_query_parameter_u64(&self, query: glow::Query, parameter: u32) -> u64 {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.get_query_parameter_u64(query, parameter) },
@@ -743,7 +743,7 @@ impl Gl<'_> {
     /// upload/draw boundaries can be marked with independent, non-nested
     /// timestamp pairs rather than a single elapsed-query span that cannot
     /// represent two adjacent, non-overlapping phases at once.
-    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    #[cfg(any(feature = "gpu-profiling", all(test, feature = "gl-recording")))]
     pub(crate) unsafe fn query_counter(&self, query: glow::Query, target: u32) {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.query_counter(query, target) },
@@ -795,7 +795,7 @@ impl Gl<'_> {
     /// provide. Kept `unsafe fn` regardless, for the same call-site
     /// consistency reason [`Self::get_parameter_string`] is -- see this
     /// module's doc.
-    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    #[cfg(any(feature = "gpu-profiling", all(test, feature = "gl-recording")))]
     pub(crate) unsafe fn supported_extensions(&self) -> std::collections::HashSet<String> {
         match &self.inner {
             GlTarget::Real(gl) => gl.supported_extensions().clone(),

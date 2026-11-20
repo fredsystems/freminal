@@ -399,7 +399,31 @@ fn check() -> Result<()> {
     let mut args = vec!["clippy"];
     args.extend(LINT_PACKAGE_SCOPE);
     args.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
-    run_cargo(args)
+    run_cargo(args)?;
+    clippy_gl_pixel_only()
+}
+
+/// Run clippy on `freminal` with only the `gl-pixel` feature enabled.
+///
+/// `--all-features` enables `gpu-profiling` and `frame-profiling`, which use
+/// GL facade items that `gl-pixel` alone does not, so a `dead_code` warning
+/// confined to the `gl-pixel`-only combination is invisible to every
+/// `--all-features` gate (Task 147.26). The `gl-pixel` CI job only runs
+/// tests, so this is where that combination is linted. Scoped to the one
+/// package that defines the feature: a `--workspace` run would unify the
+/// features of the other members back in.
+fn clippy_gl_pixel_only() -> Result<()> {
+    run_cargo(vec![
+        "clippy",
+        "-p",
+        "freminal",
+        "--features",
+        "gl-pixel",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+    ])
 }
 
 /// Verify the workspace compiles on the MSRV toolchain.
@@ -541,7 +565,8 @@ fn lint_clippy() -> Result<()> {
     let mut args = vec!["clippy"];
     args.extend(LINT_PACKAGE_SCOPE);
     args.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
-    run_cargo(args)
+    run_cargo(args)?;
+    clippy_gl_pixel_only()
 }
 
 /// Fix clippy warnings in the project, over the same [`LINT_PACKAGE_SCOPE`]
