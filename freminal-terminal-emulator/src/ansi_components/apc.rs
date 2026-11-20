@@ -93,7 +93,17 @@ impl ApcParser {
     /// arrived, and the parser returns `ParserOutcome::FinishedAtEsc` without
     /// consuming `b`: the top-level parser parses it as the second byte of the
     /// new escape sequence that ESC starts.
+    ///
+    /// CAN and SUB cancel the sequence, as in xterm's `sos_table` (`CASE_CAN` /
+    /// `CASE_SUB`) and the DEC VT500 state machine: nothing is dispatched, and
+    /// the parser returns `ParserOutcome::Finished` so the top-level parser
+    /// returns to ground.
     pub fn apc_parser_inner(&mut self, b: u8, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+        // The range test keeps the common (printable) byte to one comparison.
+        if b < 0x1b && matches!(b, 0x18 | 0x1a) {
+            return self.cancel(b);
+        }
+
         if let ApcState::Overflow { total, prev } = &mut self.state {
             let after_esc = *prev == PrevByte::Esc;
             let bare_esc = after_esc && b != b'\\';
@@ -140,6 +150,41 @@ impl ApcParser {
         }
 
         ParserOutcome::Continue
+    }
+
+    /// Cancel the sequence on CAN or SUB: no output, buffer released.
+    fn cancel(&mut self, b: u8) -> ParserOutcome {
+        debug!(
+            "APC cancelled by 0x{b:02x} after {} stored bytes",
+            self.sequence.len()
+        );
+        self.sequence = Vec::new();
+        ParserOutcome::Finished
+    }
+
+    /// End the sequence at an 8-bit C1 ST (`0x9C`): the same as `ESC \`. The
+    /// top-level parser calls this only when 8-bit C1 controls are in force
+    /// (S8C1T); otherwise `0x9C` is an ordinary byte of the body.
+    ///
+    /// A stored trailing ESC is dropped, and the sequence is dispatched with
+    /// the canonical `ESC \` terminator appended. An overflowed sequence is
+    /// dropped, as at any other terminator.
+    pub fn terminate_c1_st(&mut self, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+        if let ApcState::Overflow { total, .. } = &self.state {
+            tracing::warn!(
+                "APC sequence over the {MAX_APC_BYTES}-byte cap dropped: total length {total} bytes"
+            );
+            return ParserOutcome::Finished;
+        }
+
+        if self.sequence.last() == Some(&0x1b) {
+            self.sequence.pop();
+        }
+        self.sequence.extend_from_slice(b"\x1b\\");
+        output.push(TerminalOutput::ApplicationProgramCommand(std::mem::take(
+            &mut self.sequence,
+        )));
+        ParserOutcome::Finished
     }
 
     /// Called only once the stored sequence is longer than the cap and is not
@@ -411,5 +456,71 @@ mod tests {
             TerminalOutput::ApplicationProgramCommand(_)
         ));
         assert_eq!(output[1], TerminalOutput::Data(b"hello".to_vec()));
+    }
+
+    // ------------------------------------------------------------------
+    // CAN / SUB and C1 ST (Task 147 adversarial review)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn can_and_sub_cancel_the_sequence_with_no_output() {
+        for cancel in [0x18_u8, 0x1a] {
+            let mut parser = ApcParser::new();
+            let mut output = Vec::new();
+            push_all(&mut parser, b"abc", &mut output);
+            let outcome = parser.apc_parser_inner(cancel, &mut output);
+            assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+            assert_eq!(output, []);
+        }
+    }
+
+    #[test]
+    fn can_cancels_an_overflowed_sequence() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, &vec![b'x'; MAX_APC_BYTES], &mut output);
+        let outcome = parser.apc_parser_inner(0x18, &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn c1_st_dispatches_the_sequence_with_the_canonical_terminator() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"abc", &mut output);
+        let outcome = parser.terminate_c1_st(&mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        assert_eq!(
+            output,
+            [TerminalOutput::ApplicationProgramCommand(
+                b"_abc\x1b\\".to_vec()
+            )]
+        );
+    }
+
+    #[test]
+    fn c1_st_drops_a_stored_trailing_esc() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"abc\x1b", &mut output);
+        let outcome = parser.terminate_c1_st(&mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        assert_eq!(
+            output,
+            [TerminalOutput::ApplicationProgramCommand(
+                b"_abc\x1b\\".to_vec()
+            )]
+        );
+    }
+
+    #[test]
+    fn c1_st_ends_an_overflowed_sequence_with_no_output() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, &vec![b'x'; MAX_APC_BYTES], &mut output);
+        let outcome = parser.terminate_c1_st(&mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        assert_eq!(output, []);
     }
 }

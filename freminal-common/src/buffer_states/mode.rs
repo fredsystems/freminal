@@ -398,7 +398,11 @@ impl fmt::Display for Mode {
             Self::AltSendsEscape(alt) => write!(f, "{alt}"),
             Self::Unknown(params) => write!(f, "{params}"),
             Self::UnknownQuery { namespace, params } => {
-                write!(f, "{namespace} Unknown Query({params:?})")
+                write!(
+                    f,
+                    "{namespace} Unknown Query({})",
+                    String::from_utf8_lossy(params)
+                )
             }
         }
     }
@@ -628,6 +632,20 @@ mod tests {
         };
         let s = format!("{mode}");
         assert!(s.contains("Unknown Query"), "got: {s}");
+    }
+
+    #[test]
+    fn display_unknown_query_prints_the_mode_as_digits() {
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Dec,
+            params: b"9999".to_vec(),
+        };
+        assert_eq!(format!("{mode}"), "DEC Unknown Query(9999)");
+        let mode = Mode::UnknownQuery {
+            namespace: ModeNamespace::Ansi,
+            params: b"77".to_vec(),
+        };
+        assert_eq!(format!("{mode}"), "ANSI Unknown Query(77)");
     }
 
     // ── Delegating Display arms ─────────────────────────────────────

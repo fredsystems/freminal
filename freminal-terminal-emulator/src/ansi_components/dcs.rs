@@ -191,7 +191,18 @@ impl DcsParser {
     /// top-level parser parses `b` as the second byte of the new escape
     /// sequence that ESC starts. In `DCS tmux;` passthrough a doubled
     /// `ESC ESC` is data and does not end the sequence.
+    ///
+    /// CAN and SUB cancel the sequence, as in xterm's `sos_table` (`CASE_CAN` /
+    /// `CASE_SUB`) and the DEC VT500 state machine: nothing is dispatched, and
+    /// the parser returns `ParserOutcome::Finished` so the top-level parser
+    /// returns to ground. This holds in tmux passthrough too: tmux's own parser
+    /// is cancelled by these bytes, so none can be inner payload.
     pub fn dcs_parser_inner(&mut self, b: u8, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+        // The range test keeps the common (printable) byte to one comparison.
+        if b < 0x1b && matches!(b, 0x18 | 0x1a) {
+            return self.cancel(b);
+        }
+
         if let DcsState::Overflow { total, terminator } = &mut self.state {
             let (terminated, bare_esc) = match terminator {
                 DcsOverflowTerminator::Plain { prev } => {
@@ -250,6 +261,41 @@ impl DcsParser {
         }
 
         ParserOutcome::Continue
+    }
+
+    /// Cancel the sequence on CAN or SUB: no output, buffer released.
+    fn cancel(&mut self, b: u8) -> ParserOutcome {
+        debug!(
+            "DCS cancelled by 0x{b:02x} after {} stored bytes",
+            self.sequence.len()
+        );
+        self.sequence = Vec::new();
+        ParserOutcome::Finished
+    }
+
+    /// End the sequence at an 8-bit C1 ST (`0x9C`): the same as `ESC \`. The
+    /// top-level parser calls this only when 8-bit C1 controls are in force
+    /// (S8C1T); otherwise `0x9C` is an ordinary byte of the body.
+    ///
+    /// A stored trailing ESC is dropped, and the sequence is dispatched with
+    /// the canonical `ESC \` terminator appended. An overflowed sequence is
+    /// dropped, as at any other terminator.
+    pub fn terminate_c1_st(&mut self, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+        if let DcsState::Overflow { total, .. } = &self.state {
+            tracing::warn!(
+                "DCS sequence over the {MAX_DCS_BYTES}-byte cap dropped: total length {total} bytes"
+            );
+            return ParserOutcome::Finished;
+        }
+
+        if self.sequence.last() == Some(&0x1b) {
+            self.sequence.pop();
+        }
+        self.sequence.extend_from_slice(b"\x1b\\");
+        output.push(TerminalOutput::DeviceControlString(std::mem::take(
+            &mut self.sequence,
+        )));
+        ParserOutcome::Finished
     }
 
     /// Called only once the stored sequence is longer than the cap and is not
@@ -658,5 +704,75 @@ mod tests {
         let mut parser = FreminalAnsiParser::new();
         let output = parser.push(&bytes);
         assert_eq!(output, vec![TerminalOutput::Data(b"hello".to_vec())]);
+    }
+
+    // ------------------------------------------------------------------
+    // CAN / SUB and C1 ST (Task 147 adversarial review)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn can_and_sub_cancel_the_sequence_with_no_output() {
+        for cancel in [0x18_u8, 0x1a] {
+            let mut parser = DcsParser::new();
+            let mut output = Vec::new();
+            push_all(&mut parser, b"abc", &mut output);
+            let outcome = parser.dcs_parser_inner(cancel, &mut output);
+            assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+            assert_eq!(output, []);
+        }
+    }
+
+    #[test]
+    fn can_cancels_an_overflowed_sequence() {
+        let mut parser = parser_with_stored_len(b"P", MAX_DCS_BYTES);
+        let mut output = Vec::new();
+        // One more byte takes the stored sequence over the cap.
+        assert!(matches!(
+            parser.dcs_parser_inner(b'x', &mut output),
+            ParserOutcome::Continue
+        ));
+        let outcome = parser.dcs_parser_inner(0x18, &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn c1_st_dispatches_the_sequence_with_the_canonical_terminator() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"abc", &mut output);
+        let outcome = parser.terminate_c1_st(&mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        assert_eq!(
+            output,
+            [TerminalOutput::DeviceControlString(b"Pabc\x1b\\".to_vec())]
+        );
+    }
+
+    #[test]
+    fn c1_st_drops_a_stored_trailing_esc() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"abc\x1b", &mut output);
+        let outcome = parser.terminate_c1_st(&mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        assert_eq!(
+            output,
+            [TerminalOutput::DeviceControlString(b"Pabc\x1b\\".to_vec())]
+        );
+    }
+
+    #[test]
+    fn c1_st_ends_an_overflowed_sequence_with_no_output() {
+        let mut parser = parser_with_stored_len(b"P", MAX_DCS_BYTES);
+        let mut output = Vec::new();
+        // One more byte takes the stored sequence over the cap.
+        assert!(matches!(
+            parser.dcs_parser_inner(b'x', &mut output),
+            ParserOutcome::Continue
+        ));
+        let outcome = parser.terminate_c1_st(&mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        assert_eq!(output, []);
     }
 }

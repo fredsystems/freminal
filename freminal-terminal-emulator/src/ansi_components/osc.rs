@@ -344,18 +344,7 @@ impl AnsiOscParser {
 
         match self.state {
             AnsiOscParserState::Finished => {
-                // The OSC number is everything before the first `;`; the whole
-                // body (number included, terminator already stripped) is handed
-                // to the dispatcher so each target can parse what it needs.
-                let number_bytes = self.params.split(|b| *b == b';').next().unwrap_or_default();
-
-                let Ok(Some(type_number)) = parse_param_as::<AnsiOscToken>(number_bytes) else {
-                    return invalid_osc_params(&self.params, output);
-                };
-
-                let osc_target = OscTarget::from(&type_number);
-
-                let dispatched = dispatch_osc_target(&osc_target, &self.params, output);
+                let dispatched = self.dispatch_body(output);
 
                 // A bare ESC ended the sequence: the top-level parser must go
                 // on to parse the byte after that ESC, whatever the dispatch
@@ -378,6 +367,55 @@ impl AnsiOscParser {
             | AnsiOscParserState::Cancelled => push_result,
             AnsiOscParserState::Params => ParserOutcome::Continue,
         }
+    }
+
+    /// End the sequence at an 8-bit C1 ST (`0x9C`): the same as `ESC \` or
+    /// BEL. The top-level parser calls this only when 8-bit C1 controls are in
+    /// force (S8C1T); otherwise `0x9C` is an ordinary byte of the body, as it is
+    /// the continuation byte of some UTF-8 characters.
+    ///
+    /// A stored trailing ESC is dropped: it was an unfinished `ESC \`, not
+    /// body. An overflowed sequence is dropped, as at any other terminator.
+    pub fn terminate_c1_st(&mut self, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+        match self.state {
+            AnsiOscParserState::Params => {
+                if self.params.last() == Some(&0x1b) {
+                    self.params.pop();
+                }
+                self.state = AnsiOscParserState::Finished;
+                self.dispatch_body(output)
+            }
+            AnsiOscParserState::Overflow { total, .. } => {
+                tracing::warn!(
+                    "OSC sequence over the {}-byte cap dropped: total length {total} bytes",
+                    self.limit.max_bytes()
+                );
+                self.state = AnsiOscParserState::OverflowFinished;
+                ParserOutcome::Finished
+            }
+            AnsiOscParserState::Finished
+            | AnsiOscParserState::Cancelled
+            | AnsiOscParserState::OverflowFinished => {
+                ParserOutcome::Invalid("OSC parser received byte after termination".to_string())
+            }
+        }
+    }
+
+    /// Dispatch the accumulated body (the terminator already stripped).
+    ///
+    /// The OSC number is everything before the first `;`; the whole body
+    /// (number included) is handed to the dispatcher so each target can parse
+    /// what it needs.
+    fn dispatch_body(&self, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+        let number_bytes = self.params.split(|b| *b == b';').next().unwrap_or_default();
+
+        let Ok(Some(type_number)) = parse_param_as::<AnsiOscToken>(number_bytes) else {
+            return invalid_osc_params(&self.params, output);
+        };
+
+        let osc_target = OscTarget::from(&type_number);
+
+        dispatch_osc_target(&osc_target, &self.params, output)
     }
 }
 

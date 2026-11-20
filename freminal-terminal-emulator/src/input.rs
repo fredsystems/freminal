@@ -369,12 +369,13 @@ const fn us_qwerty_shifted(c: u8) -> Option<u32> {
     }
 }
 
-/// Collect a text string as a sequence of [`TerminalInput::Ascii`] values.
+/// Collect a text string as one input per character: an ASCII character as a
+/// [`TerminalInput::Ascii`], any other as a [`TerminalInput::NonAscii`], so a
+/// multi-byte character is never split across inputs.
 #[must_use]
 pub fn collect_text(text: &str) -> Cow<'static, [TerminalInput]> {
-    text.as_bytes()
-        .iter()
-        .map(|c| TerminalInput::Ascii(*c))
+    text.chars()
+        .map(TerminalInput::from_char)
         .collect::<Vec<_>>()
         .into()
 }
@@ -522,6 +523,12 @@ pub enum TerminalInputPayload {
 pub enum TerminalInput {
     // Normal keypress
     Ascii(u8),
+    /// A character outside ASCII, typed as text.
+    ///
+    /// Encoded whole: as its UTF-8 bytes in the legacy encoding, and as one
+    /// key (`CSI codepoint u`) where the kitty keyboard protocol reports text
+    /// as keys. Never as one key per UTF-8 byte.
+    NonAscii(char),
     // Normal keypress with ctrl
     Ctrl(u8),
     /// Text typed with Alt held, where Alt acts as the prefix key.
@@ -529,8 +536,8 @@ pub enum TerminalInput {
     /// In the legacy encoding it is sent as `ESC` followed by the text, one
     /// `ESC` however many bytes the text has. While any kitty keyboard flag is
     /// active the prefix is not added: the text encodes exactly as the same
-    /// bytes typed without Alt, byte by byte, leaving Alt+text to the kitty
-    /// encoding.
+    /// characters typed without Alt, character by character, leaving Alt+text
+    /// to the kitty encoding.
     ///
     /// Built where the event is read, from the Alt state and `?1036` at that
     /// point, never by rewriting bytes that were already encoded.
@@ -611,6 +618,7 @@ impl TerminalInput {
 
         match self {
             Self::Ascii(c) => TerminalInputPayload::Single(*c),
+            Self::NonAscii(ch) => TerminalInputPayload::Owned(ch.to_string().into_bytes()),
             Self::AltText(text) => {
                 let mut bytes = Vec::with_capacity(text.len() + 1);
                 if kitty_keyboard_flags == 0 {
@@ -793,6 +801,15 @@ impl TerminalInput {
             | Self::SuperLeft(_)
             | Self::SuperRight(_)
             | Self::KittyFunctional { .. } => TerminalInputPayload::Many(b""),
+        }
+    }
+
+    /// The input for one typed text character: [`Self::Ascii`] for an ASCII
+    /// character, [`Self::NonAscii`] for any other.
+    fn from_char(ch: char) -> Self {
+        match u8::try_from(ch) {
+            Ok(byte) if byte.is_ascii() => Self::Ascii(byte),
+            _ => Self::NonAscii(ch),
         }
     }
 
@@ -980,28 +997,53 @@ impl TerminalInput {
                 }
             }
 
+            // ── Non-ASCII text ──────────────────────────────────────────
+            //
+            // A key when the protocol reports text as keys (flag 8) or this
+            // is a release/repeat, which must not be sent as text (it would
+            // be typed twice); otherwise the character as typed.
+            Self::NonAscii(ch) => {
+                if report_all || meta.event_type != KeyEventType::Press {
+                    // A letter with a single-character lowercase form is
+                    // reported as that lowercase codepoint with Shift, as for
+                    // ASCII uppercase.
+                    let mut lower = ch.to_lowercase();
+                    let (code, modifier) = match (lower.next(), lower.next()) {
+                        (Some(l), None) if l != *ch => (l, Some(2)),
+                        _ => (*ch, None),
+                    };
+                    Self::build_csi_u(s8c1t, u32::from(code), modifier, flags, meta)
+                } else {
+                    TerminalInputPayload::Owned(ch.to_string().into_bytes())
+                }
+            }
+
             // ── Alt+text ────────────────────────────────────────────────
             //
             // No Alt prefix under KKP: the text encodes as the bytes typed
             // without Alt would, which is what it did before `AltText` existed.
-            Self::AltText(text) => TerminalInputPayload::Owned(
-                text.bytes()
-                    .flat_map(|byte| {
-                        match Self::Ascii(byte).to_payload_kkp(
-                            flags,
-                            decckm_mode,
-                            backarrow_sends_bs,
-                            line_feed_mode,
-                            s8c1t,
-                            meta,
-                        ) {
-                            TerminalInputPayload::Single(b) => vec![b],
-                            TerminalInputPayload::Many(bs) => bs.to_vec(),
-                            TerminalInputPayload::Owned(bs) => bs,
-                        }
-                    })
-                    .collect(),
-            ),
+            //
+            // The text is encoded per character, as the same characters typed
+            // without Alt would be (see `NonAscii`), never per UTF-8 byte.
+            Self::AltText(text) => {
+                let mut bytes = Vec::with_capacity(text.len());
+                for ch in text.chars() {
+                    let payload = Self::from_char(ch).to_payload_kkp(
+                        flags,
+                        decckm_mode,
+                        backarrow_sends_bs,
+                        line_feed_mode,
+                        s8c1t,
+                        meta,
+                    );
+                    match payload {
+                        TerminalInputPayload::Single(b) => bytes.push(b),
+                        TerminalInputPayload::Many(bs) => bytes.extend_from_slice(bs),
+                        TerminalInputPayload::Owned(bs) => bytes.extend_from_slice(&bs),
+                    }
+                }
+                TerminalInputPayload::Owned(bytes)
+            }
 
             // ── Ctrl+letter ─────────────────────────────────────────────
             Self::Ctrl(c) => {
@@ -1438,27 +1480,69 @@ mod tests {
         }
     }
 
+    /// Every expectation below is a literal, worked out from the kitty
+    /// keyboard protocol (`CSI unicode-key-code[:shifted:base] ; modifiers
+    /// [:event-type] u`, the key code being the lowercase codepoint of the
+    /// character), never derived by running the code under test.
+    fn assert_alt_text_kkp(flags: u32, text: &str, expected: &[u8]) {
+        assert_eq!(
+            to_payload_kkp(&alt_text(text), flags),
+            TerminalInputPayload::Owned(expected.to_vec()),
+            "text {text:?}, kitty flags {flags}"
+        );
+    }
+
     #[test]
-    fn alt_text_with_any_kitty_flag_is_the_unprefixed_text() {
-        for flags in [1_u32, 2, 4, 8, 16, 1 | 2 | 8, 31] {
-            for text in ["b", "B", "ab", "\u{e9}"] {
-                let plain: Vec<u8> = text
-                    .bytes()
-                    .flat_map(
-                        |byte| match to_payload_kkp(&TerminalInput::Ascii(byte), flags) {
-                            TerminalInputPayload::Single(b) => vec![b],
-                            TerminalInputPayload::Many(bs) => bs.to_vec(),
-                            TerminalInputPayload::Owned(bs) => bs,
-                        },
-                    )
-                    .collect();
-                assert_eq!(
-                    to_payload_kkp(&alt_text(text), flags),
-                    TerminalInputPayload::Owned(plain),
-                    "text {text:?}, kitty flags {flags}"
-                );
-            }
+    fn alt_text_without_report_all_is_the_typed_bytes() {
+        for flags in [1_u32, 2, 4, 16, 1 | 2, 2 | 4 | 16] {
+            assert_alt_text_kkp(flags, "b", b"b");
+            assert_alt_text_kkp(flags, "B", b"B");
+            assert_alt_text_kkp(flags, "ab", b"ab");
+            assert_alt_text_kkp(flags, "\u{e9}", b"\xc3\xa9");
+            assert_alt_text_kkp(flags, "\u{1f600}", b"\xf0\x9f\x98\x80");
         }
+    }
+
+    #[test]
+    fn alt_text_with_report_all_is_one_csi_u_per_character() {
+        assert_alt_text_kkp(8, "b", b"\x1b[98u");
+        assert_alt_text_kkp(8, "B", b"\x1b[98;2u");
+        assert_alt_text_kkp(8, "ab", b"\x1b[97u\x1b[98u");
+        // U+00E9 is 233: one key, not the two UTF-8 bytes 195 and 169.
+        assert_alt_text_kkp(8, "\u{e9}", b"\x1b[233u");
+        // U+00C9 is the shifted form of U+00E9.
+        assert_alt_text_kkp(8, "\u{c9}", b"\x1b[233;2u");
+        // U+1F600 is 128512, with no case.
+        assert_alt_text_kkp(8, "\u{1f600}", b"\x1b[128512u");
+        assert_alt_text_kkp(8, "a\u{e9}b", b"\x1b[97u\x1b[233u\x1b[98u");
+        assert_alt_text_kkp(1 | 8, "\u{e9}", b"\x1b[233u");
+    }
+
+    #[test]
+    fn alt_text_with_all_kitty_flags_reports_alternates_for_ascii_only() {
+        // Flag 4 adds `:shifted:base` for ASCII (US QWERTY); a non-ASCII key
+        // has no shifted form here.
+        assert_alt_text_kkp(31, "b", b"\x1b[98:66:98u");
+        assert_alt_text_kkp(31, "\u{e9}", b"\x1b[233u");
+    }
+
+    #[test]
+    fn alt_text_release_event_reports_each_character_as_a_key() {
+        let release =
+            |flags, text: &str| to_payload_kkp_event(&alt_text(text), flags, KeyEventType::Release);
+        // A release must not be sent as text, which would type it twice.
+        assert_eq!(
+            release(1 | 2, "\u{e9}"),
+            TerminalInputPayload::Owned(b"\x1b[233;1:3u".to_vec())
+        );
+        assert_eq!(
+            release(1 | 2, "\u{c9}"),
+            TerminalInputPayload::Owned(b"\x1b[233;2:3u".to_vec())
+        );
+        assert_eq!(
+            release(1 | 2, "a\u{e9}"),
+            TerminalInputPayload::Owned(b"\x1b[97;1:3u\x1b[233;1:3u".to_vec())
+        );
     }
 
     #[test]
@@ -3429,19 +3513,13 @@ mod tests {
     /// encoded as the two-byte sequence [0xC3, 0xA9] in UTF-8.
     #[test]
     fn collect_text_non_ascii_utf8_encoding() {
-        // 'é' = U+00E9, UTF-8: [0xC3, 0xA9]
         let inputs = collect_text("é");
-        let bytes: Vec<u8> = inputs
-            .iter()
-            .filter_map(|i| {
-                if let TerminalInput::Ascii(b) = i {
-                    Some(*b)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(bytes, "é".as_bytes(), "é must encode as its UTF-8 bytes");
+        assert_eq!(inputs.len(), 1, "one input per character");
+        assert_eq!(
+            to_payload_defaults(&inputs[0]),
+            TerminalInputPayload::Owned(vec![0xC3, 0xA9]),
+            "é must encode as its UTF-8 bytes"
+        );
     }
 
     /// `collect_text` must handle multi-codepoint strings correctly.
@@ -3449,14 +3527,13 @@ mod tests {
     fn collect_text_mixed_ascii_and_non_ascii() {
         // "aé" = 'a' (0x61) + 'é' (0xC3 0xA9) = 3 bytes total
         let inputs = collect_text("aé");
+        assert_eq!(inputs.len(), 2, "one input per character");
         let bytes: Vec<u8> = inputs
             .iter()
-            .filter_map(|i| {
-                if let TerminalInput::Ascii(b) = i {
-                    Some(*b)
-                } else {
-                    None
-                }
+            .flat_map(|i| match to_payload_defaults(i) {
+                TerminalInputPayload::Single(b) => vec![b],
+                TerminalInputPayload::Many(bs) => bs.to_vec(),
+                TerminalInputPayload::Owned(bs) => bs,
             })
             .collect();
         assert_eq!(
@@ -3464,6 +3541,27 @@ mod tests {
             "aé".as_bytes(),
             "mixed ASCII+non-ASCII must encode as UTF-8"
         );
+    }
+
+    /// Plain typed text under kitty flag 8 is one key per character: `é` is
+    /// `CSI 233 u`, not one key per UTF-8 byte (`CSI 195 u CSI 169 u`).
+    #[test]
+    fn collect_text_non_ascii_under_report_all_is_one_key_per_character() {
+        let encode = |text: &str, flags: u32| -> Vec<u8> {
+            collect_text(text)
+                .iter()
+                .flat_map(|i| match to_payload_kkp(i, flags) {
+                    TerminalInputPayload::Single(b) => vec![b],
+                    TerminalInputPayload::Many(bs) => bs.to_vec(),
+                    TerminalInputPayload::Owned(bs) => bs,
+                })
+                .collect()
+        };
+        assert_eq!(encode("\u{e9}", 8), b"\x1b[233u");
+        assert_eq!(encode("\u{c9}", 8), b"\x1b[233;2u");
+        assert_eq!(encode("a\u{1f600}", 8), b"\x1b[97u\x1b[128512u");
+        // Without flag 8 the character is typed as it is.
+        assert_eq!(encode("\u{e9}", 1), b"\xc3\xa9");
     }
 
     /// The `u8::try_from(codepoint)` conversion inside `build_csi_u` is only

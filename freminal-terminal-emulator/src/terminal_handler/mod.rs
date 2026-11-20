@@ -1890,7 +1890,7 @@ impl TerminalHandler {
                 Mode::UnknownQuery { .. } => {
                     // Unknown mode — respond with Ps=0 (not recognized), in
                     // the namespace the query arrived in.
-                    tracing::warn!("DECRQM: {mode}, responding not recognized");
+                    tracing::debug!("DECRQM: {mode}, responding not recognized");
                     self.write_csi_response(&mode.report(None));
                 }
                 Mode::Decawm(Decawm::AutoWrap) => self.handle_set_wrap(Decawm::AutoWrap),
@@ -2283,8 +2283,8 @@ impl TerminalHandler {
                 self.buffer.screen_alignment_test();
             }
             TerminalOutput::CharsetDefault | TerminalOutput::CharsetUTF8 => {
-                tracing::warn!(
-                    "Default/UTF-8 charset selection not yet implemented (ignored): {output}"
+                tracing::debug!(
+                    "Default/UTF-8 charset selection (ESC % @ / ESC % G) intentionally ignored: {output}"
                 );
             }
             TerminalOutput::SaveCursor => {
@@ -3808,6 +3808,55 @@ mod tests {
             resp.contains("999") && resp.contains(";0$y"),
             "Unknown query should respond with Ps=0 (not recognized): got {resp}"
         );
+    }
+
+    #[test]
+    fn mode_unknown_query_logs_at_debug_with_digits_not_a_byte_vector() {
+        use freminal_common::buffer_states::modes::unknown::ModeNamespace;
+        use tracing::Level;
+
+        let (mut handler, rx) = handler_with_pty();
+        let events = crate::log_capture::capture(|| {
+            handler.process_outputs(&[TerminalOutput::Mode(Mode::UnknownQuery {
+                namespace: ModeNamespace::Dec,
+                params: b"9999".to_vec(),
+            })]);
+        });
+        let _ = recv_pty_string(&rx);
+        assert!(
+            crate::log_capture::warnings(&events).is_empty(),
+            "an unknown DECRQM is a query, not a fault: {events:?}"
+        );
+        let debug_line = events
+            .iter()
+            .find(|(level, text)| *level == Level::DEBUG && text.contains("Unknown Query"))
+            .map(|(_, text)| text.as_str());
+        let Some(line) = debug_line else {
+            panic!("expected a debug line for the unknown query: {events:?}");
+        };
+        assert!(line.contains("Unknown Query(9999)"), "got: {line}");
+        assert!(!line.contains("57, 57"), "byte vector in the log: {line}");
+    }
+
+    #[test]
+    fn esc_percent_charset_selection_is_ignored_at_debug_not_warned() {
+        use tracing::Level;
+
+        for output in [TerminalOutput::CharsetDefault, TerminalOutput::CharsetUTF8] {
+            let mut handler = TerminalHandler::new(80, 24);
+            let events = crate::log_capture::capture(|| {
+                handler.process_outputs(std::slice::from_ref(&output));
+            });
+            assert!(
+                crate::log_capture::warnings(&events).is_empty(),
+                "{output}: intentionally ignored, so no warning: {events:?}"
+            );
+            assert!(
+                events.iter().any(|(level, text)| *level == Level::DEBUG
+                    && text.contains("intentionally ignored")),
+                "{output}: expected a debug line saying it is intentionally ignored: {events:?}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

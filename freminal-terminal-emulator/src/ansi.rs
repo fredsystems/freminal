@@ -42,6 +42,11 @@ pub enum ParserOutcome {
     /// arrived. The byte just pushed was **not** consumed: it is the second byte
     /// of a new escape sequence started by that ESC, and the top-level parser
     /// must re-enter the escape state and feed it that byte.
+    ///
+    /// An ESC-intermediate sequence (`ESC (`, `ESC SP`, `ESC #`, ...) returns
+    /// it when the byte pushed is itself an ESC: the sequence is abandoned
+    /// with no output, and that ESC starts a new one (re-entering the escape
+    /// state with an ESC is just re-entering the escape state).
     FinishedAtEsc,
     /// The byte resulted in an invalid sequence or parse error (error string provided).
     Invalid(String),
@@ -140,6 +145,17 @@ pub fn parse_param_as<T: std::str::FromStr>(
         },
         |value| Ok(Some(value)),
     )
+}
+
+/// Whether `b` is the 8-bit C1 String Terminator (`0x9C`) with 8-bit C1
+/// controls in force.
+///
+/// Under S7C1T `0x9C` is not a control: inside a string it is an ordinary
+/// body byte (the continuation byte of some UTF-8 characters). This is the
+/// same gate `ansi_parser_inner_empty` applies to every other 8-bit C1
+/// introducer.
+const fn is_c1_st(b: u8, s8c1t: S8c1t) -> bool {
+    b == 0x9C && matches!(s8c1t, S8c1t::EightBit)
 }
 
 fn push_data_if_non_empty(data: &mut Vec<u8>, output: &mut Vec<TerminalOutput>) {
@@ -241,11 +257,11 @@ pub(crate) const fn apply_parser_mode_change(
 ) {
     match output {
         TerminalOutput::EightBitControl => *s8c1t_mode = S8c1t::EightBit,
-        TerminalOutput::SevenBitControl => *s8c1t_mode = S8c1t::SevenBit,
         TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52)) => *vt52_mode = Decanm::Vt52,
         TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)) => *vt52_mode = Decanm::Ansi,
-        TerminalOutput::ResetDevice => {
-            *vt52_mode = Decanm::Ansi;
+        // RIS only reaches here from the ANSI parser (`ESC c` is ignored in
+        // VT52 mode), so DECANM is already `Ansi`: only S8C1T needs resetting.
+        TerminalOutput::SevenBitControl | TerminalOutput::ResetDevice => {
             *s8c1t_mode = S8c1t::SevenBit;
         }
         _ => {}
@@ -500,10 +516,12 @@ impl FreminalAnsiParser {
                     }
 
                     ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
-                    // The standard parser never returns this; if it ever did,
-                    // its meaning is still well defined.
+                    // Only an ESC aborts a standard sequence, and a fresh
+                    // parser has seen only `b`, which is not an ESC (that was
+                    // handled at the top of this function), so this is not
+                    // reached; it is handled as the `Standard` state does.
                     ParserOutcome::FinishedAtEsc => {
-                        self.restart_escape_with(b, data_output, output);
+                        self.inner = ParserInner::Escape;
                     }
 
                     ParserOutcome::Invalid(message) => {
@@ -626,8 +644,9 @@ impl FreminalAnsiParser {
                         ParserOutcome::Continue => (),
                         // we cannot hit this branch right now because the standard parser does not return ParserOutcome::InvalidParserFailure
                         ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
-                        // Not returned by the standard parser; handled for
-                        // completeness rather than as a panic path.
+                        // `b` is an ESC inside an ESC-intermediate sequence
+                        // (`ESC (`, `ESC SP`, ...): the sequence is abandoned
+                        // and the ESC starts a new one, as it does in CSI.
                         ParserOutcome::FinishedAtEsc => {
                             self.restart_escape_with(b, &mut data_output, &mut output);
                         }
@@ -643,7 +662,11 @@ impl FreminalAnsiParser {
                         }
                     }
                 }
-                ParserInner::Dcs(parser) => match parser.dcs_parser_inner(b, &mut output) {
+                ParserInner::Dcs(parser) => match if is_c1_st(b, self.s8c1t_mode) {
+                    parser.terminate_c1_st(&mut output)
+                } else {
+                    parser.dcs_parser_inner(b, &mut output)
+                } {
                     ParserOutcome::Finished => {
                         self.inner = ParserInner::Empty;
                     }
@@ -656,7 +679,11 @@ impl FreminalAnsiParser {
                         self.inner = ParserInner::Empty;
                     }
                 },
-                ParserInner::Apc(parser) => match parser.apc_parser_inner(b, &mut output) {
+                ParserInner::Apc(parser) => match if is_c1_st(b, self.s8c1t_mode) {
+                    parser.terminate_c1_st(&mut output)
+                } else {
+                    parser.apc_parser_inner(b, &mut output)
+                } {
                     ParserOutcome::Finished => {
                         self.inner = ParserInner::Empty;
                     }
@@ -726,7 +753,11 @@ impl FreminalAnsiParser {
                         }
                     }
                 }
-                ParserInner::Osc(parser) => match parser.ansiparser_inner_osc(b, &mut output) {
+                ParserInner::Osc(parser) => match if is_c1_st(b, self.s8c1t_mode) {
+                    parser.terminate_c1_st(&mut output)
+                } else {
+                    parser.ansiparser_inner_osc(b, &mut output)
+                } {
                     ParserOutcome::Finished => {
                         self.inner = ParserInner::Empty;
                         if output.last() == Some(&TerminalOutput::Invalid) {
@@ -2283,21 +2314,38 @@ mod tests {
         );
     }
 
-    /// RIS resets DECANM too: a `ESC` after RIS goes to the ANSI escape state.
+    /// Leaving VT52 with `ESC <` and then RIS in one `push()`: the RIS is
+    /// parsed as RIS (the ANSI escape state is back) and returns the parser to
+    /// 7-bit controls, so the `0x9B` after it is text. RIS cannot be sent in
+    /// VT52 mode itself (`ESC c` is ignored there), so the parser's own DECANM
+    /// is never something RIS has to undo.
     #[test]
-    fn ris_resets_vt52_mode_within_the_same_push() {
+    fn ris_after_leaving_vt52_resets_s8c1t_within_the_same_push() {
         let mut p = FreminalAnsiParser::new();
         p.s8c1t_mode = S8c1t::EightBit;
         let _ = p.push(b"\x1b[?2l");
         assert_eq!(p.vt52_mode, Decanm::Vt52);
-        // In VT52 mode ESC c is not RIS, so seed the reset via the ANSI path.
-        let result = p.push(b"\x1b<\x1bc\x1b[1A");
-        assert_eq!(p.vt52_mode, Decanm::Ansi);
-        assert!(
-            result.contains(&TerminalOutput::ResetDevice),
-            "RIS after leaving VT52 must parse as RIS: {result:?}"
+        let result = p.push(b"\x1b<\x1bc\x9b6n");
+        assert_eq!(
+            result,
+            vec![
+                TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)),
+                TerminalOutput::ResetDevice,
+                TerminalOutput::Data(b"\x9b6n".to_vec()),
+            ]
         );
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
         assert_eq!(p.s8c1t_mode, S8c1t::SevenBit);
+    }
+
+    /// In VT52 mode `ESC c` is not RIS: it is ignored, and S8C1T is untouched.
+    #[test]
+    fn esc_c_in_vt52_mode_is_not_a_reset() {
+        let mut p = vt52_parser();
+        p.s8c1t_mode = S8c1t::EightBit;
+        assert_eq!(p.push(b"\x1bc"), vec![]);
+        assert_eq!(p.vt52_mode, Decanm::Vt52);
+        assert_eq!(p.s8c1t_mode, S8c1t::EightBit);
     }
 
     /// `CSI ? 2 l` then a VT52 `ESC A` in one `push()`: the `ESC A` is VT52
@@ -3051,5 +3099,223 @@ mod tests {
             }]
         );
         assert_csi_buffers_clean(&p);
+    }
+
+    // -------------------------------------------------------------------------
+    // C1 ST, CAN/SUB and ESC inside strings and escape intermediates
+    // (Task 147 adversarial review A1-A4)
+    // -------------------------------------------------------------------------
+
+    fn eight_bit_parser() -> FreminalAnsiParser {
+        let mut p = FreminalAnsiParser::new();
+        p.s8c1t_mode = S8c1t::EightBit;
+        p
+    }
+
+    fn data(text: &str) -> TerminalOutput {
+        TerminalOutput::Data(text.as_bytes().to_vec())
+    }
+
+    fn title(text: &str) -> TerminalOutput {
+        TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(text.to_string()))
+    }
+
+    #[test]
+    fn c1_st_ends_an_osc_under_s8c1t() {
+        assert_eq!(
+            eight_bit_parser().push(b"\x9d0;t\x9cX"),
+            vec![title("t"), data("X")]
+        );
+    }
+
+    #[test]
+    fn c1_st_ends_a_dcs_under_s8c1t() {
+        assert_eq!(
+            eight_bit_parser().push(b"\x90$qm\x9cX"),
+            vec![
+                TerminalOutput::DeviceControlString(b"P$qm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_st_ends_an_apc_under_s8c1t() {
+        assert_eq!(
+            eight_bit_parser().push(b"\x9fGa=q,i=1;\x9cX"),
+            vec![
+                TerminalOutput::ApplicationProgramCommand(b"_Ga=q,i=1;\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_st_also_ends_strings_opened_with_a_seven_bit_introducer() {
+        let mut p = eight_bit_parser();
+        assert_eq!(p.push(b"\x1b]0;t\x9cX"), vec![title("t"), data("X")]);
+        assert_eq!(
+            p.push(b"\x1bP$qm\x9cX"),
+            vec![
+                TerminalOutput::DeviceControlString(b"P$qm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_st_after_an_unfinished_seven_bit_st_drops_the_esc() {
+        // `ESC` then `0x9C`: the ESC was the start of an ST that never
+        // completed, and is not part of the body.
+        assert_eq!(
+            eight_bit_parser().push(b"\x9d0;t\x1b\x9cX"),
+            vec![title("t"), data("X")]
+        );
+        assert_eq!(
+            eight_bit_parser().push(b"\x90$qm\x1b\x9cX"),
+            vec![
+                TerminalOutput::DeviceControlString(b"P$qm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+        assert_eq!(
+            eight_bit_parser().push(b"\x9fGa=q;\x1b\x9cX"),
+            vec![
+                TerminalOutput::ApplicationProgramCommand(b"_Ga=q;\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    /// Under S7C1T `0x9C` is not a control: it is the continuation byte of
+    /// U+015C in an OSC title, and must stay in the body.
+    #[test]
+    fn c1_st_byte_is_body_under_s7c1t() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(
+            p.push("\x1b]0;\u{15c}\x07X".as_bytes()),
+            vec![title("\u{15c}"), data("X")]
+        );
+        let out = p.push(b"\x1bP$q\x9cm\x1b\\X");
+        assert_eq!(
+            out,
+            vec![
+                TerminalOutput::DeviceControlString(b"P$q\x9cm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+        let out = p.push(b"\x1b_Ga\x9cb\x1b\\X");
+        assert_eq!(
+            out,
+            vec![
+                TerminalOutput::ApplicationProgramCommand(b"_Ga\x9cb\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_st_ends_an_overflowed_apc_under_s8c1t_with_no_output() {
+        let mut p = eight_bit_parser();
+        let mut input = vec![0x9f];
+        input.resize(crate::ansi_components::apc::MAX_APC_BYTES + 10, b'x');
+        input.extend_from_slice(b"\x9cX");
+        assert_eq!(p.push(&input), vec![data("X")]);
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn c1_st_ends_an_overflowed_osc_under_s8c1t_with_no_output() {
+        let mut p = eight_bit_parser();
+        let mut input = b"\x9d0;".to_vec();
+        input.resize(crate::ansi_components::osc::MAX_OSC_BYTES + 10, b'x');
+        input.extend_from_slice(b"\x9cX");
+        assert_eq!(p.push(&input), vec![data("X")]);
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn can_and_sub_cancel_a_string_and_the_next_byte_is_text() {
+        for cancel in [0x18_u8, 0x1a] {
+            for introducer in [&b"\x1b]0;t"[..], b"\x1bP$qm", b"\x1b_Ga=q;"] {
+                let mut input = introducer.to_vec();
+                input.extend_from_slice(&[cancel, b'X']);
+                let mut p = FreminalAnsiParser::new();
+                assert_eq!(
+                    p.push(&input),
+                    vec![data("X")],
+                    "0x{cancel:02x} after {:?}",
+                    String::from_utf8_lossy(introducer)
+                );
+                assert_eq!(p.inner, ParserInner::Empty);
+            }
+        }
+    }
+
+    #[test]
+    fn can_cancels_a_string_that_has_a_pending_esc() {
+        // The ESC is part of a possible ST; CAN still cancels the whole string.
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(p.push(b"\x1bP$qm\x1b\x18X"), vec![data("X")]);
+        assert_eq!(p.push(b"\x1b_Ga\x1b\x18X"), vec![data("X")]);
+        assert_eq!(p.push(b"\x1b]0;t\x1b\x18X"), vec![data("X")]);
+    }
+
+    #[test]
+    fn esc_inside_an_escape_intermediate_sequence_restarts_the_escape() {
+        let reference = FreminalAnsiParser::new().push(b"\x1b[31mX");
+        assert!(
+            reference.len() >= 2 && !reference.contains(&TerminalOutput::Invalid),
+            "reference: {reference:?}"
+        );
+        for intermediate in *b"()*+ #%" {
+            let mut p = FreminalAnsiParser::new();
+            let result = p.push(&[0x1b, intermediate, 0x1b, b'[', b'3', b'1', b'm', b'X']);
+            assert_eq!(
+                result, reference,
+                "ESC {:?} ESC [31mX must give red X",
+                intermediate as char
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn esc_inside_an_escape_intermediate_sequence_can_start_another_intermediate_sequence() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(
+            p.push(b"\x1b(\x1b(0"),
+            vec![TerminalOutput::DesignateCharset {
+                slot: CharsetSlot::G0,
+                set: CharacterSet::DecSpecialGraphics,
+            }]
+        );
+    }
+
+    #[test]
+    fn extra_designator_intermediates_swallow_the_whole_sequence() {
+        for sequence in [
+            &b"\x1b(%5abc"[..],
+            b"\x1b(\"4abc",
+            b"\x1b)%5abc",
+            b"\x1b*&4abc",
+            b"\x1b+ !#5abc",
+        ] {
+            let mut p = FreminalAnsiParser::new();
+            assert_eq!(
+                p.push(sequence),
+                vec![data("abc")],
+                "{:?}",
+                String::from_utf8_lossy(sequence)
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn a_multi_byte_designator_split_across_pushes_is_still_swallowed() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(p.push(b"\x1b(%"), vec![]);
+        assert_eq!(p.push(b"5abc"), vec![data("abc")]);
     }
 }

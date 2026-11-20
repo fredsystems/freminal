@@ -235,17 +235,20 @@ impl TerminalState {
     ///
     /// - **`TerminalHandler` (buffer layer)** owns modes that directly affect
     ///   buffer mutations: DECAWM, DECOM, DECLRMM, DECCOLM, alternate screen
-    ///   (`XtExtscrn` / `AltScreen47`), DEC special graphics, etc.  The
-    ///   handler processes these inside `process_outputs()` and updates its own
-    ///   internal state.  `sync_mode_flags` receives the same output list but
-    ///   hits the catch-all `_ => {}` branch for these variants.
+    ///   (`XtExtscrn` / `AltScreen47`), etc.  The handler processes these
+    ///   inside `process_outputs()` and updates its own internal state.
+    ///   `sync_mode_flags` receives the same output list but hits the
+    ///   catch-all `_ => {}` branch for these variants.  (Character-set state,
+    ///   including DEC special graphics, is not a mode: it is the handler's
+    ///   `CharsetState`.)
     ///
     /// - **`TerminalState.modes` (`TerminalModes`)** owns modes that affect
     ///   input encoding or GUI-visible behaviour: `cursor_key` (DECCKM),
     ///   `bracketed_paste`, `mouse_tracking`, `mouse_encoding`, `focus_reporting`
     ///   (`XtMseWin`), `repeat_keys` (DECARM), `keypad_mode` (DECPAM/DECNKM),
     ///   `invert_screen` (DECSCNM), `synchronized_updates`, `line_feed_mode`,
-    ///   `backarrow_key_mode` (DECBKM), `alternate_scroll`, and the
+    ///   `backarrow_key_mode` (DECBKM), `alternate_scroll`,
+    ///   `meta_sends_escape` (`?1036`), `alt_sends_escape` (`?1039`), and the
     ///   theme state (`theming`, `theme_mode`).  `?45` reverse wrap and the cursor
     ///   blink state are owned by the handler alone.
     ///
