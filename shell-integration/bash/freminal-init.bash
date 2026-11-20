@@ -89,39 +89,67 @@ if [ -n "${HISTFILE:-}" ]; then
 	printf '\033]1338;HISTFILE=%s\007' "${HISTFILE}"
 fi
 
-# ── sudo keeps TERMINFO (Task 151.12; on by default) ─────────────────────────
-# `sudo`'s default env_reset drops TERMINFO, so programs run under `sudo`
-# lose freminal's own terminfo entry.  When freminal spawns the shell with
-# `[shell_integration] sudo_preserve_terminfo = true` (the default) it lists
-# `sudo` in $FREMINAL_SHELL_FEATURES (comma-separated, like Ghostty's
-# $GHOSTTY_SHELL_FEATURES), and we wrap `sudo` to pass
-# `--preserve-env=TERMINFO`.  `sudo -e` / `--edit` (sudoedit) is called
-# unchanged.
-#
-# Reproduced from Ghostty's bash integration, names adapted (and the two
-# variables read as `${VAR:-}`, so a user's `set -u` cannot trip on an unset one):
-# https://github.com/ghostty-org/ghostty/blob/d69f9ed83ca7275fa5afbba0fa968d0d9ada9f5a/src/shell-integration/bash/ghostty.bash#L89-L115
-# As there, this supports wrapping a `sudo` alias only if the alias
-# definition comes _after_ this function is defined; otherwise the alias
-# expansion takes precedence and `sudo` is not wrapped.
-if [[ "${FREMINAL_SHELL_FEATURES:-}" == *"sudo"* && -n "${TERMINFO:-}" ]]; then
-	function sudo {
-		builtin local sudo_has_sudoedit_flags="no"
-		for arg in "$@"; do
-			# Check if argument is '-e' or '--edit' (sudoedit flags)
-			if [[ "$arg" == "-e" || $arg == "--edit" ]]; then
-				sudo_has_sudoedit_flags="yes"
-				builtin break
+# ── sudo keeps TERMINFO (Task 151.12; freminal's own wrapper, Task 151.C5) ───
+# sudo's environment reset drops TERMINFO, so programs run under sudo lose
+# freminal's terminfo entry.  When $FREMINAL_SHELL_FEATURES (a comma-separated
+# list) names the item `sudo` and TERMINFO is set, `sudo` becomes a function
+# that runs the real sudo with `--preserve-env=TERMINFO` first.  An edit
+# invocation (`-e`, `--edit`, including grouped or after other options) is
+# passed through unchanged, because sudo refuses `--preserve-env` with an edit.
+# This is freminal's own implementation, written from sudo(8)'s option syntax.
+if [[ ",${FREMINAL_SHELL_FEATURES:-}," == *",sudo,"* && -n "${TERMINFO:-}" ]]; then
+	# Succeeds when the sudo arguments request an edit before the command word.
+	__freminal_sudo_is_edit() {
+		local word rest letter
+		local takes_value="no"
+		for word in "$@"; do
+			if [[ "$takes_value" == "yes" ]]; then
+				takes_value="no"
+				continue
 			fi
-			# Check if argument is neither an option nor a key-value pair
-			if [[ "$arg" != -* && "$arg" != *=* ]]; then
-				builtin break
-			fi
+			case "$word" in
+			--)
+				return 1
+				;;
+			--edit)
+				return 0
+				;;
+			--chdir | --chroot | --close-from | --group | --host | --prompt | --role | --type | --command-timeout | --other-user | --user)
+				takes_value="yes"
+				;;
+			--*) ;;
+			-?*)
+				rest="${word#-}"
+				while [[ -n "$rest" ]]; do
+					letter="${rest:0:1}"
+					rest="${rest:1}"
+					case "$letter" in
+					e)
+						return 0
+						;;
+					[CDghpRrTtUu])
+						if [[ -z "$rest" ]]; then
+							takes_value="yes"
+						fi
+						break
+						;;
+					esac
+				done
+				;;
+			*=*) ;;
+			*)
+				return 1
+				;;
+			esac
 		done
-		if [[ "$sudo_has_sudoedit_flags" == "yes" ]]; then
-			builtin command sudo "$@"
+		return 1
+	}
+
+	function sudo {
+		if __freminal_sudo_is_edit "$@"; then
+			command sudo "$@"
 		else
-			builtin command sudo --preserve-env=TERMINFO "$@"
+			command sudo --preserve-env=TERMINFO "$@"
 		fi
 	}
 fi

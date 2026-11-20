@@ -4,13 +4,13 @@
 // https://opensource.org/licenses/MIT.
 
 //! Runs the bundled bash, zsh and fish integrations for real and checks the
-//! `sudo` wrapper (Task 151.12) against a fake `sudo` that prints its argv.
+//! `sudo` wrapper (Tasks 151.12 and 151.C5) against a fake `sudo` that prints
+//! its argv.
 //!
-//! The expectations are Ghostty's scan rule (`ghostty.bash`,
-//! `ghostty-integration`, `ghostty-shell-integration.fish`): arguments are
-//! scanned up to the first one that is neither an option (`-*`) nor an
-//! assignment (`*=*`); `-e` / `--edit` met on the way means sudoedit and `sudo`
-//! is called unchanged, otherwise `--preserve-env=TERMINFO` is added.
+//! The wrapper is freminal's own implementation of sudo(8)'s option syntax:
+//! `-e` / `--edit` met before the command word (skipping option operands and
+//! `NAME=value` words) means an edit and `sudo` is called unchanged, otherwise
+//! `--preserve-env=TERMINFO` is added.
 //!
 //! A shell that is not installed is skipped with a visible message.
 
@@ -178,136 +178,143 @@ fn preserved(rest: &str) -> String {
     format!("{PRESERVED} {rest}")
 }
 
+/// `sudo <args>` with the whole-argv expectation: the flag is added, or not.
+fn expect_argv(shell: TestShell, args: &[&str], flag_added: bool) {
+    let rest = args
+        .iter()
+        .map(|a| format!("[{a}]"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let expected = if flag_added { preserved(&rest) } else { rest };
+    assert_eq!(
+        run_sudo(shell, &SUDO_ON, "", args),
+        expected,
+        "{shell:?}: sudo {args:?}"
+    );
+}
+
 #[test]
-fn plain_command_gets_preserve_env() {
+fn commands_get_preserve_env() {
+    let cases: [&[&str]; 14] = [
+        &["ls"],
+        &["ls", "-l", "/tmp"],
+        &["-u", "root", "ls"],
+        &["VAR=1", "cmd"],
+        &["--", "ls"],
+        // The scan stops at the command word, so a later -e is the command's.
+        &["cmd", "-e", "file"],
+        &["cmd", "--edit", "file"],
+        // `--` ends the options: a later -e is not an option of sudo.
+        &["--", "-e", "file"],
+        // `e` is `u`'s value (a user named "e"); `root` is the command.
+        &["-ue", "root", "f"],
+        // An option's operand is not mistaken for an edit.
+        &["--user", "e", "ls"],
+        &["--user=e", "ls"],
+        &["-u", "-e", "ls"],
+        &["-g", "wheel", "VAR=1", "ls"],
+        &["-n", "ls"],
+    ];
     for_each_shell(|shell| {
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["ls"]),
-            preserved("[ls]"),
-            "{shell:?}"
-        );
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["ls", "-l", "/tmp"]),
-            preserved("[ls] [-l] [/tmp]"),
-            "{shell:?}"
-        );
+        for args in cases {
+            expect_argv(shell, args, true);
+        }
     });
 }
 
 #[test]
-fn sudoedit_flags_are_left_unchanged() {
+fn edit_invocations_are_left_unchanged() {
+    let cases: [&[&str]; 12] = [
+        &["-e", "f"],
+        &["--edit", "f"],
+        &["-u", "root", "-e", "f"],
+        &["--user=root", "-e", "f"],
+        &["--user", "root", "-e", "f"],
+        &["-ke", "f"],
+        &["-n", "-e", "f"],
+        &["VAR=1", "-e", "f"],
+        &["-uroot", "-e", "f"],
+        &["-ku", "root", "--edit", "f"],
+        &["--chdir", "/tmp", "--edit", "f"],
+        &["-e", "-u", "root", "f"],
+    ];
     for_each_shell(|shell| {
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["-e", "file"]),
-            "[-e] [file]",
-            "{shell:?}"
-        );
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["--edit", "file"]),
-            "[--edit] [file]",
-            "{shell:?}"
-        );
-        // An option that takes no operand before -e keeps scanning.
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["-n", "-e", "file"]),
-            "[-n] [-e] [file]",
-            "{shell:?}"
-        );
-        // An assignment before -e keeps scanning.
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["FOO=1", "-e", "file"]),
-            "[FOO=1] [-e] [file]",
-            "{shell:?}"
-        );
-    });
-}
-
-/// Ghostty's scan stops at the first argument that is neither an option nor an
-/// assignment, and an option's operand (`root` in `-u root`) is such an
-/// argument.  So `sudo -u root -e file` is NOT recognised as sudoedit by
-/// Ghostty, and this wrapper reproduces that exactly.  Pinned here so a
-/// future deviation from Ghostty is deliberate.
-#[test]
-fn option_operand_ends_the_scan_exactly_as_ghostty_does() {
-    for_each_shell(|shell| {
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["-u", "root", "-e", "file"]),
-            preserved("[-u] [root] [-e] [file]"),
-            "{shell:?}"
-        );
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["-e", "-u", "root", "file"]),
-            "[-e] [-u] [root] [file]",
-            "{shell:?}"
-        );
+        for args in cases {
+            expect_argv(shell, args, false);
+        }
     });
 }
 
 #[test]
-fn assignment_before_the_command_is_scanned_past() {
+fn feature_list_is_matched_by_whole_item() {
+    let on = [
+        "sudo",
+        "cursor:blink,sudo,title",
+        "sudo,title",
+        "title,sudo",
+    ];
+    let off = [
+        "nosudo",
+        "sudo2",
+        "cursor:blink",
+        "sudo:x",
+        "mysudo,sudoer",
+        "",
+    ];
     for_each_shell(|shell| {
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["VAR=1", "cmd"]),
-            preserved("[VAR=1] [cmd]"),
-            "{shell:?}"
-        );
-        // The scan has stopped at `cmd`, so a later -e is the command's own.
-        assert_eq!(
-            run_sudo(shell, &SUDO_ON, "", &["cmd", "-e", "file"]),
-            preserved("[cmd] [-e] [file]"),
-            "{shell:?}"
-        );
+        for features in on {
+            let env = Env {
+                features: Some(features),
+                terminfo: Some("/pane/terminfo"),
+            };
+            assert_eq!(
+                run_sudo(shell, &env, "", &["ls"]),
+                preserved("[ls]"),
+                "{shell:?}: features {features:?}"
+            );
+        }
+        for features in off {
+            let env = Env {
+                features: Some(features),
+                terminfo: Some("/pane/terminfo"),
+            };
+            assert_eq!(
+                run_sudo(shell, &env, "", &["ls"]),
+                "[ls]",
+                "{shell:?}: features {features:?}"
+            );
+        }
     });
 }
 
 #[test]
-fn feature_list_is_matched_by_name() {
+fn feature_absent_leaves_sudo_alone() {
     let env = Env {
-        features: Some("cursor:blink,sudo,title"),
-        terminfo: Some("/pane/terminfo"),
-    };
-    for_each_shell(|shell| {
-        assert_eq!(
-            run_sudo(shell, &env, "", &["ls"]),
-            preserved("[ls]"),
-            "{shell:?}"
-        );
-    });
-}
-
-#[test]
-fn feature_off_leaves_sudo_alone() {
-    let unrelated = Env {
-        features: Some("cursor:blink"),
-        terminfo: Some("/pane/terminfo"),
-    };
-    let absent = Env {
         features: None,
         terminfo: Some("/pane/terminfo"),
-    };
-    for_each_shell(|shell| {
-        assert_eq!(
-            run_sudo(shell, &unrelated, "", &["ls"]),
-            "[ls]",
-            "{shell:?}"
-        );
-        assert_eq!(run_sudo(shell, &absent, "", &["ls"]), "[ls]", "{shell:?}");
-    });
-}
-
-#[test]
-fn no_terminfo_means_no_wrapper() {
-    let env = Env {
-        features: Some("sudo"),
-        terminfo: None,
     };
     for_each_shell(|shell| {
         assert_eq!(run_sudo(shell, &env, "", &["ls"]), "[ls]", "{shell:?}");
     });
 }
 
-/// Ghostty's fish integration leaves an existing `sudo` function or alias
-/// alone (bash and zsh define theirs unconditionally, as Ghostty does).
+#[test]
+fn no_terminfo_means_no_wrapper() {
+    let unset = Env {
+        features: Some("sudo"),
+        terminfo: None,
+    };
+    let empty = Env {
+        features: Some("sudo"),
+        terminfo: Some(""),
+    };
+    for_each_shell(|shell| {
+        assert_eq!(run_sudo(shell, &unset, "", &["ls"]), "[ls]", "{shell:?}");
+        assert_eq!(run_sudo(shell, &empty, "", &["ls"]), "[ls]", "{shell:?}");
+    });
+}
+
+/// The fish integration leaves an existing `sudo` function or alias alone.
 #[test]
 fn fish_does_not_clobber_an_existing_sudo_function() {
     let shell = TestShell::Fish;
@@ -324,18 +331,41 @@ fn fish_does_not_clobber_an_existing_sudo_function() {
         ),
         "[user-defined]"
     );
+    assert_eq!(
+        run_sudo(
+            shell,
+            &SUDO_ON,
+            "alias sudo 'echo ARGV: [aliased]'",
+            &["ls"]
+        ),
+        "[aliased] ls"
+    );
 }
 
+/// The wrapper is freminal's own code: its block cites no third-party source.
 #[test]
-fn shipped_scripts_cite_ghostty() {
+fn sudo_blocks_name_no_third_party_source() {
     let tmp = tempfile::tempdir().expect("tempdir");
     assert!(!sync_to_disk(tmp.path()).has_errors());
     for shell in TestShell::ALL {
         let text = std::fs::read_to_string(Path::new(tmp.path()).join(shell.script()))
             .expect("read script");
-        assert!(
-            text.contains("github.com/ghostty-org/ghostty/blob/"),
-            "{shell:?} integration must cite the Ghostty source it reproduces"
-        );
+        let start = text
+            .find("sudo keeps TERMINFO")
+            .unwrap_or_else(|| panic!("{shell:?}: no sudo block"));
+        // The block ends at the first line that closes the top-level `if`.
+        let end_line = match shell {
+            TestShell::Fish => "\n    end\n",
+            TestShell::Bash | TestShell::Zsh => "\nfi\n",
+        };
+        let block = &text[start..];
+        let block = &block[..block.find(end_line).expect("sudo block end")];
+        let lower = block.to_lowercase();
+        for forbidden in ["ghostty", "kitty", "github.com"] {
+            assert!(
+                !lower.contains(forbidden),
+                "{shell:?}: sudo block mentions {forbidden:?}"
+            );
+        }
     }
 }

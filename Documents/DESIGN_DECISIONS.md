@@ -1458,14 +1458,18 @@ Installed copies:
   programs only find a system-installed copy. Programs running as root or setuid ignore these
   variables for the same reason. The `[shell_integration] sudo_preserve_terminfo` toggle
   (default on, maintainer decision 2026-11-19; Task 151.12) wraps `sudo` in the bundled bash,
-  zsh and fish integrations as `sudo --preserve-env=TERMINFO` (except `sudo -e` / `--edit`),
-  reproducing Ghostty's `sudo` shell-integration feature, including its argument scan: it
-  stops at the first argument that is neither an option nor an assignment, so
-  `sudo -u root -e file` is not recognised as sudoedit. Unlike Ghostty, where the feature is
-  opt-in, it is on by default whenever shell integration is active; a sudoers policy that
-  forbids preserving the environment makes `sudo` refuse the command, and the user then sets
-  the toggle to `false`. Freminal tells the scripts the feature is on through
-  `FREMINAL_SHELL_FEATURES=sudo` (a comma list like Ghostty's `GHOSTTY_SHELL_FEATURES`), set
+  zsh and fish integrations as `sudo --preserve-env=TERMINFO` (except an edit, `-e` /
+  `--edit`, which sudo refuses to combine with `--preserve-env`). The wrappers are freminal's
+  own implementation, written clean-room from sudo(8)'s option syntax (Task 151.C5; the first
+  version copied third-party GPL code and was replaced). An argument scan decides whether the
+  call is an edit: it reads the arguments left to right up to the command word, skips option
+  operands (`-u root`, `--user root`, `--user=root`, a value letter ending a grouped `-ku`
+  word, or taking the rest of its word as in `-uroot`) and `NAME=value` words, stops at `--`,
+  and treats `e` / `--edit` as an edit, so `sudo -u root -e file` is recognised as an edit and
+  left unchanged. The feature is on by default whenever shell integration is active; a
+  sudoers policy that forbids preserving the environment makes `sudo` refuse the command, and
+  the user then sets the toggle to `false`. Freminal tells the scripts the feature is on
+  through `FREMINAL_SHELL_FEATURES=sudo` (a comma-separated list matched by whole item), set
   at spawn only when the toggle is on and shell integration is injected, and removed otherwise
   so a value inherited from a parent freminal pane cannot turn it on.
 - **Other users and other environments cannot read the pane's directory.** The per-pane

@@ -11834,6 +11834,14 @@ Behaviour specification (the implementer works only from this):
   `sudo -ue root f` gets the flag (`e` is `u`'s value, a user named "e", and `root` is the
   command: not an edit); feature off, `TERMINFO` empty, and a feature list such as `nosudo`
   (no whole-item match) leave `sudo` alone; fish leaves an existing `sudo` function alone.
+- **Status: done (2026-11-20).** The implementer attested to the clean-room rule (old blocks
+  deleted by line range unread; no Ghostty or kitty source, git history or recall used). Each
+  script has its own `__freminal_sudo_is_edit` scan and a `sudo` function; bash and zsh match
+  the feature item as `,…,` containing `,sudo,`. `shipped_scripts_cite_ghostty` is replaced by
+  `sudo_blocks_name_no_third_party_source`; 14 flag cases, 12 edit cases, the whole-item
+  matching and the fish non-clobber case run in bash, zsh and fish. Found while testing: `?`
+  is not a wildcard in fish `case`. A pre-existing "Ghostty-derived" `.zshenv` `ZDOTDIR` step
+  (not part of this task) is routed to 147.C4 for the same licence check.
 
 ##### 151.C6 — Build generation, macOS layout, Windows README (P3, P4, P5)
 

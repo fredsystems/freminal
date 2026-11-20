@@ -80,35 +80,59 @@ if __freminal_should_init
         printf '\033]7;file://%s%s\007' $__freminal_hostname $PWD
     end
 
-    # ── sudo keeps TERMINFO (Task 151.12; on by default) ─────────────────────
-    # `sudo`'s default env_reset drops TERMINFO, so programs run under `sudo`
-    # lose freminal's own terminfo entry.  When freminal spawns the shell with
-    # `[shell_integration] sudo_preserve_terminfo = true` (the default) it lists
-    # `sudo` in $FREMINAL_SHELL_FEATURES (comma-separated, like Ghostty's
-    # $GHOSTTY_SHELL_FEATURES), and we wrap `sudo` to pass
-    # `--preserve-env=TERMINFO`.  `sudo -e` / `--edit` (sudoedit) is called
-    # unchanged.
-    #
-    # Reproduced from Ghostty's fish integration, names adapted:
-    # https://github.com/ghostty-org/ghostty/blob/d69f9ed83ca7275fa5afbba0fa968d0d9ada9f5a/src/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish#L97-L120
-    # As there, an existing `sudo` function or alias is left alone.
-    set -l __freminal_features (string split ',' -- "$FREMINAL_SHELL_FEATURES")
-    if contains sudo $__freminal_features; and test -n "$TERMINFO"; and test file = (type -t sudo 2> /dev/null; or echo "x")
-        # Wrap `sudo` command to ensure freminal terminfo is preserved
-        function sudo -d "Wrap sudo to preserve terminfo"
-            set --function sudo_has_sudoedit_flags no
-            for arg in $argv
-                # Check if argument is '-e' or '--edit' (sudoedit flags)
-                if string match -q -- -e "$arg"; or string match -q -- --edit "$arg"
-                    set --function sudo_has_sudoedit_flags yes
-                    break
+    # ── sudo keeps TERMINFO (Task 151.12; freminal's own wrapper, Task 151.C5) ─
+    # sudo's environment reset drops TERMINFO, so programs run under sudo lose
+    # freminal's terminfo entry.  When $FREMINAL_SHELL_FEATURES (a comma-separated
+    # list) names the item `sudo`, TERMINFO is set and no `sudo` function or
+    # alias exists yet, `sudo` becomes a function that runs the real sudo with
+    # `--preserve-env=TERMINFO` first.  An edit invocation (`-e`, `--edit`,
+    # including grouped or after other options) is passed through unchanged,
+    # because sudo refuses `--preserve-env` with an edit.  This is freminal's
+    # own implementation, written from sudo(8)'s option syntax.
+    if contains -- sudo (string split -- , "$FREMINAL_SHELL_FEATURES"); and test -n "$TERMINFO"; and not functions -q sudo
+        # Succeeds when the sudo arguments request an edit before the command word.
+        function __freminal_sudo_is_edit
+            set -l takes_value no
+            for word in $argv
+                if test $takes_value = yes
+                    set takes_value no
+                    continue
                 end
-                # Check if argument is neither an option nor a key-value pair
-                if not string match -r -q -- "^-" "$arg"; and not string match -r -q -- "=" "$arg"
-                    break
+                switch $word
+                    case --
+                        return 1
+                    case --edit
+                        return 0
+                    case --chdir --chroot --close-from --group --host --prompt --role --type --command-timeout --other-user --user
+                        set takes_value yes
+                    case '--*'
+                    case -
+                        return 1
+                    case '-*'
+                        set -l rest (string sub --start 2 -- "$word")
+                        while test -n "$rest"
+                            set -l letter (string sub --length 1 -- "$rest")
+                            set rest (string sub --start 2 -- "$rest")
+                            switch $letter
+                                case e
+                                    return 0
+                                case C D g h p R r T t U u
+                                    if test -z "$rest"
+                                        set takes_value yes
+                                    end
+                                    break
+                            end
+                        end
+                    case '*=*'
+                    case '*'
+                        return 1
                 end
             end
-            if test "$sudo_has_sudoedit_flags" = yes
+            return 1
+        end
+
+        function sudo -d "Wrap sudo to preserve terminfo"
+            if __freminal_sudo_is_edit $argv
                 command sudo $argv
             else
                 command sudo --preserve-env=TERMINFO $argv
