@@ -7846,6 +7846,16 @@ Stale stub text was corrected at the same time:
   or attributed under a compatible licence; the existing shell-integration tests pass.
 - **Scheduling:** within Task 147, before 147.17. If the audit finds GPL-derived code, stop
   and report to the maintainer before rewriting.
+- **Status: done (2026-11-20).** A READ-ONLY audit compared every file under
+  `shell-integration/` with Ghostty's and kitty's current bash, zsh and fish integrations
+  (history, comments, a normalised line-overlap count, block-by-block reading). Verdict:
+  nothing COPIED or DERIVED-CLOSELY from a GPL source. `.zshenv` shares no lines with any
+  upstream file; the other scripts share only forced strings (`command sudo
+  --preserve-env=TERMINFO`, `break`, `*)`) and standard idioms (`${arr:#name}` hook ordering,
+  `declare -p PROMPT_COMMAND`). One verbatim string came from Ghostty's MIT fish file (the
+  `sudo` function's `-d` description); it was reworded. The "Ghostty-derived `+X`" wording
+  in `DESIGN_DECISIONS.md` and `PLAN_VERSION_090.md` (the code uses `${+name}` and is
+  independent) and the `.zshenv` comment that echoed it were corrected. No rewrite needed.
 
 ### 147 Status notes
 

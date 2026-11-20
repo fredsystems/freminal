@@ -1012,12 +1012,13 @@ structures required by each shell's standard startup-file discovery:
   return to bash mode, then sources `~/.bashrc` (or `~/.bash_profile`
   for login shells), then installs our hooks.
 - **zsh** treats `$ZDOTDIR` as a directory and looks for `.zshenv`,
-  `.zshrc`, etc. inside it. Our `.zshenv` does the Ghostty-derived dance:
-  restore the user's original `$ZDOTDIR` from `$__FREMINAL_ZSH_ZDOTDIR`
-  (a sentinel env var we set before spawn), source the user's real
-  `.zshenv`, then source our `freminal-integration` script. The
-  `+X` parameter expansion is used to distinguish "user had `$ZDOTDIR`
-  set even if empty" from "user did not have `$ZDOTDIR` set at all".
+  `.zshrc`, etc. inside it. Our `.zshenv` (written independently; the
+  same restore-then-chain sequence Ghostty and kitty use) restores the
+  user's original `$ZDOTDIR` from `$__FREMINAL_ZSH_ZDOTDIR` (a sentinel
+  env var we set before spawn), sources the user's real `.zshenv`, then
+  sources our `freminal-integration` script. zsh's `${+name}` test
+  distinguishes "user had `$ZDOTDIR` set even if empty" from "user did
+  not have `$ZDOTDIR` set at all".
 - **fish** auto-loads files matching `<XDG_DATA_DIR>/fish/vendor_conf.d/*.fish`
   on startup. We prepend our resources dir to `$XDG_DATA_DIRS`, and fish
   finds `freminal.fish` via standard discovery. No `$ZDOTDIR`-style

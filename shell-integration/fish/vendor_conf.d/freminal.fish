@@ -181,7 +181,7 @@ if __freminal_should_init
             return 1
         end
 
-        function sudo -d "Wrap sudo to preserve terminfo"
+        function sudo -d "freminal: keep TERMINFO across sudo"
             if __freminal_sudo_is_edit $argv
                 command sudo $argv
             else

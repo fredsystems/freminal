@@ -922,10 +922,11 @@ shell-integration/
   hooks: PROMPT_COMMAND append for D + OSC 7; DEBUG trap for C; PS1
   wrap for A + B. Every emitted marker carries `freminal=1; fid=$$-<N>`
   where N is a per-prompt counter.
-- **`zsh/.zshenv`**: the Ghostty-derived `+X`-check dance to restore
-  the user's original `$ZDOTDIR` (or `unset ZDOTDIR`), then source the
-  user's real `.zshenv`, then `source` our `freminal-integration`
-  script.
+- **`zsh/.zshenv`**: a `${+name}` check to restore the user's original
+  `$ZDOTDIR` (or `unset ZDOTDIR`), then source the user's real
+  `.zshenv`, then `source` our `freminal-integration` script. (Corrected
+  by Task 147.C4: the original wording called this "Ghostty-derived";
+  the code was written independently.)
 - **`zsh/freminal-integration`**: install `precmd_functions` and
   `preexec_functions` entries (using `add-zsh-hook` if available).
   Every emitted marker carries `freminal=1; fid=$$-<N>`. PROMPT
