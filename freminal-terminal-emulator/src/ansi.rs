@@ -305,7 +305,11 @@ impl FreminalAnsiParser {
 
         // SI (0x0F) — Shift In: invoke G0 into GL.
         // SO (0x0E) — Shift Out: invoke G1 into GL.
+        // VT52 mode ignores both (xterm `vt52_table`: SO/SI are `CASE_IGNORE`).
         if b == 0x0F || b == 0x0E {
+            if self.vt52_mode == Decanm::Vt52 {
+                return Err(());
+            }
             push_data_if_non_empty(data_output, output);
             output.push(TerminalOutput::InvokeGl(if b == 0x0F {
                 CharsetSlot::G0
@@ -1391,6 +1395,35 @@ mod tests {
                 slot: CharsetSlot::G0,
                 set: CharacterSet::Ascii,
             }]
+        );
+    }
+
+    #[test]
+    fn vt52_so_and_si_are_ignored() {
+        let mut p = vt52_parser();
+        assert_eq!(p.push(b"\x0e"), vec![]);
+        assert_eq!(p.push(b"\x0f"), vec![]);
+        assert_eq!(
+            p.push(b"a\x0eb\x0fc"),
+            vec![TerminalOutput::Data(b"abc".to_vec())]
+        );
+    }
+
+    #[test]
+    fn vt52_so_si_ignored_but_esc_f_and_esc_g_still_emit() {
+        let mut p = vt52_parser();
+        assert_eq!(
+            p.push(b"\x0e\x1bF\x0f\x1bG"),
+            vec![
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::DecSpecialGraphics,
+                },
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::Ascii,
+                },
+            ]
         );
     }
 

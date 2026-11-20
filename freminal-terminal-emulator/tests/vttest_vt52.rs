@@ -622,6 +622,71 @@ fn vt52_special_graphics_charset() {
     );
 }
 
+/// SO and SI are ignored in VT52 mode (xterm `vt52_table`: `CASE_IGNORE`):
+/// after `ESC F` (graphics in G0), SO must not invoke G1 (ASCII), so the
+/// next character is still drawn from the graphics set. Nothing is printed
+/// for the control itself.
+#[test]
+fn vt52_so_and_si_are_ignored() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"\x1bF");
+
+    h.feed(b"\x0e"); // SO
+    h.feed(b"q");
+    h.feed(b"\x0f"); // SI
+    h.feed(b"q");
+
+    h.assert_row(0, "\u{2500}\u{2500}");
+    h.assert_cursor_pos(2, 0);
+}
+
+/// SO in the middle of a text run is dropped without disturbing the run.
+#[test]
+fn vt52_so_inside_text_run_is_dropped() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"a\x0eb\x0fc");
+    h.assert_row(0, "abc");
+    h.assert_cursor_pos(3, 0);
+}
+
+/// VT52's own `ESC F` / `ESC G` keep working alongside ignored SO/SI.
+#[test]
+fn vt52_esc_f_and_esc_g_unaffected_by_so_si() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(VT52_HOME);
+    h.feed(b"\x1bF\x0eq\x1bG\x0fq");
+    h.assert_row(0, "\u{2500}q");
+}
+
+/// SO/SI ignored in VT52 mode must not disturb the ANSI charset state
+/// saved on entry: leaving VT52 restores GL = G1 (graphics) as it was.
+#[test]
+fn vt52_ignored_so_does_not_affect_restored_ansi_charset_state() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(b"\x1b)0\x0e"); // G1 = graphics, SO: GL = G1
+    h.feed(ENTER_VT52);
+    h.feed(b"\x0f\x0e");
+    h.feed(EXIT_VT52);
+    h.feed(b"\x1b[1;1H");
+    h.feed(b"q");
+    h.assert_row(0, "\u{2500}");
+}
+
+/// SO and SI still shift GL in ANSI mode, including after a VT52 round trip.
+#[test]
+fn so_si_still_work_in_ansi_mode_after_vt52_round_trip() {
+    let mut h = VtTestHelper::new_default();
+    h.feed(ENTER_VT52);
+    h.feed(EXIT_VT52);
+    h.feed(b"\x1b)0\x0eq\x0fq");
+    h.assert_row(0, "\u{2500}q");
+}
+
 // ─── Identify (ESC Z) ────────────────────────────────────────────────────────
 
 /// `ESC Z` (DECID) in VT52 mode causes the terminal to respond with

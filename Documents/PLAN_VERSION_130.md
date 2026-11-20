@@ -7804,6 +7804,26 @@ Stale stub text was corrected at the same time:
   documentation contradicts it. Do not infer.
 - **Verification:** a VT52-mode test for SO/SI matching the chosen reference.
 - **Scheduling:** within Task 147, before 147.17.
+- **Status: done (2026-11-20).** xterm `VTPrsTbl.c` `vt52_table` maps SO/SI to `CASE_IGNORE`
+  (9262-9263), as does `vt52_esc_table` (9586-9587). In VT52 mode the SO/SI arm returns
+  without output or a text-run flush. Two parser tests and five `vttest_vt52.rs` tests (SO
+  inside a text run, `ESC F`/`ESC G` unaffected, ANSI state restored, SO/SI after a VT52
+  round trip). The fix's removal fails four of them.
+
+#### 147.C5 — VT52 escape sequences xterm ignores
+
+- **Surfaced:** 147.C2 (2026-11-20). Predates Task 147.
+- **Impact:** in xterm's `vt52_esc_table`, `ESC ( ) * + SP $` are `CASE_VT52_IGNORE`
+  (`VTPrsTbl.c:9609-9627`, `charproc.c:3732-3735`): the parser enters `vt52_ignore_table`,
+  where the next printable byte is swallowed (`CASE_GROUND_STATE`) while C0 controls still
+  execute. freminal does not swallow it, so `ESC ( 0` in VT52 mode prints `0`. Separately,
+  `ESC N O n o | } ~` are `CASE_GROUND_STATE` in xterm (silently ignored; 9666-9667,
+  9703-9707, 9724-9726), where freminal's `handle_vt52_escape` emits `TerminalOutput::Invalid`
+  with a `warn!`.
+- **Scope of fix:** `freminal-terminal-emulator/src/ansi.rs` VT52 escape handling and tests.
+- **Verification:** VT52 tests: `ESC ( 0 A` prints `A` only; a C0 control after `ESC (` still
+  executes; `ESC N` and friends produce no output and no warning.
+- **Scheduling:** within Task 147, before 147.17.
 
 #### 147.C3 — `kent` joins the encoder-checked terminfo set after Task 151
 
