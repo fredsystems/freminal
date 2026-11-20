@@ -52,6 +52,7 @@ use crate::gui::font_manager::FontManager;
 use crate::gui::ligature_shaping::LigatureShaping;
 use crate::gui::shaping::ShapingCache;
 use crate::gui::terminal::cursor_appearance::CursorAppearance;
+use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_common::buffer_states::tchar::TChar;
@@ -69,7 +70,16 @@ use freminal_common::themes::CATPPUCCIN_MOCHA;
 /// assertions possible at all — a randomised grid would force the
 /// assertions down to ranges, and a range wide enough to be stable is
 /// usually wide enough to miss the regression it was meant to catch.
-fn synthetic_grid(cols: usize, rows: usize) -> (Vec<TChar>, Vec<FormatTag>) {
+///
+/// `reversed_cell` is the `(col, row)` of one cell drawn with SGR 7
+/// (reverse video); every other cell has the default format. It lets a pixel
+/// test place a double-reversal cell (SGR 7 under DECSCNM) in a known
+/// position.
+fn synthetic_grid(
+    cols: usize,
+    rows: usize,
+    reversed_cell: Option<(usize, usize)>,
+) -> (Vec<TChar>, Vec<FormatTag>) {
     let mut chars = Vec::with_capacity(rows * (cols + 1));
     for row in 0..rows {
         for col in 0..cols {
@@ -78,12 +88,39 @@ fn synthetic_grid(cols: usize, rows: usize) -> (Vec<TChar>, Vec<FormatTag>) {
         }
         chars.push(TChar::NewLine);
     }
-    let tags = vec![FormatTag {
-        start: 0,
-        end: chars.len(),
+    let total = chars.len();
+    let span = |start: usize, end: usize, reverse_video: ReverseVideo| FormatTag {
+        start,
+        end,
+        colors: StateColors::default().with_reverse_video(reverse_video),
         ..FormatTag::default()
-    }];
+    };
+    let tags = match reversed_cell {
+        Some((col, row)) if col < cols && row < rows => {
+            let at = row * (cols + 1) + col;
+            [
+                (0, at, ReverseVideo::Off),
+                (at, at + 1, ReverseVideo::On),
+                (at + 1, total, ReverseVideo::Off),
+            ]
+            .into_iter()
+            .filter(|&(start, end, _)| start < end)
+            .map(|(start, end, reverse_video)| span(start, end, reverse_video))
+            .collect()
+        }
+        _ => vec![span(0, total, ReverseVideo::Off)],
+    };
     (chars, tags)
+}
+
+/// The colours every synthetic frame resolves against: the Mocha theme with
+/// no palette or dynamic overrides.
+fn synthetic_colors() -> ResolvedColors {
+    ResolvedColors::resolve(
+        &CATPPUCCIN_MOCHA,
+        &ColorPalette::default(),
+        &DynamicColorOverrides::default(),
+    )
 }
 
 /// The cursor draw parameters for a synthetic frame at the origin in the
@@ -147,6 +184,13 @@ pub struct SyntheticFrame {
     /// grid, modelling the sub-cell remainder a real pane's `terminal_rect`
     /// has to the right of and below its last cell. Defaults to `(0, 0)`.
     pub remainder_px: (u32, u32),
+    /// Whether the screen is in reverse video (DECSCNM, Task 147.27). When
+    /// [`ScreenInversion::Reversed`] the pane's base fill is the resolved
+    /// foreground, derived exactly as a real pane derives it; the explicit
+    /// [`Self::base_fill`] override is ignored.
+    pub screen_inversion: ScreenInversion,
+    /// `(col, row)` of one cell drawn with SGR 7, or `None` for none.
+    pub reversed_cell: Option<(usize, usize)>,
 }
 
 impl SyntheticFrame {
@@ -161,6 +205,8 @@ impl SyntheticFrame {
             toast: ToastPresence::Absent,
             base_fill: None,
             remainder_px: (0, 0),
+            screen_inversion: ScreenInversion::Normal,
+            reversed_cell: None,
         }
     }
 
@@ -191,12 +237,40 @@ impl SyntheticFrame {
         }
     }
 
-    /// The [`PaneBackground`] this frame draws with: fully opaque, with the
-    /// frame's base fill (if any) normalised to `0.0..=1.0`.
+    /// Set DECSCNM (whole-screen reverse video).
+    #[must_use]
+    pub const fn with_screen_inversion(self, screen_inversion: ScreenInversion) -> Self {
+        Self {
+            screen_inversion,
+            ..self
+        }
+    }
+
+    /// Draw the cell at `(col, row)` with SGR 7 (reverse video).
+    #[must_use]
+    pub const fn with_reversed_cell(self, col: usize, row: usize) -> Self {
+        Self {
+            reversed_cell: Some((col, row)),
+            ..self
+        }
+    }
+
+    /// The [`PaneBackground`] this frame draws with: fully opaque. Under
+    /// DECSCNM the base fill is derived as a real pane derives it
+    /// ([`PaneBackground::base_fill_for`]); otherwise it is the frame's
+    /// explicit override (if any) normalised to `0.0..=1.0`.
     fn pane_background(&self) -> PaneBackground {
+        let base_fill = match self.screen_inversion {
+            ScreenInversion::Reversed => PaneBackground::base_fill_for(
+                CATPPUCCIN_MOCHA.background,
+                &synthetic_colors(),
+                self.screen_inversion,
+            ),
+            ScreenInversion::Normal => self.base_fill.map(PaneBackground::fill_channels),
+        };
         PaneBackground {
             opacity: 1.0,
-            base_fill: self.base_fill.map(PaneBackground::fill_channels),
+            base_fill,
         }
     }
 }
@@ -310,7 +384,7 @@ impl HeadlessRenderer {
     /// afterwards when `frame.toast` is [`ToastPresence::Present`].
     pub fn draw_frame(&mut self, gl: &Gl<'_>, frame: &SyntheticFrame) {
         let (vp_w, vp_h) = self.viewport_px(frame);
-        let (chars, tags) = synthetic_grid(frame.cols, frame.rows);
+        let (chars, tags) = synthetic_grid(frame.cols, frame.rows, frame.reversed_cell);
 
         // Split borrow: `build_foreground_instances` needs `&mut atlas`
         // alongside `&font_manager`, and `draw_with_verts` needs `&mut
@@ -342,11 +416,7 @@ impl HeadlessRenderer {
         );
 
         let cursor = synthetic_cursor(frame);
-        let colors = ResolvedColors::resolve(
-            &CATPPUCCIN_MOCHA,
-            &ColorPalette::default(),
-            &DynamicColorOverrides::default(),
-        );
+        let colors = synthetic_colors();
         let mut bg = Vec::new();
         let mut deco = Vec::new();
         let _cursor_range = build_background_instances(
@@ -365,7 +435,7 @@ impl HeadlessRenderer {
                 command_block_hover_rows: None,
                 term_width_cols: frame.cols,
                 colors: &colors,
-                screen_inversion: ScreenInversion::Normal,
+                screen_inversion: frame.screen_inversion,
             },
             &mut bg,
             &mut deco,
@@ -378,7 +448,10 @@ impl HeadlessRenderer {
             font_manager,
             cell_height,
             ascent,
-            &FgRenderOptions::all_visible(None),
+            &FgRenderOptions {
+                screen_inversion: frame.screen_inversion,
+                ..FgRenderOptions::all_visible(None)
+            },
             &colors,
             &mut fg,
         );

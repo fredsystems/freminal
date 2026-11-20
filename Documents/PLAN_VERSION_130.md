@@ -8086,6 +8086,18 @@ Stale stub text was corrected at the same time:
   refers to a marker its legend no longer defines. A word-level diff shows only marker
   changes and padding. The skill names no markers. The malformed GAPS `ESC \` row stays for
   147.17.
+- **147.27 (done).** One function, `pane_base_color(ScreenInversion)`, defines the pane base
+  (`DefaultBackground` normally, the foreground under DECSCNM) for both sides: the base fill
+  (`PaneBackground::base_fill_for(theme_bg, &ResolvedColors, ScreenInversion)`) covers the
+  whole `terminal_rect`, so the sub-cell remainder is reversed, and a cell skips its
+  background quad only when its effective background is that base (`is_pane_base_color`, a
+  pattern match; an `==` on `TerminalColor` measured +25-33% and was replaced). SGR 7 under
+  DECSCNM draws the default background. Behaviour change: a background image is now visible
+  under DECSCNM (plain cells no longer paint opaque foreground quads over it), consistent with
+  normal video. Pixel tests (`decscnm_pixel_tests`, `.#gl-pixel`) cover the remainder, double
+  reversal, normal video and cursor-only frames; the harness's `SyntheticFrame` gained
+  `screen_inversion` and `reversed_cell` (outside the listed files, as 132.11 did).
+  `instanced_bg*`: no regression (the baseline was taken under load).
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

@@ -1556,3 +1556,174 @@ mod base_fill_pixel_tests {
         );
     }
 }
+
+/// Task 147.27: DECSCNM inverts the whole pane, including the sub-cell
+/// remainder strip, and the cell-background skip rule is "skip only when the
+/// effective background equals what lies beneath".
+///
+/// The frames hide the cursor, so the framebuffer holds only the base fill,
+/// any cell-background quads and the synthetic grid's glyphs; a cell's
+/// top-left pixel lies outside its glyph's quad and shows what is beneath
+/// the glyph.
+#[cfg(test)]
+mod decscnm_pixel_tests {
+    use super::super::headless::{CursorPresence, SyntheticFrame};
+    use super::{PixelFrame, capture, capture_after_cursor_only_frames};
+    use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
+    use freminal_common::themes::CATPPUCCIN_MOCHA;
+
+    const COLS: usize = 20;
+    const ROWS: usize = 6;
+    /// Sub-cell remainder, right and below the grid, in pixels.
+    const REMAINDER: (u32, u32) = (7, 5);
+    /// The cell carrying SGR 7 where a test places one.
+    const REVERSED_CELL: (usize, usize) = (3, 2);
+
+    fn rgba((r, g, b): (u8, u8, u8)) -> [u8; 4] {
+        [r, g, b, 255]
+    }
+
+    /// The theme's default foreground: what DECSCNM paints beneath the pane.
+    fn fg() -> [u8; 4] {
+        rgba(CATPPUCCIN_MOCHA.foreground)
+    }
+
+    /// The theme's default background: what a double-reversed cell shows.
+    fn bg() -> [u8; 4] {
+        rgba(CATPPUCCIN_MOCHA.background)
+    }
+
+    fn plain() -> SyntheticFrame {
+        SyntheticFrame::new(COLS, ROWS)
+            .with_cursor(CursorPresence::Hidden)
+            .with_remainder(REMAINDER)
+    }
+
+    fn reversed_screen() -> SyntheticFrame {
+        plain().with_screen_inversion(ScreenInversion::Reversed)
+    }
+
+    /// `(cell_w, cell_h)` derived from the pixels, not the font manager, so
+    /// the assertion cannot share a bug with the code under test.
+    fn cell_size(frame: &PixelFrame) -> (u32, u32) {
+        (
+            (frame.width - REMAINDER.0) / u32::try_from(COLS).unwrap(),
+            (frame.height - REMAINDER.1) / u32::try_from(ROWS).unwrap(),
+        )
+    }
+
+    /// The top-left pixel of cell `(col, row)`, which no glyph reaches.
+    fn corner(frame: &PixelFrame, (col, row): (usize, usize)) -> (u32, u32) {
+        let (cw, ch) = cell_size(frame);
+        (
+            u32::try_from(col).unwrap() * cw,
+            u32::try_from(row).unwrap() * ch,
+        )
+    }
+
+    fn assert_remainder_is(frame: &PixelFrame, expected: [u8; 4], what: &str) {
+        let (grid_w, grid_h) = (frame.width - REMAINDER.0, frame.height - REMAINDER.1);
+        for y in 0..frame.height {
+            for x in 0..frame.width {
+                if x >= grid_w || y >= grid_h {
+                    assert_eq!(
+                        frame.pixel(x, y),
+                        Some(expected),
+                        "{what}: remainder pixel ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// (1) Under DECSCNM the remainder strip, and every cell corner, reads
+    /// back the reversed default background: the resolved foreground.
+    /// Without DECSCNM the same frame leaves both untouched, so the match is
+    /// the inversion's doing.
+    #[test]
+    fn the_remainder_strip_is_inverted_with_the_cells() {
+        let Some(normal) = super::tests::capture_or_skip(&plain(), "decscnm-normal-premise") else {
+            return;
+        };
+        let reversed = capture(&reversed_screen()).expect("reversed capture");
+
+        assert_remainder_is(&normal, [0, 0, 0, 0], "premise, normal video");
+        let (nx, ny) = corner(&normal, (3, 2));
+        assert_eq!(normal.pixel(nx, ny), Some([0, 0, 0, 0]), "premise: cell");
+
+        assert_remainder_is(&reversed, fg(), "DECSCNM");
+        for cell in [(0, 0), (3, 2), (COLS - 1, ROWS - 1)] {
+            let (x, y) = corner(&reversed, cell);
+            assert_eq!(
+                reversed.pixel(x, y),
+                Some(fg()),
+                "DECSCNM: cell {cell:?} corner must be the reversed default background"
+            );
+        }
+    }
+
+    /// (2) SGR 7 under DECSCNM is a double reversal: the cell shows the
+    /// *default background*, not the base fill (the foreground) that lies
+    /// beneath it, and its neighbours and the remainder still show the fill.
+    #[test]
+    fn sgr7_under_decscnm_shows_the_default_background() {
+        let frame = reversed_screen().with_reversed_cell(REVERSED_CELL.0, REVERSED_CELL.1);
+        let Some(captured) = super::tests::capture_or_skip(&frame, "decscnm-double-reversal")
+        else {
+            return;
+        };
+
+        let (x, y) = corner(&captured, REVERSED_CELL);
+        assert_eq!(
+            captured.pixel(x, y),
+            Some(bg()),
+            "a double-reversed cell must show the default background"
+        );
+        for neighbour in [(REVERSED_CELL.0 + 1, REVERSED_CELL.1), (3, 3), (2, 2)] {
+            let (nx, ny) = corner(&captured, neighbour);
+            assert_eq!(
+                captured.pixel(nx, ny),
+                Some(fg()),
+                "neighbour {neighbour:?} must keep the base fill"
+            );
+        }
+        assert_remainder_is(&captured, fg(), "DECSCNM with a double-reversed cell");
+    }
+
+    /// (3) The rule change must not alter normal video: SGR 7 alone still
+    /// paints the default *foreground* behind the cell, and everything else
+    /// stays untouched.
+    #[test]
+    fn sgr7_in_normal_video_is_unchanged() {
+        let frame = plain().with_reversed_cell(REVERSED_CELL.0, REVERSED_CELL.1);
+        let Some(captured) = super::tests::capture_or_skip(&frame, "sgr7-normal-video") else {
+            return;
+        };
+
+        let (x, y) = corner(&captured, REVERSED_CELL);
+        assert_eq!(captured.pixel(x, y), Some(fg()), "SGR 7 cell");
+        let (nx, ny) = corner(&captured, (REVERSED_CELL.0 + 1, REVERSED_CELL.1));
+        assert_eq!(captured.pixel(nx, ny), Some([0, 0, 0, 0]), "neighbour");
+        assert_remainder_is(&captured, [0, 0, 0, 0], "normal video");
+    }
+
+    /// (4) Cursor-only frames after a reversed full frame leave it intact:
+    /// the cursor-only arm redraws the same base fill and cell quads.
+    #[test]
+    fn the_inverted_pane_survives_cursor_only_frames() {
+        let frame = reversed_screen().with_reversed_cell(REVERSED_CELL.0, REVERSED_CELL.1);
+        let Some(single) = super::tests::capture_or_skip(&frame, "decscnm-cursor-only") else {
+            return;
+        };
+        let after = capture_after_cursor_only_frames(&frame, 3).expect("cursor-only capture");
+
+        assert_eq!(
+            single.differing_pixels(&after, 0),
+            Some(0),
+            "an inverted pane must be pixel-identical after cursor-only frames"
+        );
+        let (x, y) = corner(&after, REVERSED_CELL);
+        assert_eq!(after.pixel(x, y), Some(bg()));
+        assert_remainder_is(&after, fg(), "after cursor-only frames");
+    }
+}

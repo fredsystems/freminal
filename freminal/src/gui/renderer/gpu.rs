@@ -30,8 +30,10 @@ use super::shaders::{
 };
 use super::vertex::{
     BG_INSTANCE_FLOATS, DECO_VERTEX_FLOATS, FG_INSTANCE_FLOATS, IMG_VERTEX_FLOATS, ImageDrawEntry,
-    VERTS_PER_QUAD, extract_atlas_rect, quad_vertices,
+    VERTS_PER_QUAD, extract_atlas_rect, pane_base_color, quad_vertices,
 };
+use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
+use freminal_common::colors::ResolvedColors;
 use freminal_terminal_emulator::InlineImage;
 
 // Task 125.6: real per-buffer upload-byte attribution, feature-gated the
@@ -76,6 +78,10 @@ type DrawUploadCounts = ();
 /// override must be painted by the pane itself, as a base fill that every
 /// later layer (background image, cell backgrounds, decorations, glyphs)
 /// draws over.
+///
+/// DECSCNM (Task 147.27) is the same mechanism: the pane's effective default
+/// background becomes the resolved foreground, so the fill is that colour and
+/// the sub-cell remainder strip is reversed together with the cells.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PaneBackground {
     /// Background opacity in `0.0..=1.0` (the `background_opacity` config
@@ -83,30 +89,42 @@ pub struct PaneBackground {
     /// so an overridden default background is as translucent as a cell
     /// background would be.
     pub opacity: f32,
-    /// The OSC 11 base fill as `[r, g, b]` channels normalised to `0.0..=1.0`,
-    /// or `None` when the pane's default background is the theme's (the
-    /// common case, in which **no GL call at all** is made for it).
+    /// The base fill (the pane's effective default background when it is
+    /// not the theme's: an OSC 11 override, or the foreground under DECSCNM)
+    /// as `[r, g, b]` channels normalised to `0.0..=1.0`, or `None` when it
+    /// is the theme's (the common case, in which **no GL call at all** is
+    /// made for it).
     pub base_fill: Option<[f32; 3]>,
 }
 
 impl PaneBackground {
-    /// The base fill a pane needs, given the configured theme's background
-    /// and the background the pane has actually resolved (theme value or
-    /// OSC 11 override).
+    /// The base fill a pane needs, given the configured theme's background,
+    /// the pane's resolved colours (theme values or OSC 10/11 overrides) and
+    /// whether DECSCNM is reversing the screen.
     ///
-    /// `Some` exactly when the two differ: an override that happens to equal
-    /// the theme background draws nothing, because the colour underneath is
-    /// already right and the draw would only add a full-viewport quad's
-    /// worth of fill rate.
+    /// The fill is the pane's *effective default background*: the resolved
+    /// background in normal video, the resolved foreground under DECSCNM
+    /// (Task 147.27). It covers the whole `terminal_rect`, so the sub-cell
+    /// remainder strip is inverted along with the cells. It must agree with
+    /// the cell-background skip rule in `vertex.rs`, which skips exactly the
+    /// cells whose effective background is this colour; both therefore read
+    /// `pane_base_color`.
+    ///
+    /// `Some` exactly when that colour differs from the theme background: an
+    /// effective default that happens to equal it draws nothing, because the
+    /// colour underneath is already right and the draw would only add a
+    /// full-viewport quad's worth of fill rate.
     #[must_use]
     pub fn base_fill_for(
         theme_background: (u8, u8, u8),
-        resolved_background: (u8, u8, u8),
+        resolved: &ResolvedColors,
+        screen_inversion: ScreenInversion,
     ) -> Option<[f32; 3]> {
-        if theme_background == resolved_background {
+        let effective_background = resolved.rgb(pane_base_color(screen_inversion));
+        if theme_background == effective_background {
             return None;
         }
-        Some(Self::fill_channels(resolved_background.into()))
+        Some(Self::fill_channels(effective_background.into()))
     }
 
     /// 8-bit `[r, g, b]` channels as the normalised `[r, g, b]`
@@ -2958,19 +2976,34 @@ mod destroy_gl_tests;
 #[cfg(test)]
 mod tests {
     use super::{PaneBackground, compute_bg_uvs};
+    use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
+    use freminal_common::colors::{
+        ColorPalette, DynamicColorOverrides, DynamicColorSlot, ResolvedColors,
+    };
     use freminal_common::config::BackgroundImageMode;
+    use freminal_common::themes::CATPPUCCIN_MOCHA;
 
     // Helper: assert two f32 values are approximately equal.
     fn approx_eq(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-5
     }
 
-    // ── PaneBackground::base_fill_for (Task 132.11) ───────────────────
+    /// Resolved colours with the given default foreground and background
+    /// (as OSC 10 / OSC 11 overrides over the Mocha theme).
+    fn colors_with(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> ResolvedColors {
+        let mut dynamic = DynamicColorOverrides::default();
+        dynamic.set(DynamicColorSlot::Foreground, fg);
+        dynamic.set(DynamicColorSlot::Background, bg);
+        ResolvedColors::resolve(&CATPPUCCIN_MOCHA, &ColorPalette::default(), &dynamic)
+    }
+
+    // ── PaneBackground::base_fill_for (Task 132.11, 147.27) ───────────
 
     #[test]
     fn base_fill_is_none_when_the_resolved_background_is_the_themes() {
+        let colors = colors_with((1, 2, 3), (30, 30, 46));
         assert_eq!(
-            PaneBackground::base_fill_for((30, 30, 46), (30, 30, 46)),
+            PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Normal),
             None,
             "no override means nothing is drawn underneath the cells"
         );
@@ -2978,7 +3011,8 @@ mod tests {
 
     #[test]
     fn base_fill_is_some_when_the_resolved_background_differs() {
-        let fill = PaneBackground::base_fill_for((30, 30, 46), (255, 0, 51))
+        let colors = colors_with((1, 2, 3), (255, 0, 51));
+        let fill = PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Normal)
             .expect("a differing background needs a fill");
         assert!(approx_eq(fill[0], 1.0), "red channel, got {}", fill[0]);
         assert!(approx_eq(fill[1], 0.0), "green channel, got {}", fill[1]);
@@ -2987,12 +3021,47 @@ mod tests {
 
     #[test]
     fn base_fill_uses_the_resolved_colour_not_the_themes() {
-        // Swapping the arguments must swap the answer: the fill is the
-        // *resolved* (second) colour.
-        let a = PaneBackground::base_fill_for((0, 0, 0), (255, 255, 255)).unwrap();
-        let b = PaneBackground::base_fill_for((255, 255, 255), (0, 0, 0)).unwrap();
+        // Swapping the colours must swap the answer: the fill is the
+        // *resolved* background, not the theme's.
+        let a = PaneBackground::base_fill_for(
+            (0, 0, 0),
+            &colors_with((0, 0, 0), (255, 255, 255)),
+            ScreenInversion::Normal,
+        )
+        .unwrap();
+        let b = PaneBackground::base_fill_for(
+            (255, 255, 255),
+            &colors_with((255, 255, 255), (0, 0, 0)),
+            ScreenInversion::Normal,
+        )
+        .unwrap();
         assert!(approx_eq(a[0], 1.0));
         assert!(approx_eq(b[0], 0.0));
+    }
+
+    #[test]
+    fn base_fill_under_decscnm_is_the_resolved_foreground() {
+        // Task 147.27: reversed, the pane's default background is the
+        // foreground, so the fill (and thus the sub-cell remainder) is it.
+        let colors = colors_with((255, 0, 51), (30, 30, 46));
+        let fill = PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Reversed)
+            .expect("a reversed screen needs a fill of the foreground");
+        assert!(approx_eq(fill[0], 1.0), "red channel, got {}", fill[0]);
+        assert!(approx_eq(fill[1], 0.0), "green channel, got {}", fill[1]);
+        assert!(approx_eq(fill[2], 0.2), "blue channel, got {}", fill[2]);
+    }
+
+    #[test]
+    fn base_fill_under_decscnm_ignores_the_background_override() {
+        // The override is the *background*; reversed, it is the foreground
+        // that lies beneath. A background that differs from the theme must
+        // not leak into the fill.
+        let colors = colors_with((30, 30, 46), (255, 0, 51));
+        assert_eq!(
+            PaneBackground::base_fill_for((30, 30, 46), &colors, ScreenInversion::Reversed),
+            None,
+            "reversed fill equals the theme background, so nothing is drawn"
+        );
     }
 
     // ── BackgroundImageMode::Fill ─────────────────────────────────────

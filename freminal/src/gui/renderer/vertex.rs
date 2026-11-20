@@ -117,6 +117,47 @@ pub(super) const fn effective_fg(
     }
 }
 
+/// The cell-background colour that is the pane's own default background
+/// under `screen_inversion`, and therefore already lies beneath the cell.
+///
+/// A cell whose effective background is this colour emits no instance: the
+/// pane's base fill (or, when no fill is needed, the panel the pane sits on)
+/// already shows that colour, and drawing it again would only add overdraw
+/// (and double-blend at `background_opacity < 1.0`). Normal video: the
+/// default *background*. DECSCNM: the default *foreground*, because the
+/// pane's base fill is the reversed default background (Task 147.27).
+///
+/// A cell whose effective background is anything else, including the colour
+/// that is the base under the *other* inversion state (SGR 7 under DECSCNM
+/// resolves to `DefaultBackground`), differs from what lies beneath and must
+/// be drawn.
+#[inline]
+pub(super) const fn pane_base_color(
+    screen_inversion: ScreenInversion,
+) -> freminal_common::colors::TerminalColor {
+    match screen_inversion {
+        ScreenInversion::Normal => freminal_common::colors::TerminalColor::DefaultBackground,
+        ScreenInversion::Reversed => freminal_common::colors::TerminalColor::Default,
+    }
+}
+
+/// Whether `color` is [`pane_base_color`] under `screen_inversion`: the
+/// cell-background skip test, written as a pattern match rather than `==` so
+/// it stays a discriminant test in the per-run hot loop of
+/// [`build_background_instances`].
+#[inline]
+const fn is_pane_base_color(
+    color: freminal_common::colors::TerminalColor,
+    screen_inversion: ScreenInversion,
+) -> bool {
+    use freminal_common::colors::TerminalColor;
+    matches!(
+        (screen_inversion, color),
+        (ScreenInversion::Normal, TerminalColor::DefaultBackground)
+            | (ScreenInversion::Reversed, TerminalColor::Default)
+    )
+}
+
 /// Effective background color for a cell — the mirror of [`effective_fg`].
 #[inline]
 const fn effective_bg(
@@ -545,21 +586,16 @@ pub fn build_background_instances(
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
             // Task 115.2: compute the DECSCNM/SGR-7-composed effective
-            // background BEFORE the DefaultBackground skip check below, so
-            // the skip decision operates on the post-swap color. This is
-            // required for correctness: under DECSCNM a cell whose raw
-            // background was DefaultBackground may now have a real
-            // (swapped-from-foreground) effective background and must be
-            // drawn, while a cell whose effective background becomes
-            // DefaultBackground must still be skipped.
+            // background BEFORE the skip check below, so the skip decision
+            // operates on the post-swap color.
             let bg_color_raw = effective_bg(&run.colors, screen_inversion);
 
-            // Skip default backgrounds (transparent — the terminal base color
-            // is rendered as a panel clear, not explicit quads).
-            if matches!(
-                bg_color_raw,
-                freminal_common::colors::TerminalColor::DefaultBackground
-            ) {
+            // Skip a background equal to what lies beneath (Task 147.27): the
+            // pane's base fill, or the panel clear when no fill is drawn,
+            // already shows it. That is the default background in normal
+            // video and the default foreground under DECSCNM; the other one
+            // (SGR 7 under DECSCNM) differs from the base and is drawn.
+            if is_pane_base_color(bg_color_raw, screen_inversion) {
                 continue;
             }
 
@@ -2893,15 +2929,81 @@ mod tests {
     }
 
     #[test]
-    fn bg_background_override_applies_to_decscnm_swapped_default_cell() {
+    fn bg_decscnm_default_cell_is_skipped_because_the_base_fill_is_its_colour() {
         // DECSCNM turns a Default-fg cell's effective background into the
-        // (resolved) foreground, so a foreground override must show up in
-        // the bg instance.
+        // (resolved) foreground, which is exactly the pane's base fill
+        // (`PaneBackground::base_fill_for`), so the cell emits nothing
+        // (Task 147.27) -- with or without a foreground override.
         let line = make_line(1, 8.0, default_colors(), FontDecorationFlags::empty());
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (7, 8, 9))]);
         let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Reversed);
+        assert!(bg.is_empty(), "the base fill already shows this colour");
+    }
+
+    #[test]
+    fn bg_decscnm_cell_with_an_explicit_background_still_draws() {
+        // Under DECSCNM a Red-fg cell's effective background is Red: it
+        // differs from the base fill (the default foreground), so it is
+        // drawn.
+        let line = make_line(
+            1,
+            8.0,
+            default_colors().with_color(TerminalColor::Red),
+            FontDecorationFlags::empty(),
+        );
+        let colors = overridden_colors(&[(1, (11, 22, 33))], &[]);
+        let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Reversed);
+        assert_eq!(bg.len(), BG_INSTANCE_FLOATS);
+        assert_eq!(&bg[2..6], rgba((11, 22, 33)).as_slice());
+    }
+
+    #[test]
+    fn bg_sgr7_default_cell_in_normal_video_draws_the_foreground() {
+        // Normal video: the base is the default background, so a reversed
+        // default cell (effective background = default foreground) differs
+        // from it and is drawn. The Task 147.27 rule must not change this.
+        let reversed = default_colors().with_reverse_video(ReverseVideo::On);
+        let line = make_line(1, 8.0, reversed, FontDecorationFlags::empty());
+        let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (7, 8, 9))]);
+        let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Normal);
         assert_eq!(bg.len(), BG_INSTANCE_FLOATS);
         assert_eq!(&bg[2..6], rgba((7, 8, 9)).as_slice());
+    }
+
+    #[test]
+    fn the_skip_test_agrees_with_pane_base_color_for_every_colour() {
+        let colors = [
+            TerminalColor::Default,
+            TerminalColor::DefaultBackground,
+            TerminalColor::DefaultUnderlineColor,
+            TerminalColor::DefaultCursorColor,
+            TerminalColor::Black,
+            TerminalColor::Red,
+            TerminalColor::BrightWhite,
+            TerminalColor::PaletteIndex(0),
+            TerminalColor::Custom(0, 0, 0),
+        ];
+        for inversion in [ScreenInversion::Normal, ScreenInversion::Reversed] {
+            for color in colors {
+                assert_eq!(
+                    is_pane_base_color(color, inversion),
+                    color == pane_base_color(inversion),
+                    "{color:?} under {inversion:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pane_base_color_is_the_default_background_in_normal_video_and_foreground_reversed() {
+        assert_eq!(
+            pane_base_color(ScreenInversion::Normal),
+            TerminalColor::DefaultBackground
+        );
+        assert_eq!(
+            pane_base_color(ScreenInversion::Reversed),
+            TerminalColor::Default
+        );
     }
 
     #[test]
@@ -3117,9 +3219,12 @@ mod tests {
 
     #[test]
     fn sgr7_plus_decscnm_on_default_cell_shows_default_colours() {
-        // Double reversal cancels: no bg instance (effective bg is
-        // `DefaultBackground`, skipped) and the glyph is the resolved
-        // default foreground, even with OSC 10/11 overrides.
+        // Double reversal cancels: the cell shows the normal default
+        // colours. Its effective bg is `DefaultBackground`, which is NOT
+        // what lies beneath under DECSCNM (the base fill is the
+        // foreground), so it is drawn as one bg instance in the resolved
+        // default background (Task 147.27); the glyph is the resolved
+        // default foreground. Both hold with OSC 10/11 overrides.
         let reversed = default_colors().with_reverse_video(ReverseVideo::On);
         let colors = overridden_colors(
             &[],
@@ -3130,7 +3235,12 @@ mod tests {
         );
         let line = make_line(1, 8.0, reversed, FontDecorationFlags::empty());
         let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Reversed);
-        assert!(bg.is_empty(), "double reversal must skip the bg quad");
+        assert_eq!(
+            bg.len(),
+            BG_INSTANCE_FLOATS,
+            "double reversal must draw the default background over the base fill"
+        );
+        assert_eq!(&bg[2..6], rgba((3, 2, 1)).as_slice());
 
         let got = first_fg_instance_color(reversed, &colors, None, ScreenInversion::Reversed);
         assert_same_rgba(got, rgba((7, 8, 9)), "double reversal default foreground");

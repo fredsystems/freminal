@@ -3983,7 +3983,8 @@ impl FreminalTerminalWidget {
                     rs_ref.bg_opacity = bg_opacity;
                     rs_ref.base_fill = PaneBackground::base_fill_for(
                         snap.theme.background,
-                        snap.resolved_colors.background,
+                        &snap.resolved_colors,
+                        snap.screen_inversion,
                     );
                     rs_ref.bg_image_opacity = bg_image_opacity;
                     rs_ref.bg_image_mode = bg_image_mode;
