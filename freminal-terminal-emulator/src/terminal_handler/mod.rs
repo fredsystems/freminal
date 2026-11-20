@@ -2294,7 +2294,7 @@ impl TerminalHandler {
                 self.handle_restore_cursor();
             }
             TerminalOutput::CursorToLowerLeftCorner => {
-                tracing::warn!("CursorToLowerLeftCorner not yet implemented (ignored)");
+                tracing::debug!("HP ESC F (cursor to lower-left) intentionally ignored");
             }
             TerminalOutput::ResetDevice => {
                 self.full_reset();
@@ -2303,10 +2303,10 @@ impl TerminalHandler {
                 self.soft_reset();
             }
             TerminalOutput::MemoryLock => {
-                tracing::warn!("MemoryLock not yet implemented (ignored)");
+                tracing::debug!("HP ESC l (memory lock) intentionally ignored");
             }
             TerminalOutput::MemoryUnlock => {
-                tracing::warn!("MemoryUnlock not yet implemented (ignored)");
+                tracing::debug!("HP ESC m (memory unlock) intentionally ignored");
             }
             TerminalOutput::DeviceControlString(dcs) => {
                 self.handle_device_control_string(dcs);
@@ -4645,16 +4645,38 @@ mod tests {
     }
 
     #[test]
-    fn process_memory_lock_unlock() {
+    fn hp_memory_lock_unlock_change_no_state() {
         let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_set_scroll_region(5, 20);
+        handler.process_outputs(&[TerminalOutput::SetCursorPos {
+            x: Some(10),
+            y: Some(8),
+        }]);
+        let cursor = handler.cursor_pos();
+        let region = handler.buffer().scroll_region();
+
         handler.process_outputs(&[TerminalOutput::MemoryLock]);
+        assert_eq!(handler.cursor_pos(), cursor);
+        assert_eq!(handler.buffer().scroll_region(), region);
+
         handler.process_outputs(&[TerminalOutput::MemoryUnlock]);
+        assert_eq!(handler.cursor_pos(), cursor);
+        assert_eq!(handler.buffer().scroll_region(), region);
     }
 
     #[test]
-    fn process_cursor_to_lower_left() {
+    fn hp_cursor_to_lower_left_changes_no_state() {
         let mut handler = TerminalHandler::new(80, 24);
+        handler.process_outputs(&[TerminalOutput::SetCursorPos {
+            x: Some(10),
+            y: Some(8),
+        }]);
+        let cursor = handler.cursor_pos();
+        let region = handler.buffer().scroll_region();
+
         handler.process_outputs(&[TerminalOutput::CursorToLowerLeftCorner]);
+        assert_eq!(handler.cursor_pos(), cursor);
+        assert_eq!(handler.buffer().scroll_region(), region);
     }
 
     #[test]
