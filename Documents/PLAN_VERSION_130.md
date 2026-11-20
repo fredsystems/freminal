@@ -11863,6 +11863,44 @@ header (how to regenerate).
   passes `-x`" mentions (COVERAGE, kitty reference) were updated. A clean build and a
   `cargo xtask terminfo` run both leave `res/` unchanged.
 
+##### 151.C7 — PR #588 second review round (P6-P9)
+
+CodeRabbit's second pass on PR #588 (2026-11-20) left four comments; all are accepted. While
+checking P7 against sudo's own option table (`src/parse_args.c`, `sudo_short_opts` and
+`sudo_long_opts`, ISC-licensed, read for its option list only) the orchestrator found that
+151.C5's specification was itself incomplete, so the scan rules below supersede 151.C5's.
+
+| ID  | Finding (short)                                                                       |
+| --- | ------------------------------------------------------------------------------------- |
+| P6  | `DESIGN_DECISIONS.md` says root programs ignore `TERMINFO`; default ncurses allows it |
+| P7  | sudo accepts unique long-option prefixes (`--ed`), which the scan does not            |
+| P8  | zsh `KSH_ARRAYS` breaks the scan's string subscripts                                  |
+| P9  | the stdin-compile test compares raw `tic` bytes across ncurses builds                 |
+
+- **P6:** ncurses ignores `TERMINFO`/`TERMINFO_DIRS` in setuid/setgid programs; programs run
+  as root read them unless ncurses was configured with `--disable-root-environ`. Reword the
+  "Known limits" paragraph accordingly.
+- **P7 (scan rules, superseding 151.C5):**
+  - Short letters that require a value (consume the rest of the word, or the next word when
+    last): `a C c D g p R r T t U u`. `h` takes an optional value: it consumes the rest of
+    its word if any, and never the next word. `e` is edit. Other letters take none.
+  - Long options (sudo's full list): `askpass auth-type background bell chdir chroot
+    close-from command-timeout edit group help host list login login-class no-update
+    non-interactive other-user preserve-env preserve-groups prompt remove-timestamp
+    reset-timestamp role set-home shell stdin type user validate version`. Value-required:
+    `auth-type chdir chroot close-from command-timeout group host login-class other-user
+    prompt role type user` (without `=` they consume the next word). `preserve-env` takes a
+    value only with `=`.
+  - A long option word (the part before any `=`) matches an exact name first; otherwise a
+    prefix of exactly one name (`--ed` is `--edit`, `--us` is `--user`). A prefix of more than
+    one name (`--re`) or of none is an unknown option taking no value (sudo itself rejects
+    it, so the result does not matter beyond not crashing).
+- **P8:** the zsh scan starts with `emulate -L zsh`.
+- **P9:** the test compares the decompiled capabilities instead of bytes: `infocmp -x` of the
+  stdin-compiled entry against `infocmp -x` of the committed tree (both read with the host's
+  `infocmp`, `TERMINFO` pointed at each tree; header lines naming the file are dropped).
+  Byte-equality of the committed tree with the archive stays.
+
 #### 151 Status notes
 
 - **151.1 (done).** See "151 Audit".
