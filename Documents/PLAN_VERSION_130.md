@@ -8068,6 +8068,14 @@ Stale stub text was corrected at the same time:
   `cargo xtask check-docs` (alias `cdo`) sets `RUSTDOCFLAGS` for that one call, runs from
   `cargo xtask ci`, and is a step in the CI `check` matrix on `stable` + `ubuntu-latest`
   only (Windows- and macOS-only items are not documented there).
+- **147.33 (done).** Status markers became plain text, per file and column (the same
+  emoji meant different things): COVERAGE `done` / `partial` / `stub` / `missing` (and
+  `done (fixed)` in Known Bugs); SGR `done` / `partial` / `missing` / `not planned`; GAPS
+  Importance `high` / `medium` / `low` / `not planned` and Type `partial` / `not implemented`.
+  Legends rewritten; the 21 dated COVERAGE changelog lines were converted too, so no file
+  refers to a marker its legend no longer defines. A word-level diff shows only marker
+  changes and padding. The skill names no markers. The malformed GAPS `ESC \` row stays for
+  147.17.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
