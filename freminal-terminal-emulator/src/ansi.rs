@@ -147,15 +147,40 @@ pub fn parse_param_as<T: std::str::FromStr>(
     )
 }
 
-/// Whether `b` is the 8-bit C1 String Terminator (`0x9C`) with 8-bit C1
-/// controls in force.
+/// Whether `b`, a byte of an open string (OSC, DCS or APC), is the 8-bit C1
+/// String Terminator: `0x9C` with 8-bit C1 controls in force and not
+/// completing a UTF-8 character.
 ///
 /// Under S7C1T `0x9C` is not a control: inside a string it is an ordinary
-/// body byte (the continuation byte of some UTF-8 characters). This is the
-/// same gate `ansi_parser_inner_empty` applies to every other 8-bit C1
-/// introducer.
-const fn is_c1_st(b: u8, s8c1t: S8c1t) -> bool {
-    b == 0x9C && matches!(s8c1t, S8c1t::EightBit)
+/// body byte. Under S8C1T it is still a continuation byte of many characters
+/// (`Ŝ` is `C5 9C`), so `utf8_pending`, the number of continuation bytes the
+/// character in progress still expects, must be zero for it to end the
+/// string. A `0x9C` that completes no character (a standalone one) ends it.
+///
+/// Tracks the character in progress, so it must see every byte of the
+/// string; under S7C1T it does nothing. This is the same gate
+/// `ansi_parser_inner_empty` applies to every other 8-bit C1 introducer.
+#[inline]
+fn string_byte_is_c1_st(b: u8, s8c1t: S8c1t, utf8_pending: &mut u8) -> bool {
+    if s8c1t != S8c1t::EightBit {
+        return false;
+    }
+    if b == 0x9C && *utf8_pending == 0 {
+        return true;
+    }
+    if b < 0x80 {
+        *utf8_pending = 0;
+    } else if b >= 0xC0 {
+        *utf8_pending = match b {
+            0xC2..=0xDF => 1,
+            0xE0..=0xEF => 2,
+            0xF0..=0xF4 => 3,
+            _ => 0,
+        };
+    } else {
+        *utf8_pending = utf8_pending.saturating_sub(1);
+    }
+    false
 }
 
 fn push_data_if_non_empty(data: &mut Vec<u8>, output: &mut Vec<TerminalOutput>) {
@@ -243,6 +268,21 @@ impl Utf8Prefix {
     }
 }
 
+/// How much of its input [`FreminalAnsiParser::push_to_limit`] parses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PushLimit {
+    /// All of it.
+    WholeInput,
+    /// Up to and including the byte that completes a `DCS tmux;` sequence.
+    ThroughTmuxPassthrough,
+}
+
+/// Whether `output` is a `DCS tmux;` passthrough sequence, whose payload the
+/// state replays.
+fn is_tmux_passthrough(output: &TerminalOutput) -> bool {
+    matches!(output, TerminalOutput::DeviceControlString(seq) if seq.starts_with(b"Ptmux;"))
+}
+
 /// Apply to `vt52_mode` / `s8c1t_mode` the change `output` makes to the
 /// parser's own mode, if any.
 ///
@@ -259,10 +299,15 @@ pub(crate) const fn apply_parser_mode_change(
         TerminalOutput::EightBitControl => *s8c1t_mode = S8c1t::EightBit,
         TerminalOutput::Mode(Mode::Decanm(Decanm::Vt52)) => *vt52_mode = Decanm::Vt52,
         TerminalOutput::Mode(Mode::Decanm(Decanm::Ansi)) => *vt52_mode = Decanm::Ansi,
-        // RIS only reaches here from the ANSI parser (`ESC c` is ignored in
-        // VT52 mode), so DECANM is already `Ansi`: only S8C1T needs resetting.
-        TerminalOutput::SevenBitControl | TerminalOutput::ResetDevice => {
+        TerminalOutput::SevenBitControl => *s8c1t_mode = S8c1t::SevenBit,
+        // The parser only emits RIS in ANSI mode (`ESC c` is ignored in VT52
+        // mode), so for it DECANM is already `Ansi`. `TerminalState` folds the
+        // outputs of tmux passthrough payloads through this function over its
+        // own copy of the modes, and RIS must reset that copy's DECANM as well
+        // so it never disagrees with the handler.
+        TerminalOutput::ResetDevice => {
             *s8c1t_mode = S8c1t::SevenBit;
+            *vt52_mode = Decanm::Ansi;
         }
         _ => {}
     }
@@ -286,6 +331,13 @@ pub struct FreminalAnsiParser {
     /// 8-bit C1 control introducers.  Toggled by `ESC SP G` (S8C1T) /
     /// `ESC SP F` (S7C1T).
     pub s8c1t_mode: S8c1t,
+    /// While a string (OSC, DCS, APC) is open under S8C1T: how many UTF-8
+    /// continuation bytes the character in progress still expects. `0x9C` is
+    /// a continuation byte of many characters (`Ŝ` is `C5 9C`), so it ends
+    /// the string only when this is zero. It is zero whenever no string is
+    /// open: every byte that ends one (BEL, ESC, CAN, SUB) is ASCII and
+    /// clears it, and a `0x9C` ends a string only when it is already zero.
+    string_utf8_pending: u8,
 }
 
 impl SequenceTraceable for FreminalAnsiParser {
@@ -315,6 +367,7 @@ impl FreminalAnsiParser {
             seq_trace: SequenceTracer::new(),
             vt52_mode: Decanm::Ansi,
             s8c1t_mode: S8c1t::SevenBit,
+            string_utf8_pending: 0,
         }
     }
 
@@ -610,16 +663,38 @@ impl FreminalAnsiParser {
     /// single `TerminalOutput::Data(Vec<u8>)` whenever a control sequence
     /// interrupts the data stream, minimising allocations for the common case
     /// of long runs of ASCII text.
+    pub fn push(&mut self, incoming: &[u8]) -> Vec<TerminalOutput> {
+        self.push_to_limit(incoming, PushLimit::WholeInput).0
+    }
+
+    /// Like [`Self::push`], but stops after the byte that completes a `DCS
+    /// tmux;` passthrough sequence, and returns how many bytes of `incoming`
+    /// it consumed along with the outputs.
+    ///
+    /// The payload of such a sequence is replayed by `TerminalState`, and a
+    /// mode change inside it (S8C1T, DECANM) must govern the bytes after the
+    /// wrapper. Stopping lets the caller replay the payload, copy the mode
+    /// back into this parser, and push the rest: exactly what a read that
+    /// ends at the wrapper does. All of `incoming` is consumed when no
+    /// passthrough sequence completes in it.
+    pub(crate) fn push_through_tmux_passthrough(
+        &mut self,
+        incoming: &[u8],
+    ) -> (Vec<TerminalOutput>, usize) {
+        self.push_to_limit(incoming, PushLimit::ThroughTmuxPassthrough)
+    }
+
     // Inherently large: the ANSI parser state machine handles many escape sequence prefixes
     // (ESC, CSI, OSC, DCS, APC, SOS, PM, ST). Each branch is essential and tightly coupled to
     // the parser state. Splitting would fragment the state machine without reducing complexity.
     #[allow(clippy::too_many_lines)]
-    pub fn push(&mut self, incoming: &[u8]) -> Vec<TerminalOutput> {
+    fn push_to_limit(&mut self, incoming: &[u8], limit: PushLimit) -> (Vec<TerminalOutput>, usize) {
         // Take the pending buffer out temporarily
         let mut data_output = std::mem::take(&mut self.pending_data);
         let mut output = Vec::new();
+        let mut consumed = incoming.len();
 
-        for &b in incoming {
+        for (index, &b) in incoming.iter().enumerate() {
             self.seq_trace.push(b);
             let emitted_from = output.len();
 
@@ -669,40 +744,46 @@ impl FreminalAnsiParser {
                         }
                     }
                 }
-                ParserInner::Dcs(parser) => match if is_c1_st(b, self.s8c1t_mode) {
-                    parser.terminate_c1_st(&mut output)
-                } else {
-                    parser.dcs_parser_inner(b, &mut output)
-                } {
-                    ParserOutcome::Finished => {
-                        self.inner = ParserInner::Empty;
+                ParserInner::Dcs(parser) => {
+                    match if string_byte_is_c1_st(b, self.s8c1t_mode, &mut self.string_utf8_pending)
+                    {
+                        parser.terminate_c1_st(&mut output)
+                    } else {
+                        parser.dcs_parser_inner(b, &mut output)
+                    } {
+                        ParserOutcome::Finished => {
+                            self.inner = ParserInner::Empty;
+                        }
+                        ParserOutcome::FinishedAtEsc => {
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
+                        ParserOutcome::Continue => (),
+                        ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
+                            output.push(TerminalOutput::Invalid);
+                            self.inner = ParserInner::Empty;
+                        }
                     }
-                    ParserOutcome::FinishedAtEsc => {
-                        self.restart_escape_with(b, &mut data_output, &mut output);
+                }
+                ParserInner::Apc(parser) => {
+                    match if string_byte_is_c1_st(b, self.s8c1t_mode, &mut self.string_utf8_pending)
+                    {
+                        parser.terminate_c1_st(&mut output)
+                    } else {
+                        parser.apc_parser_inner(b, &mut output)
+                    } {
+                        ParserOutcome::Finished => {
+                            self.inner = ParserInner::Empty;
+                        }
+                        ParserOutcome::FinishedAtEsc => {
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
+                        ParserOutcome::Continue => (),
+                        ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
+                            output.push(TerminalOutput::Invalid);
+                            self.inner = ParserInner::Empty;
+                        }
                     }
-                    ParserOutcome::Continue => (),
-                    ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
-                        output.push(TerminalOutput::Invalid);
-                        self.inner = ParserInner::Empty;
-                    }
-                },
-                ParserInner::Apc(parser) => match if is_c1_st(b, self.s8c1t_mode) {
-                    parser.terminate_c1_st(&mut output)
-                } else {
-                    parser.apc_parser_inner(b, &mut output)
-                } {
-                    ParserOutcome::Finished => {
-                        self.inner = ParserInner::Empty;
-                    }
-                    ParserOutcome::FinishedAtEsc => {
-                        self.restart_escape_with(b, &mut data_output, &mut output);
-                    }
-                    ParserOutcome::Continue => (),
-                    ParserOutcome::Invalid(_) | ParserOutcome::InvalidParserFailure(_) => {
-                        output.push(TerminalOutput::Invalid);
-                        self.inner = ParserInner::Empty;
-                    }
-                },
+                }
                 ParserInner::Csi(parser) => {
                     // ECMA-48 §5.5: C0 control characters received during a
                     // control sequence are executed immediately; the control
@@ -760,37 +841,40 @@ impl FreminalAnsiParser {
                         }
                     }
                 }
-                ParserInner::Osc(parser) => match if is_c1_st(b, self.s8c1t_mode) {
-                    parser.terminate_c1_st(&mut output)
-                } else {
-                    parser.ansiparser_inner_osc(b, &mut output)
-                } {
-                    ParserOutcome::Finished => {
-                        self.inner = ParserInner::Empty;
-                        if output.last() == Some(&TerminalOutput::Invalid) {
+                ParserInner::Osc(parser) => {
+                    match if string_byte_is_c1_st(b, self.s8c1t_mode, &mut self.string_utf8_pending)
+                    {
+                        parser.terminate_c1_st(&mut output)
+                    } else {
+                        parser.ansiparser_inner_osc(b, &mut output)
+                    } {
+                        ParserOutcome::Finished => {
+                            self.inner = ParserInner::Empty;
+                            if output.last() == Some(&TerminalOutput::Invalid) {
+                                debug!(
+                                    "Invalid ANSI sequence; recent={}",
+                                    self.current_trace_escaped()
+                                );
+                            }
+                        }
+                        ParserOutcome::FinishedAtEsc => {
+                            self.restart_escape_with(b, &mut data_output, &mut output);
+                        }
+                        ParserOutcome::Continue => (),
+                        // we cannot hit this branch right now because the osc parser does not return ParserOutcome::InvalidParserFailure
+                        ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
+                        ParserOutcome::Invalid(message) => {
+                            // All invalid sequences emit `TerminalOutput::Invalid` here.
+                            output.push(TerminalOutput::Invalid);
                             debug!(
-                                "Invalid ANSI sequence; recent={}",
+                                "Invalid ANSI sequence: {}; recent={}",
+                                message,
                                 self.current_trace_escaped()
                             );
+                            self.inner = ParserInner::Empty;
                         }
                     }
-                    ParserOutcome::FinishedAtEsc => {
-                        self.restart_escape_with(b, &mut data_output, &mut output);
-                    }
-                    ParserOutcome::Continue => (),
-                    // we cannot hit this branch right now because the osc parser does not return ParserOutcome::InvalidParserFailure
-                    ParserOutcome::InvalidParserFailure(_message) => unreachable!(),
-                    ParserOutcome::Invalid(message) => {
-                        // All invalid sequences emit `TerminalOutput::Invalid` here.
-                        output.push(TerminalOutput::Invalid);
-                        debug!(
-                            "Invalid ANSI sequence: {}; recent={}",
-                            message,
-                            self.current_trace_escaped()
-                        );
-                        self.inner = ParserInner::Empty;
-                    }
-                },
+                }
                 ParserInner::Vt52Escape => {
                     push_data_if_non_empty(&mut data_output, &mut output);
                     self.handle_vt52_escape(b, &mut data_output, &mut output);
@@ -828,8 +912,15 @@ impl FreminalAnsiParser {
             // byte of this same read, not the next read, so the parser applies
             // it here, as it emits the output.  The `continue` paths above
             // emit only C0 / C1 controls, none of which change a mode.
+            let mut tmux_passthrough_ended = false;
             for emitted in &output[emitted_from..] {
                 apply_parser_mode_change(emitted, &mut self.vt52_mode, &mut self.s8c1t_mode);
+                tmux_passthrough_ended |=
+                    limit == PushLimit::ThroughTmuxPassthrough && is_tmux_passthrough(emitted);
+            }
+            if tmux_passthrough_ended {
+                consumed = index + 1;
+                break;
             }
         }
 
@@ -841,7 +932,7 @@ impl FreminalAnsiParser {
         // Put the buffer back into self (no allocations, same Vec reused)
         self.pending_data = data_output;
 
-        output
+        (output, consumed)
     }
 
     /// Handle a single byte inside an ignored VT52 `ESC (`-style sequence.
@@ -2304,6 +2395,19 @@ mod tests {
         assert_eq!(p.vt52_mode, Decanm::Ansi);
     }
 
+    /// `TerminalState` folds the outputs of a tmux payload through
+    /// `apply_parser_mode_change` over its own copy of the modes: RIS must
+    /// reset that copy's DECANM too, so it cannot stay in VT52 after the
+    /// handler has returned to ANSI.
+    #[test]
+    fn ris_resets_decanm_and_s8c1t_in_a_tracked_copy_of_the_modes() {
+        let mut vt52 = Decanm::Vt52;
+        let mut s8c1t = S8c1t::EightBit;
+        apply_parser_mode_change(&TerminalOutput::ResetDevice, &mut vt52, &mut s8c1t);
+        assert_eq!(vt52, Decanm::Ansi);
+        assert_eq!(s8c1t, S8c1t::SevenBit);
+    }
+
     /// S8C1T, RIS, then S8C1T again in one `push()`: the mode changes apply in
     /// order, so the final state is 8-bit and the trailing `0x9B` is a CSI.
     #[test]
@@ -3108,6 +3212,141 @@ mod tests {
         assert_csi_buffers_clean(&p);
     }
 
+    /// `assert_csi_buffers_clean` alone cannot tell a parser that keeps its
+    /// buffers from one that drops them (a dropped set is empty, too). A short
+    /// CSI grows the buffers, so spare capacity after it proves they came back.
+    fn assert_csi_buffers_retained(p: &FreminalAnsiParser, what: &str) {
+        assert_csi_buffers_clean(p);
+        assert!(
+            p.csi_buffers.max_capacity() > 0,
+            "{what}: the parser dropped its CSI buffers instead of keeping them"
+        );
+    }
+
+    #[test]
+    fn a_short_csi_leaves_spare_capacity_on_every_exit_path() {
+        let cases: [(&str, &[u8]); 5] = [
+            ("finished", b"\x1b[1;2;3m"),
+            ("finished with an intermediate", b"\x1b[1;2 q"),
+            ("invalid byte", b"\x1b[1;2\x7f"),
+            ("abort on ESC", b"\x1b[1;2;3\x1b"),
+            ("unhandled final", b"\x1b[1;2;3 W"),
+        ];
+        for (name, bytes) in cases {
+            let mut p = FreminalAnsiParser::new();
+            assert_eq!(p.csi_buffers.max_capacity(), 0, "{name}: starts empty");
+            let _ = p.push(bytes);
+            if matches!(p.inner, ParserInner::Escape) {
+                let _ = p.push(b"c");
+            }
+            assert_csi_buffers_retained(&p, name);
+        }
+    }
+
+    #[test]
+    fn the_buffer_a_short_csi_grew_is_reused_by_the_next_one() {
+        let mut p = FreminalAnsiParser::new();
+        let _ = p.push(b"\x1b[1;2;3;4;5;6;7;8;9m");
+        let grown = p.csi_buffers.max_capacity();
+        assert!(grown > 0);
+        let _ = p.push(b"\x1b[1;2m");
+        assert_eq!(p.csi_buffers.max_capacity(), grown);
+    }
+
+    // ── CSI byte cap (147 PR review R21) ────────────────────────────────────
+
+    use crate::ansi_components::csi::MAX_CSI_BYTES;
+
+    /// The open CSI sub-parser, if the parser is in the CSI state.
+    fn open_csi(p: &FreminalAnsiParser) -> &AnsiCsiParser {
+        let ParserInner::Csi(csi) = &p.inner else {
+            panic!("expected an open CSI, got {:?}", p.inner);
+        };
+        csi
+    }
+
+    #[test]
+    fn an_open_csi_stops_growing_its_buffers_at_the_cap() {
+        let mut p = FreminalAnsiParser::new();
+        let mut input = b"\x1b[".to_vec();
+        input.extend(std::iter::repeat_n(b'1', 8 * MAX_CSI_BYTES));
+        assert_eq!(p.push(&input), vec![]);
+        let csi = open_csi(&p);
+        assert!(csi.sequence.len() <= MAX_CSI_BYTES);
+        assert!(csi.params.len() <= MAX_CSI_BYTES);
+        assert_eq!(csi.sequence.capacity(), 0, "buffers are released");
+        assert_eq!(csi.params.capacity(), 0, "buffers are released");
+        assert_eq!(csi.intermediates.capacity(), 0, "buffers are released");
+    }
+
+    #[test]
+    fn an_overlong_csi_is_discarded_through_its_final_byte_and_text_follows() {
+        for (name, lead, body) in [
+            ("parameters", &b""[..], &b"1;"[..]),
+            ("digits", b"", b"1"),
+            ("intermediates", b"1", b" "),
+        ] {
+            let mut p = FreminalAnsiParser::new();
+            let mut input = b"\x1b[".to_vec();
+            input.extend_from_slice(lead);
+            while input.len() < 2 * MAX_CSI_BYTES {
+                input.extend_from_slice(body);
+            }
+            input.extend_from_slice(b"HText");
+            assert_eq!(p.push(&input), vec![data("Text")], "{name}");
+            assert_eq!(p.inner, ParserInner::Empty, "{name}");
+            // The spent buffers were released, and the next CSI works.
+            assert_eq!(p.csi_buffers.max_capacity(), 0, "{name}");
+            assert_eq!(p.push(b"\x1b[5;10H"), fresh_output(b"\x1b[5;10H"), "{name}");
+            assert_csi_buffers_retained(&p, name);
+        }
+    }
+
+    #[test]
+    fn an_overlong_csi_is_discarded_across_reads() {
+        let mut p = FreminalAnsiParser::new();
+        let mut first = b"\x1b[".to_vec();
+        first.extend(std::iter::repeat_n(b'1', MAX_CSI_BYTES + 10));
+        assert_eq!(p.push(&first), vec![]);
+        assert_eq!(p.push(&vec![b'2'; 1000]), vec![]);
+        assert_eq!(p.push(b"mText"), vec![data("Text")]);
+    }
+
+    #[test]
+    fn an_overlong_csi_aborted_by_esc_dispatches_nothing() {
+        let mut p = FreminalAnsiParser::new();
+        let mut input = b"\x1b[".to_vec();
+        input.extend(std::iter::repeat_n(b'1', MAX_CSI_BYTES + 10));
+        input.extend_from_slice(b"\x1b[5;10H");
+        assert_eq!(p.push(&input), fresh_output(b"\x1b[5;10H"));
+        assert!(p.csi_buffers.max_capacity() > 0);
+    }
+
+    #[test]
+    fn an_overlong_csi_still_ends_at_a_byte_that_cannot_belong_to_it() {
+        // A parameter byte after an intermediate is invalid, as in a short CSI.
+        let mut p = FreminalAnsiParser::new();
+        let mut input = b"\x1b[".to_vec();
+        input.extend(std::iter::repeat_n(b'1', MAX_CSI_BYTES + 10));
+        input.extend_from_slice(b" 1X");
+        let out = p.push(&input);
+        // The invalid `1` is consumed, as it is in a short sequence.
+        assert_eq!(out, vec![TerminalOutput::Invalid, data("X")]);
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
+    #[test]
+    fn a_csi_exactly_at_the_cap_is_still_dispatched() {
+        let mut p = FreminalAnsiParser::new();
+        // Body: digits then the final `m`: MAX_CSI_BYTES bytes in all.
+        let mut input = b"\x1b[".to_vec();
+        input.extend(std::iter::repeat_n(b'0', MAX_CSI_BYTES - 1));
+        input.push(b'm');
+        let out = p.push(&input);
+        assert!(!out.is_empty(), "an at-cap SGR is dispatched");
+        assert_eq!(p.inner, ParserInner::Empty);
+    }
+
     // -------------------------------------------------------------------------
     // C1 ST, CAN/SUB and ESC inside strings and escape intermediates
     // (Task 147 adversarial review A1-A4)
@@ -3221,6 +3460,57 @@ mod tests {
         );
     }
 
+    /// Under S8C1T a `0x9C` that completes a UTF-8 character (`Ŝ` is `C5 9C`,
+    /// `“` is `E2 80 9C`) is body, not an ST.
+    #[test]
+    fn c1_st_byte_completing_a_utf8_character_is_body_under_s8c1t() {
+        let mut p = eight_bit_parser();
+        assert_eq!(
+            p.push("\x1b]0;\u{15c}\x07X".as_bytes()),
+            vec![title("\u{15c}"), data("X")]
+        );
+        let mut quoted = b"\x9d0;a".to_vec();
+        quoted.extend_from_slice("\u{201c}b\x07X".as_bytes());
+        assert_eq!(p.push(&quoted), vec![title("a\u{201c}b"), data("X")]);
+        assert_eq!(
+            p.push(b"\x90$q\xc5\x9cm\x9cX"),
+            vec![
+                TerminalOutput::DeviceControlString(b"P$q\xc5\x9cm\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+        assert_eq!(
+            p.push(b"\x9fGa\xc5\x9cb\x9cX"),
+            vec![
+                TerminalOutput::ApplicationProgramCommand(b"_Ga\xc5\x9cb\x1b\\".to_vec()),
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn c1_st_byte_completing_a_character_is_body_when_the_read_splits_inside_it() {
+        let mut p = eight_bit_parser();
+        assert_eq!(p.push(b"\x1b]0;\xc5"), vec![]);
+        assert_eq!(p.push(b"\x9c\x07X"), vec![title("\u{15c}"), data("X")]);
+    }
+
+    /// A `0x9C` that completes no character still ends the string: after
+    /// ASCII, after a finished character, after a lead byte that ASCII
+    /// interrupted, and after a stray continuation byte.
+    #[test]
+    fn a_standalone_c1_st_byte_still_ends_a_string_under_s8c1t() {
+        for body in [&b"t"[..], "\u{15c}".as_bytes(), b"\xc5t", b"\x80", b"\xff"] {
+            let mut input = b"\x9d0;".to_vec();
+            input.extend_from_slice(body);
+            input.extend_from_slice(b"\x9cX");
+            let mut p = eight_bit_parser();
+            let out = p.push(&input);
+            assert_eq!(out.last(), Some(&data("X")), "{body:?}: {out:?}");
+            assert_eq!(p.inner, ParserInner::Empty, "{body:?}");
+        }
+    }
+
     #[test]
     fn c1_st_ends_an_overflowed_apc_under_s8c1t_with_no_output() {
         let mut p = eight_bit_parser();
@@ -3317,6 +3607,67 @@ mod tests {
             );
             assert_eq!(p.inner, ParserInner::Empty);
         }
+    }
+
+    /// `ESC - A`, `ESC $ B` and their multi-intermediate forms name sets
+    /// freminal does not have: they end at their final, which is not text.
+    #[test]
+    fn unsupported_set_designators_print_nothing_but_the_text_after_them() {
+        for sequence in [
+            &b"\x1b-AX"[..],
+            b"\x1b.AX",
+            b"\x1b/AX",
+            b"\x1b-%5X",
+            b"\x1b$BX",
+            b"\x1b$(BX",
+            b"\x1b$)CX",
+            b"\x1b$*DX",
+            b"\x1b$+ EX",
+        ] {
+            let mut p = FreminalAnsiParser::new();
+            assert_eq!(
+                p.push(sequence),
+                vec![data("X")],
+                "{:?}",
+                String::from_utf8_lossy(sequence)
+            );
+            assert_eq!(p.inner, ParserInner::Empty);
+        }
+    }
+
+    #[test]
+    fn supported_g0_to_g3_designation_is_unchanged() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(
+            p.push(b"\x1b(0\x1b)B\x1b*A\x1b+0X"),
+            vec![
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G0,
+                    set: CharacterSet::DecSpecialGraphics,
+                },
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G1,
+                    set: CharacterSet::Ascii,
+                },
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G2,
+                    set: CharacterSet::UnitedKingdom,
+                },
+                TerminalOutput::DesignateCharset {
+                    slot: CharsetSlot::G3,
+                    set: CharacterSet::DecSpecialGraphics,
+                },
+                data("X"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unsupported_set_designator_split_across_pushes_is_still_swallowed() {
+        let mut p = FreminalAnsiParser::new();
+        assert_eq!(p.push(b"\x1b$"), vec![]);
+        assert_eq!(p.push(b"("), vec![]);
+        assert_eq!(p.push(b"BX"), vec![data("X")]);
     }
 
     #[test]

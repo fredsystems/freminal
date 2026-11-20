@@ -99,7 +99,7 @@ impl StandardParser {
                     return ParserOutcome::FinishedAtEsc;
                 }
 
-                if is_standard_param(b) || self.is_designator_final(b) {
+                if is_standard_param(b) || self.is_consumed_final(b) {
                     self.params.push(b);
                     self.state = StandardParserState::Finished;
 
@@ -113,7 +113,7 @@ impl StandardParser {
                 // Graphics, Hebrew, Cyrillic, ...), but freminal has none of
                 // those sets: it deliberately recognises and ignores the whole
                 // sequence up to its final byte, leaving the slot unchanged.
-                if self.is_designator() && (0x20..=0x2f).contains(&b) {
+                if self.consumes_through_final() && (0x20..=0x2f).contains(&b) {
                     if self.intermediates.len() < MAX_STORED_INTERMEDIATES {
                         self.intermediates.push(b);
                     }
@@ -130,18 +130,25 @@ impl StandardParser {
         }
     }
 
-    /// Whether the sequence so far is a designator (`ESC ( ) * +`).
-    fn is_designator(&self) -> bool {
+    /// Whether the sequence so far is one freminal consumes whole, through a
+    /// final byte after any number of further intermediates, instead of
+    /// matching it against a table of two-byte sequences: a designator
+    /// (`ESC ( ) * +`, whose supported sets are dispatched, the rest ignored),
+    /// a 96-character designator (`ESC - . /`) or a multi-byte set (`ESC $`).
+    /// None of the last two names a set freminal implements; xterm's tables
+    /// likewise end them at the first byte in 0x30-0x7E (`scs96table`,
+    /// `eigtable`) rather than treating the final as text.
+    fn consumes_through_final(&self) -> bool {
         self.intermediates
             .first()
-            .is_some_and(|i| designated_slot(*i).is_some())
+            .is_some_and(|i| designated_slot(*i).is_some() || is_ignored_designator(*i))
     }
 
-    /// Whether the sequence so far is a designator and `b` is in the range a
-    /// designator's final byte may take. The final need not name a set
+    /// Whether the sequence so far is [`Self::consumes_through_final`] and `b`
+    /// is in the range its final byte may take. The final need not name a set
     /// freminal implements: an unknown one is ignored, not invalid.
-    fn is_designator_final(&self, b: u8) -> bool {
-        self.is_designator() && (0x30..=0x7e).contains(&b)
+    fn is_consumed_final(&self, b: u8) -> bool {
+        self.consumes_through_final() && (0x30..=0x7e).contains(&b)
     }
 
     /// Push a byte into the parser and return the next state
@@ -261,6 +268,17 @@ impl StandardParser {
 
                     ParserOutcome::Finished
                 }
+                // `ESC - A`, `ESC $ B`, `ESC $ ( B`: designators for sets
+                // freminal does not have. Consumed through the final byte,
+                // which is not text.
+                Some(&intermediate) if is_ignored_designator(intermediate) => {
+                    debug!(
+                        "Ignoring charset designator for an unsupported set: {}",
+                        self.trace_str()
+                    );
+
+                    ParserOutcome::Finished
+                }
                 Some(value) => {
                     let value = *value as char;
                     match value {
@@ -313,6 +331,13 @@ const fn designated_slot(intermediate: u8) -> Option<CharsetSlot> {
     }
 }
 
+/// Whether `intermediate` starts a designator for a set freminal has none of:
+/// the 96-character designators `-` `.` `/` (G1-G3) and the multi-byte-set
+/// designator `$`.
+const fn is_ignored_designator(intermediate: u8) -> bool {
+    matches!(intermediate, b'-' | b'.' | b'/' | b'$')
+}
+
 #[must_use]
 pub const fn is_standard_intermediate_final(b: u8) -> bool {
     // 7 8 = > F H N O c l m n o | } ~ are final and we want to enter the finished state
@@ -346,9 +371,12 @@ pub const fn is_standard_intermediate_final(b: u8) -> bool {
 
 #[must_use]
 pub const fn is_standard_intermediate_continue(b: u8) -> bool {
-    // space # % ( ) * + are states where we want to continue and get a Params
+    // space # $ % ( ) * + - . / are states where we want to continue and get a Params
 
-    matches!(b, 0x20 | 0x23 | 0x25 | 0x28 | 0x29 | 0x2a | 0x2b)
+    matches!(
+        b,
+        0x20 | 0x23 | 0x24 | 0x25 | 0x28 | 0x29 | 0x2a | 0x2b | 0x2d | 0x2e | 0x2f
+    )
 }
 
 #[must_use]
@@ -672,6 +700,95 @@ mod tests {
             ParserOutcome::Finished
         ));
         assert_eq!(output, Vec::<TerminalOutput>::new());
+    }
+
+    // ------------------------------------------------------------------
+    // ESC - . / $ — designators for sets freminal does not have (147 PR
+    // review R22): consumed through the final byte, which is not text.
+    // ------------------------------------------------------------------
+
+    const IGNORED_DESIGNATORS: [u8; 4] = *b"-./$";
+
+    #[test]
+    fn an_ignored_designator_is_consumed_through_its_final_and_emits_nothing() {
+        for intermediate in IGNORED_DESIGNATORS {
+            for final_byte in *b"AB0<~" {
+                let (output, result) = feed_standard(intermediate, final_byte);
+                assert!(
+                    matches!(result, ParserOutcome::Finished),
+                    "ESC {} {}: {result:?}",
+                    intermediate as char,
+                    final_byte as char
+                );
+                assert_eq!(output, Vec::<TerminalOutput>::new());
+            }
+        }
+    }
+
+    #[test]
+    fn an_ignored_designator_takes_extra_intermediates_before_its_final() {
+        for intermediate in IGNORED_DESIGNATORS {
+            for extra in [&b"("[..], b")", b"%", b"\"", b"!#", b" "] {
+                let mut parser = StandardParser::new();
+                let mut output = Vec::new();
+                let mut results = vec![parser.standard_parser_inner(intermediate, &mut output)];
+                for &b in extra {
+                    results.push(parser.standard_parser_inner(b, &mut output));
+                }
+                results.push(parser.standard_parser_inner(b'B', &mut output));
+                let (last, before) = results.split_last().unwrap_or_else(|| unreachable!());
+                assert!(
+                    before.iter().all(|r| matches!(r, ParserOutcome::Continue)),
+                    "ESC {} {extra:?}: every intermediate continues: {before:?}",
+                    intermediate as char
+                );
+                assert!(matches!(last, ParserOutcome::Finished), "{last:?}");
+                assert_eq!(output, Vec::<TerminalOutput>::new());
+            }
+        }
+    }
+
+    #[test]
+    fn an_ignored_designator_final_outside_the_final_range_is_invalid() {
+        for intermediate in IGNORED_DESIGNATORS {
+            for final_byte in [0x01, 0x1f, 0x7f] {
+                let (_, result) = feed_standard(intermediate, final_byte);
+                assert!(
+                    matches!(result, ParserOutcome::Invalid(_)),
+                    "ESC {} 0x{final_byte:02x}: {result:?}",
+                    intermediate as char
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn esc_abandons_an_ignored_designator() {
+        for intermediate in IGNORED_DESIGNATORS {
+            let (_, result) = feed_standard(intermediate, 0x1b);
+            assert!(
+                matches!(result, ParserOutcome::FinishedAtEsc),
+                "ESC {} ESC: {result:?}",
+                intermediate as char
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_run_of_intermediates_after_an_ignored_designator_is_not_stored() {
+        for intermediate in IGNORED_DESIGNATORS {
+            let mut parser = StandardParser::new();
+            let mut output = Vec::new();
+            parser.standard_parser_inner(intermediate, &mut output);
+            for _ in 0..100_000 {
+                parser.standard_parser_inner(b'(', &mut output);
+            }
+            assert_eq!(parser.intermediates.len(), MAX_STORED_INTERMEDIATES);
+            assert!(matches!(
+                parser.standard_parser_inner(b'B', &mut output),
+                ParserOutcome::Finished
+            ));
+        }
     }
 
     #[test]

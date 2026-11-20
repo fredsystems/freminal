@@ -600,13 +600,20 @@ impl TerminalState {
                 continue;
             }
             let mut parser = FreminalAnsiParser::new();
-            parser.vt52_mode = wire_modes.vt52_mode;
-            parser.s8c1t_mode = wire_modes.s8c1t_mode;
-            let inner = parser.push(&payload);
-            for output in &inner {
-                trace!(output = %BoundedDisplay(output), "parsed tmux passthrough output");
+            let mut rest = payload.as_slice();
+            loop {
+                parser.vt52_mode = wire_modes.vt52_mode;
+                parser.s8c1t_mode = wire_modes.s8c1t_mode;
+                let (inner, consumed) = parser.push_through_tmux_passthrough(rest);
+                for output in &inner {
+                    trace!(output = %BoundedDisplay(output), "parsed tmux passthrough output");
+                }
+                self.process_outputs_at_depth(&inner, payload_depth, wire_modes);
+                let Some(remaining) = rest.get(consumed..).filter(|r| !r.is_empty()) else {
+                    break;
+                };
+                rest = remaining;
             }
-            self.process_outputs_at_depth(&inner, payload_depth, wire_modes);
         }
     }
 
@@ -754,20 +761,31 @@ impl TerminalState {
             }
         }
 
-        let entry_modes = WireModes {
-            vt52_mode: self.parser.vt52_mode,
-            s8c1t_mode: self.parser.s8c1t_mode,
-        };
-        let parsed = self.parser.push(&incoming);
+        // The read is parsed in pieces, each ending at a `DCS tmux;` wrapper,
+        // so a mode change inside a wrapper's payload governs the bytes after
+        // it, as it does when the read ends at the wrapper.
+        let mut rest = incoming.as_slice();
+        loop {
+            let entry_modes = WireModes {
+                vt52_mode: self.parser.vt52_mode,
+                s8c1t_mode: self.parser.s8c1t_mode,
+            };
+            let (parsed, consumed) = self.parser.push_through_tmux_passthrough(rest);
 
-        for output in &parsed {
-            // Outputs can carry whole DCS/APC/OSC payloads, so bound what is
-            // logged, and bound it while formatting rather than after a full
-            // `to_string()`. `tracing` formats only when the event is enabled.
-            trace!(output = %BoundedDisplay(output), "parsed terminal output");
+            for output in &parsed {
+                // Outputs can carry whole DCS/APC/OSC payloads, so bound what is
+                // logged, and bound it while formatting rather than after a full
+                // `to_string()`. `tracing` formats only when the event is enabled.
+                trace!(output = %BoundedDisplay(output), "parsed terminal output");
+            }
+
+            self.process_parsed_outputs(&parsed, entry_modes);
+
+            let Some(remaining) = rest.get(consumed..).filter(|r| !r.is_empty()) else {
+                break;
+            };
+            rest = remaining;
         }
-
-        self.process_parsed_outputs(&parsed, entry_modes);
 
         // Drain window commands queued by the new handler into the shared vec
         // so that the GUI's existing drain loop in handle_window_manipulation

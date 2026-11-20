@@ -95,7 +95,12 @@ pub fn parse_terminfo_entry(source: &str, term: &str) -> (String, BTreeMap<Strin
         .next()
         .unwrap_or_else(|| panic!("entry {term} not found"));
     let names = header.trim_end().trim_end_matches(',').to_string();
-    let body = lines.collect::<Vec<_>>().join("\n");
+    // Continuation lines are indented; the next non-indented line is the next
+    // entry's header.
+    let body = lines
+        .take_while(|line| line.is_empty() || line.starts_with(char::is_whitespace))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let mut tokens = Vec::new();
     let mut token = String::new();
@@ -164,6 +169,17 @@ mod tests {
         for (name, value) in expected {
             assert_eq!(caps.get(name).map(String::as_str), Some(value), "{name}");
         }
+    }
+
+    #[test]
+    fn an_entry_body_stops_at_the_next_entry_header() {
+        let source = "foo|Foo,\n\tkent=\\EOM,\nbar|Bar,\n\tkent=\\E[M,\n";
+        let (names, caps) = parse_terminfo_entry(source, "foo");
+        assert_eq!(names, "foo|Foo");
+        assert_eq!(caps.len(), 1, "{caps:?}");
+        assert_eq!(caps.get("kent").map(String::as_str), Some("\x1bOM"));
+        let (_, caps) = parse_terminfo_entry(source, "bar");
+        assert_eq!(caps.get("kent").map(String::as_str), Some("\x1b[M"));
     }
 
     #[test]

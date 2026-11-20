@@ -840,11 +840,15 @@ impl TerminalInput {
 
         // Build the codepoint field: `codepoint[:shifted[:base]]`
         let codepoint_field = if report_alt {
-            // Only ASCII codepoints have meaningful shifted forms in US QWERTY.
+            // Only ASCII codepoints have meaningful shifted forms in US QWERTY,
+            // and the protocol reports the shifted key only when Shift is among
+            // the modifiers (the parameter is `1 + modifier bits`, Shift is
+            // bit 0).
             // The `u8::try_from` is guaranteed to succeed under `codepoint <= 127`;
             // the `ok()` + `and_then` pattern avoids any `unwrap`/`expect` in
             // production code per the workspace policy.
-            let shifted = if codepoint <= 127 {
+            let shift_held = modifier_param.is_some_and(|m| m.saturating_sub(1) & 1 != 0);
+            let shifted = if shift_held && codepoint <= 127 {
                 u8::try_from(codepoint).ok().and_then(us_qwerty_shifted)
             } else {
                 None
@@ -929,7 +933,8 @@ impl TerminalInput {
     /// - Flag 2 (report event types): appends `:event-type` to the modifier
     ///   parameter.
     /// - Flag 4 (alternate keys): appends `:shifted-key:base-layout-key` to the
-    ///   codepoint field. Best-effort US QWERTY only.
+    ///   codepoint field, only when Shift is among the modifiers. Best-effort
+    ///   US QWERTY only.
     /// - Flag 16 (associated text): appends `;text-as-codepoints` as a third
     ///   parameter.
     // The KKP encoding path is inherently large: it must cover every variant
@@ -1520,9 +1525,11 @@ mod tests {
 
     #[test]
     fn alt_text_with_all_kitty_flags_reports_alternates_for_ascii_only() {
-        // Flag 4 adds `:shifted:base` for ASCII (US QWERTY); a non-ASCII key
-        // has no shifted form here.
-        assert_alt_text_kkp(31, "b", b"\x1b[98:66:98u");
+        // Flag 4 adds `:shifted:base` for ASCII (US QWERTY) when Shift is part
+        // of the modifiers: not for a plain `b`, which has no shifted form to
+        // report. A non-ASCII key has no shifted form here.
+        assert_alt_text_kkp(31, "b", b"\x1b[98u");
+        assert_alt_text_kkp(31, "B", b"\x1b[98:66:98;2u");
         assert_alt_text_kkp(31, "\u{e9}", b"\x1b[233u");
     }
 
@@ -3562,6 +3569,35 @@ mod tests {
         assert_eq!(encode("a\u{1f600}", 8), b"\x1b[97u\x1b[128512u");
         // Without flag 8 the character is typed as it is.
         assert_eq!(encode("\u{e9}", 1), b"\xc3\xa9");
+    }
+
+    /// The protocol reports the shifted key only when Shift is among the
+    /// modifiers. Each literal below is worked out from the spec, with the
+    /// modifier parameter `1 + shift(1) + alt(2) + ctrl(4)`.
+    #[test]
+    fn build_csi_u_reports_the_shifted_key_only_when_shift_is_held() {
+        let csi_u = |codepoint, modifier| {
+            let payload = TerminalInput::build_csi_u(
+                S8c1t::SevenBit,
+                codepoint,
+                modifier,
+                4,
+                &KeyEventMeta::PRESS,
+            );
+            let TerminalInputPayload::Owned(bytes) = payload else {
+                panic!("expected an owned payload, got {payload:?}");
+            };
+            bytes
+        };
+        // No modifiers, Alt only and Ctrl only: no Shift, no shifted key.
+        assert_eq!(csi_u(98, None), b"\x1b[98u");
+        assert_eq!(csi_u(98, Some(3)), b"\x1b[98;3u");
+        assert_eq!(csi_u(98, Some(5)), b"\x1b[98;5u");
+        assert_eq!(csi_u(49, None), b"\x1b[49u");
+        // Shift, alone or with other modifiers: the shifted key is reported.
+        assert_eq!(csi_u(98, Some(2)), b"\x1b[98:66:98;2u");
+        assert_eq!(csi_u(98, Some(6)), b"\x1b[98:66:98;6u");
+        assert_eq!(csi_u(49, Some(2)), b"\x1b[49:33:49;2u");
     }
 
     /// The `u8::try_from(codepoint)` conversion inside `build_csi_u` is only

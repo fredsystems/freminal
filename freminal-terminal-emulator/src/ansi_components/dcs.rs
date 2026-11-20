@@ -160,6 +160,22 @@ impl DcsParser {
         run % 2 == 1
     }
 
+    /// Returns `true` when the stored trailing ESC is not half of a doubled
+    /// `ESC ESC` pair: always in plain DCS, and for an odd run of ESC bytes in
+    /// tmux passthrough.
+    fn trailing_esc_is_unpaired(&self) -> bool {
+        if !self.is_tmux_passthrough() {
+            return true;
+        }
+        let run = self
+            .sequence
+            .iter()
+            .rev()
+            .take_while(|&&c| c == 0x1b)
+            .count();
+        run % 2 == 1
+    }
+
     /// Returns `true` when this parser is accumulating a tmux DCS
     /// passthrough sequence (the sequence buffer starts with `Ptmux;`).
     #[must_use]
@@ -288,8 +304,21 @@ impl DcsParser {
             return ParserOutcome::Finished;
         }
 
-        if self.sequence.last() == Some(&0x1b) {
+        // Only an unpaired trailing ESC is a bare ESC to strip. In tmux
+        // passthrough an even run of ESC bytes is doubled inner data, and the
+        // canonical terminator appended below must see it intact.
+        if self.sequence.last() == Some(&0x1b) && self.trailing_esc_is_unpaired() {
             self.sequence.pop();
+        }
+        if self.sequence.len() > MAX_DCS_BYTES {
+            // A trailing ESC was not counted while it might start the
+            // terminator; as data it is, and the body is over the cap.
+            tracing::warn!(
+                "DCS sequence over the {MAX_DCS_BYTES}-byte cap dropped: total length {} bytes",
+                self.sequence.len()
+            );
+            self.sequence = Vec::new();
+            return ParserOutcome::Finished;
         }
         self.sequence.extend_from_slice(b"\x1b\\");
         output.push(TerminalOutput::DeviceControlString(std::mem::take(
@@ -760,6 +789,42 @@ mod tests {
             output,
             [TerminalOutput::DeviceControlString(b"Pabc\x1b\\".to_vec())]
         );
+    }
+
+    #[test]
+    fn c1_st_keeps_a_doubled_esc_pair_at_the_end_of_a_tmux_body() {
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"tmux;a\x1b\x1b", &mut output);
+        let outcome = parser.terminate_c1_st(&mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        // The pair stays whole, then the canonical terminator: a run of three.
+        assert_eq!(dcs_of(&output), b"Ptmux;a\x1b\x1b\x1b\\");
+
+        // An unpaired trailing ESC (a run of three) is still stripped.
+        let mut parser = DcsParser::new();
+        let mut output = Vec::new();
+        push_all(&mut parser, b"tmux;a\x1b\x1b\x1b", &mut output);
+        parser.terminate_c1_st(&mut output);
+        assert_eq!(dcs_of(&output), b"Ptmux;a\x1b\x1b\x1b\\");
+    }
+
+    #[test]
+    fn c1_st_rechecks_the_cap_once_a_doubled_esc_counts_as_data() {
+        // `MAX - 1` stored bytes plus a doubled pair is `MAX + 1` of body: the
+        // last ESC was uncounted only while it might have started the ST.
+        let mut parser = parser_with_stored_len(b"Ptmux;", MAX_DCS_BYTES - 1);
+        let mut output = Vec::new();
+        push_all(&mut parser, b"\x1b\x1b", &mut output);
+        let outcome = parser.terminate_c1_st(&mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished), "{outcome:?}");
+        assert_eq!(output, []);
+
+        // An unpaired trailing ESC at the same length leaves `MAX` of body.
+        let mut parser = parser_with_stored_len(b"Ptmux;", MAX_DCS_BYTES);
+        parser.dcs_parser_inner(0x1b, &mut output);
+        parser.terminate_c1_st(&mut output);
+        assert_eq!(dcs_of(&output).len(), MAX_DCS_BYTES + 2);
     }
 
     #[test]

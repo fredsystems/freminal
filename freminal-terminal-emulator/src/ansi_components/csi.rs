@@ -18,6 +18,12 @@ pub(crate) enum AnsiCsiParserState {
     Finished(u8),
     Invalid,
     InvalidFinished,
+    /// The sequence went over [`MAX_CSI_BYTES`] while in the parameter bytes;
+    /// its buffers were released and the rest is discarded through its final
+    /// byte.
+    OverflowParams,
+    /// As [`Self::OverflowParams`], after the first intermediate byte.
+    OverflowIntermediates,
 }
 /// Which Control Sequence Introducer began this CSI sequence.
 ///
@@ -43,6 +49,16 @@ impl CsiIntroducer {
         }
     }
 }
+
+/// Maximum size of a CSI sequence's body, in bytes (parameters, intermediates
+/// and final byte, excluding the introducer).
+///
+/// A CSI sequence is short: real ones are well under a kilobyte (xterm keeps
+/// at most 30 parameters). The cap exists because an open sequence otherwise
+/// grows its buffers for as long as the stream sends parameter bytes. One more
+/// byte than this and the buffers are released; the sequence is then discarded
+/// through its final byte (or an aborting ESC) without being dispatched.
+pub const MAX_CSI_BYTES: usize = 64 * 1024;
 
 /// Initial capacity of the parameter buffer.
 const PARAMS_CAPACITY: usize = 8;
@@ -210,8 +226,21 @@ impl AnsiCsiParser {
     /// Will return an error if the parser is in a finished state
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn push(&mut self, b: u8) -> ParserOutcome {
-        if let AnsiCsiParserState::Finished(_) | AnsiCsiParserState::InvalidFinished = &self.state {
-            return ParserOutcome::Invalid("Parser pushed to once finished".to_string());
+        match self.state {
+            AnsiCsiParserState::Finished(_) | AnsiCsiParserState::InvalidFinished => {
+                return ParserOutcome::Invalid("Parser pushed to once finished".to_string());
+            }
+            AnsiCsiParserState::OverflowParams | AnsiCsiParserState::OverflowIntermediates => {
+                return self.push_overflowed(b);
+            }
+            AnsiCsiParserState::Params
+            | AnsiCsiParserState::Intermediates
+            | AnsiCsiParserState::Invalid => {}
+        }
+
+        if self.sequence.len() >= MAX_CSI_BYTES {
+            self.overflow();
+            return self.push_overflowed(b);
         }
 
         self.sequence.push(b);
@@ -258,11 +287,47 @@ impl AnsiCsiParser {
 
                 ParserOutcome::Invalid("Invalid CSI sequence".to_string())
             }
-            AnsiCsiParserState::Finished(_) | AnsiCsiParserState::InvalidFinished => {
+            AnsiCsiParserState::Finished(_)
+            | AnsiCsiParserState::InvalidFinished
+            | AnsiCsiParserState::OverflowParams
+            | AnsiCsiParserState::OverflowIntermediates => {
                 // Guarded by the caller, but surface explicitly as an invalid
                 // outcome rather than panicking if the invariant ever breaks.
                 ParserOutcome::Invalid("CSI parser received byte after termination".to_string())
             }
+        }
+    }
+
+    /// The sequence just went over [`MAX_CSI_BYTES`]: release its buffers and
+    /// switch to discarding. One warning (the cap, never the payload) is
+    /// logged.
+    fn overflow(&mut self) {
+        tracing::warn!("CSI sequence over the {MAX_CSI_BYTES}-byte cap dropped");
+        self.params = Vec::new();
+        self.intermediates = Vec::new();
+        self.sequence = Vec::new();
+        self.state = match self.state {
+            AnsiCsiParserState::Intermediates => AnsiCsiParserState::OverflowIntermediates,
+            _ => AnsiCsiParserState::OverflowParams,
+        };
+    }
+
+    /// Consume one byte of an overflowed sequence, with the same grammar as
+    /// [`Self::push`]: the final byte ends it (with nothing dispatched), and a
+    /// byte that cannot be part of a CSI sequence is invalid.
+    fn push_overflowed(&mut self, b: u8) -> ParserOutcome {
+        let after_intermediate = self.state == AnsiCsiParserState::OverflowIntermediates;
+        if is_csi_terminator(b) {
+            self.state = AnsiCsiParserState::InvalidFinished;
+            ParserOutcome::Finished
+        } else if is_csi_intermediate(b) {
+            self.state = AnsiCsiParserState::OverflowIntermediates;
+            ParserOutcome::Continue
+        } else if is_csi_param(b) && !after_intermediate {
+            ParserOutcome::Continue
+        } else {
+            self.state = AnsiCsiParserState::Invalid;
+            ParserOutcome::Invalid("Invalid CSI sequence".to_string())
         }
     }
 

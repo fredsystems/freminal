@@ -1199,13 +1199,14 @@ fn kkp_flag_2_plus_disambiguate_ctrl_a() {
     );
 }
 
-/// KKP flag 4 + `REPORT_ALL` (12): plain ASCII gets CSI u encoding with
-/// alternate key fields: `CSI 97:65:97 u` (codepoint:shifted:base).
+/// KKP flag 4 + `REPORT_ALL` (12): plain ASCII gets CSI u encoding with no
+/// alternate key fields: the shifted key is reported only when Shift is among
+/// the modifiers, and a plain `a` has none.
 #[test]
 fn kkp_flag_4_plus_report_all_ascii() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ascii(b'a'), 4 | 8),
-        b"\x1b[97:65:97u"
+        b"\x1b[97u"
     );
 }
 
@@ -1348,33 +1349,30 @@ fn kkp_flag_4_uppercase_a() {
     );
 }
 
-/// Flag 4 + flag 8: digit '1' → CSI 49:33:49u
-/// (codepoint 49='1', shifted 33='!', base 49).
+/// Flag 4 + flag 8: digit '1' → CSI 49u (no Shift, so no shifted key).
 #[test]
 fn kkp_flag_4_digit_1() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ascii(b'1'), 4 | 8),
-        b"\x1b[49:33:49u"
+        b"\x1b[49u"
     );
 }
 
-/// Flag 4 + flag 8: semicolon ';' → CSI 59:58:59u
-/// (codepoint 59=';', shifted 58=':', base 59).
+/// Flag 4 + flag 8: semicolon ';' → CSI 59u (no Shift, so no shifted key).
 #[test]
 fn kkp_flag_4_semicolon() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ascii(b';'), 4 | 8),
-        b"\x1b[59:58:59u"
+        b"\x1b[59u"
     );
 }
 
-/// Flag 4 + flag 8: Ctrl+A → CSI 97;5u (no shifted form for Ctrl).
-/// Ctrl+letter codepoint is lowercase letter — same shifted mapping as ASCII.
+/// Flag 4 + flag 8: Ctrl+A → CSI 97;5u (Shift is not held, so no shifted key).
 #[test]
 fn kkp_flag_4_ctrl_a() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ctrl(b'A'), 4 | 8),
-        b"\x1b[97:65:97;5u"
+        b"\x1b[97;5u"
     );
 }
 
@@ -1389,12 +1387,12 @@ fn kkp_flag_4_space_no_shifted() {
     );
 }
 
-/// Flag 4 + flag 1 (no `report_all`): Ctrl+C → CSI 99:67:99;5u.
+/// Flag 4 + flag 1 (no `report_all`): Ctrl+C → CSI 99;5u.
 #[test]
 fn kkp_flag_4_disambiguate_ctrl_c() {
     assert_eq!(
         payload_bytes_kkp(&TerminalInput::Ctrl(b'C'), 1 | 4),
-        b"\x1b[99:67:99;5u"
+        b"\x1b[99;5u"
     );
 }
 
@@ -1478,9 +1476,9 @@ fn kkp_flag_16_multi_char_text() {
 // ===========================================================================
 
 /// All flags (1|2|4|16): Ctrl+A repeat with text "x" → full CSI u encoding.
-/// CSI 97:65:97 ; 5:2 ; 120 u
-///   codepoint=97, shifted=65, base=97, modifier=5 (Ctrl), event=2 (repeat),
-///   text codepoint=120 ('x').
+/// CSI 97 ; 5:2 ; 120 u
+///   codepoint=97, modifier=5 (Ctrl, no Shift so no shifted key), event=2
+///   (repeat), text codepoint=120 ('x').
 #[test]
 fn kkp_all_flags_ctrl_a_repeat_with_text() {
     let meta = KeyEventMeta {
@@ -1489,7 +1487,7 @@ fn kkp_all_flags_ctrl_a_repeat_with_text() {
     };
     assert_eq!(
         payload_bytes_kkp_meta(&TerminalInput::Ctrl(b'A'), 1 | 2 | 4 | 16, &meta),
-        b"\x1b[97:65:97;5:2;120u"
+        b"\x1b[97;5:2;120u"
     );
 }
 
@@ -1522,7 +1520,7 @@ fn kkp_flags_8_4_16_uppercase_a_with_text() {
     );
 }
 
-/// Flags 8|2|4: 'a' repeat, no text → CSI 97:65:97;1:2u.
+/// Flags 8|2|4: 'a' repeat, no text → CSI 97;1:2u.
 #[test]
 fn kkp_flags_8_2_4_repeat_no_text() {
     let meta = KeyEventMeta {
@@ -1531,7 +1529,7 @@ fn kkp_flags_8_2_4_repeat_no_text() {
     };
     assert_eq!(
         payload_bytes_kkp_meta(&TerminalInput::Ascii(b'a'), 8 | 2 | 4, &meta),
-        b"\x1b[97:65:97;1:2u"
+        b"\x1b[97;1:2u"
     );
 }
 
