@@ -11908,6 +11908,19 @@ checking P7 against sudo's own option table (`src/parse_args.c`, `sudo_short_opt
   `infocmp -x` output (comments dropped, `TERMINFO_DIRS` cleared, empty `HOME`); a `cols#81`
   edit was shown to differ. The README's remaining Ghostty comparison sentence was removed.
 
+##### 151.C8 — Standalone `-h` takes a detached host (P10)
+
+CodeRabbit's third pass on PR #588 (2026-11-20): `sudo -h localhost -e f` is an edit, but the
+151.C7 scan treats `localhost` as the command. Confirmed in sudo's `src/parse_args.c`
+(`case 'h'`, `got_host_flag`, `is_envar`): when the previous word is exactly `-h` (a standalone
+word, not grouped such as `-kh` and not attached such as `-hfoo`), sudo takes the next word as
+the remote host if it does not start with `-` and is not an environment assignment (contains
+`=` and starts with neither `/` nor `=`). This refines the 151.C7 `h` rule; everything else in
+151.C7 stands. Tests (all three shells): `-h localhost -e f` is an edit; `-h -e f` stays an
+edit; `-h VAR=1 ls` and `-h ls` get the flag (`ls` is the host there, so no command is found
+before the end: not an edit); `-kh host -e f` gets the flag (grouped: no lookahead, `host` is
+the command); `-hfoo -e f` stays an edit; `-h /a=b -e f` is an edit (`/a=b` is a host).
+
 #### 151 Status notes
 
 - **151.1 (done).** See "151 Audit".
