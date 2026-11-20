@@ -23,7 +23,7 @@ use freminal_common::{
 };
 
 use crate::{
-    buffer::{Buffer, PlaceImageResult, RowStore},
+    buffer::{Buffer, PlaceImageResult},
     cell::Cell,
     image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
     row::Row,
@@ -730,7 +730,8 @@ fn a_parked_row_of_the_wrong_width_trips_the_invariant_check() {
 fn a_parked_row_in_the_wrong_namespace_trips_the_invariant_check() {
     let (mut buf, _) = buffer_with_parked_alternate();
     let parked = buf.parked_alternate.as_mut().unwrap();
-    parked.rows = RowStore::from_rows_at(RowNumber::ZERO, (0..4).map(|_| Row::new(20)));
+    parked.rows =
+        crate::buffer::RowStore::from_rows_at(RowNumber::ZERO, (0..4).map(|_| Row::new(20)));
     parked.image_cell_count = 0;
 
     buf.debug_assert_invariants();

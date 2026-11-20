@@ -8024,6 +8024,9 @@ Stale stub text was corrected at the same time:
   changed: the pre-commit hook's Nix-store markdownlint config disables MD033 and MD060 while
   `.markdownlint-cli2.yaml` does not (the repo config is the stricter of the two and passes
   today), and no GitHub workflow runs `cargo xtask lint`, so the gate is local.
+- **147.32 (done).** `RowStore` is used only by a `#[cfg(debug_assertions)]` test, so the
+  import is gone and that test names `crate::buffer::RowStore`. `cargo bench --no-run --all`
+  emits no warnings (apart from the pre-existing `portable-pty` manifest note).
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
