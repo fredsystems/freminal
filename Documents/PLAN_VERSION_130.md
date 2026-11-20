@@ -7888,6 +7888,58 @@ Stale stub text was corrected at the same time:
   in `DESIGN_DECISIONS.md` and `PLAN_VERSION_090.md` (the code uses `${+name}` and is
   independent) and the `.zshenv` comment that echoed it were corrected. No rewrite needed.
 
+### 147 Adversarial review (2026-11-20)
+
+Three independent reviewers (parser/emulator, buffer/GUI, tooling/docs/plan) reviewed the
+branch diff against each subtask's spec and status note. 37 findings, two major. Every
+finding is fixed on this branch or routed to the task that owns the code.
+
+| ID  | Severity | Subtask   | Finding (short)                                                                | Disposition                        |
+| --- | -------- | --------- | ------------------------------------------------------------------------------ | ---------------------------------- |
+| A1  | major    | 147.8     | C1 ST (0x9C) does not end OSC/DCS/APC under S8C1T, though the docs say it does | fix (implement)                    |
+| A2  | minor    | 147.8     | CAN/SUB do not cancel DCS/APC                                                  | fix (implement, as xterm)          |
+| A3  | minor    | 147.8/20  | ESC inside an ESC-intermediate sequence does not restart the escape            | fix                                |
+| A4  | minor    | 147.20    | a designator final after a second intermediate prints as text                  | fix (swallow)                      |
+| A5  | minor    | 147.24    | non-ASCII `AltText` under kitty flag 8 is encoded per byte; the test pins it   | fix (per character)                |
+| A6  | minor    | 147.2     | `ris_resets_vt52_mode_within_the_same_push` passes without its fix             | fix                                |
+| A7  | minor    | 147.20    | `ESC % @` / `ESC % G` still `warn!` "not yet implemented"                      | fix (`debug!`)                     |
+| A8  | minor    | 147.17    | `SUPPORTED_CONTROL_CODES.md` contradicts the code                              | fix (with C3)                      |
+| A9  | nit      | 147.C3    | `terminfo_source` panics under the `test-utils` feature                        | accepted: the `test-utils` pattern |
+| A10 | nit      | 147.1     | unknown-mode DECRQM logs `warn!` with a byte vector                            | fix                                |
+| A11 | nit      | 147.24    | `sync_mode_flags` doc list is stale                                            | fix                                |
+| A12 | nit      | 147.5     | application keypad drops modifiers                                             | Task 137                           |
+| A13 | minor    | 147.14    | Windows: no handle-identity check before delete-on-close                       | Task 135                           |
+| B1  | minor    | 147.19    | fixed-origin sixel clears images below its own rows                            | fix                                |
+| B2  | minor    | 147.24    | a bound Alt+letter leaks `ESC letter` through `Event::Text`                    | fix                                |
+| B3  | minor    | 147.19    | new `too_many_arguments` allowance on `place_image_fixed_origin`               | fix (placement struct)             |
+| B4  | nit      | 147.12    | `alternate_reenter` −15.2% is not from the code change                         | fix (note)                         |
+| B5  | nit      | 147.5     | keypad modifier parameter and VT52 `ESC ? x` keypad                            | Task 137, GAPS row                 |
+| B6  | nit      | 147.5     | an over-long, badly wrapped doc line in `input.rs`                             | fix                                |
+| B7  | minor    | 147.10    | `inject_layout_commands` and recording are untested                            | fix                                |
+| B8  | minor    | 147.11    | the `apply_new_config` glue is untested                                        | fix                                |
+| B9  | minor    | 147.27    | opacity < 1 under DECSCNM may tint explicit-background cells                   | investigate, then fix              |
+| B10 | nit      | 147.24    | `modifyOtherKeys` Alt+letter form                                              | Task 137                           |
+| C1  | major    | 147.26    | the gl-pixel-only clippy fails on Windows/macOS CI legs                        | fix                                |
+| C2  | minor    | 147.31    | `check-docs` skips feature-gated modules (30 warnings)                         | fix (`--all-features`)             |
+| C3  | minor    | 147.17    | `SUPPORTED_CONTROL_CODES.md` stale (with A8)                                   | fix                                |
+| C4  | minor    | 147.10    | stale `pty_write_tx` / G1 references in a skill and DESIGN_DECISIONS           | fix                                |
+| C5  | minor    | plan      | 147.24 and 147.9 specs not amended                                             | fix                                |
+| C6  | minor    | config    | three config keys missing from the Nix module                                  | fix                                |
+| C7  | minor    | 147.C4    | shell scripts edited without a version bump; a stale PLAN_090 line             | fix                                |
+| C8  | nit      | plan      | MASTER_PLAN ranges omit 151/152                                                | fix                                |
+| C9  | nit      | plan      | Task 151 has no `Merged` line                                                  | fix                                |
+| C10 | nit      | plan      | MASTER_PLAN prettier drift                                                     | fix                                |
+| C11 | nit      | agents.md | `xtask ci` row and subcommand list                                             | fix                                |
+| C12 | nit      | 147.16    | repo vs pre-commit markdownlint configs differ                                 | fix (document in `agents.md`)      |
+| C13 | nit      | plan      | "Resolved" vs "done" labels                                                    | fix                                |
+| C14 | nit      | 147.26    | gl-pixel-only clippy compiles on every leg                                     | fix (with C1)                      |
+
+- **A9 (accepted):** `freminal_common::terminfo_source` exists only for tests in two crates,
+  so it cannot be `cfg(test)`; the `test-utils` feature is the workspace's established form
+  for that (`freminal-notify`, `freminal-windowing`), and no non-test build enables it.
+- **Routed to Task 137:** A12, B5, B10 (keypad modifier parameter, VT52 `ESC ? x` keypad,
+  `modifyOtherKeys` Alt+letter). **Routed to Task 135:** A13.
+
 ### 147 Status notes
 
 - **147.1 (done).** `Mode::UnknownQuery { namespace, params }` reuses `ModeNamespace`; the
@@ -11478,6 +11530,11 @@ the audit:
 file is deleted when the read fails after the open (over the size cap, read error). Today
 Windows deletes it (delete-on-close is requested at open) and unix keeps it. Align both.
 
+**Routed from the Task 147 review (2026-11-20), A13.** On Windows, the delete-on-close open
+has no check that the opened object is the canonicalised file (unix binds `(dev, ino)`); a
+path swapped for a reparse point between `canonicalize` and the open could be deleted. The
+std file-ID accessors are unstable; decide together with the read-failure question above.
+
 ### Task 136 — Graphics Placement Model & Z-Layers (stub, v0.13.1)
 
 **Goal.** Give kitty placements a first-class model, independent of text cells, so that
@@ -11603,6 +11660,11 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 - (a) vs (b) above.
 - Ctrl+`-` maps to 0x1F (xterm) or `-` (kitty spec).
 - Shipping CapsLock/NumLock/ScrollLock key events under flag 8 without the lock bits.
+
+**Routed from the Task 147 review (2026-11-20).** A12/B5: the application keypad sends
+`SS3 <final>` with no modifier parameter (xterm adds one, `input.c:1394-1396`), and VT52
+keypad keys need `ESC ? <final>` (`input.c:855-859`). B10: under `modifyOtherKeys`, xterm sends
+some Alt+letter combinations as `CSI 27 ; mod ; code ~`; freminal always uses the ESC prefix.
 
 ### Task 152 — macOS Option as Alt & Per-Side Alt (stub, v0.13.1)
 
