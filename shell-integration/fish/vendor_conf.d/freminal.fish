@@ -90,6 +90,28 @@ if __freminal_should_init
     # because sudo refuses `--preserve-env` with an edit.  This is freminal's
     # own implementation, written from sudo(8)'s option syntax.
     if contains -- sudo (string split -- , "$FREMINAL_SHELL_FEATURES"); and test -n "$TERMINFO"; and not functions -q sudo
+        # Prints the full name of a long sudo option (given without the leading
+        # dashes) the way sudo resolves it: an exact name wins, otherwise a prefix
+        # of exactly one name.  Prints nothing for an unknown or ambiguous one.
+        function __freminal_sudo_long_name
+            test -n "$argv[1]"; or return 0
+            set -l length (string length -- "$argv[1]")
+            set -l matches
+            for candidate in askpass auth-type background bell chdir chroot close-from command-timeout edit group help host list login login-class no-update non-interactive other-user preserve-env preserve-groups prompt remove-timestamp reset-timestamp role set-home shell stdin type user validate version
+                if test "$candidate" = "$argv[1]"
+                    echo $candidate
+                    return 0
+                end
+                set -l head (string sub --length $length -- $candidate)
+                if test "$head" = "$argv[1]"
+                    set -a matches $candidate
+                end
+            end
+            if test (count $matches) -eq 1
+                echo $matches[1]
+            end
+        end
+
         # Succeeds when the sudo arguments request an edit before the command word.
         function __freminal_sudo_is_edit
             set -l takes_value no
@@ -101,11 +123,18 @@ if __freminal_should_init
                 switch $word
                     case --
                         return 1
-                    case --edit
-                        return 0
-                    case --chdir --chroot --close-from --group --host --prompt --role --type --command-timeout --other-user --user
-                        set takes_value yes
                     case '--*'
+                        set -l name (string replace -r -- '^--([^=]*).*' '$1' "$word")
+                        set -l long (__freminal_sudo_long_name "$name")
+                        switch "$long"
+                            case edit
+                                return 0
+                            case auth-type chdir chroot close-from command-timeout group host login-class other-user prompt role type user
+                                # Takes its value from the next word unless given as --name=value.
+                                if not string match -q -- '*=*' "$word"
+                                    set takes_value yes
+                                end
+                        end
                     case -
                         return 1
                     case '-*'
@@ -116,10 +145,14 @@ if __freminal_should_init
                             switch $letter
                                 case e
                                     return 0
-                                case C D g h p R r T t U u
+                                case a C c D g p R r T t U u
+                                    # The value is the rest of the word, or the next word.
                                     if test -z "$rest"
                                         set takes_value yes
                                     end
+                                    break
+                                case h
+                                    # An optional value: only the rest of this word.
                                     break
                             end
                         end

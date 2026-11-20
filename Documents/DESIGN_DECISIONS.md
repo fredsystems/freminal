@@ -1458,8 +1458,9 @@ Installed copies:
 ### Known limits
 
 - **`sudo` drops `TERMINFO`** (its `env_reset`), as it does for kitty and Ghostty, so `sudo`
-  programs only find a system-installed copy. Programs running as root or setuid ignore these
-  variables for the same reason. The `[shell_integration] sudo_preserve_terminfo` toggle
+  programs only find a system-installed copy. Separately, ncurses ignores `TERMINFO` and
+  `TERMINFO_DIRS` in setuid and setgid programs; programs run as root read them unless ncurses
+  was configured with `--disable-root-environ`. The `[shell_integration] sudo_preserve_terminfo` toggle
   (default on, maintainer decision 2026-11-19; Task 151.12) wraps `sudo` in the bundled bash,
   zsh and fish integrations as `sudo --preserve-env=TERMINFO` (except an edit, `-e` /
   `--edit`, which sudo refuses to combine with `--preserve-env`). The wrappers are freminal's

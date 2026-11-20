@@ -84,7 +84,10 @@ Freminal's own implementation, and Freminal turns it on by default.
   options that take a value (`-u root`, `--user root`, `--chdir dir`, and the
   value letter of a grouped word such as `-ku root`) skip that value, while
   `--user=root` and `-uroot` carry it in the same word; `NAME=value` words are
-  skipped. If `-e` or `--edit` turns up before the command, the call is an edit.
+  skipped. Long options may be abbreviated to a unique prefix, as sudo allows
+  (`--ed` is `--edit`, `--us root` is `--user root`). `-h` takes only a value
+  attached to its own word. If `-e` or `--edit` turns up before the command,
+  the call is an edit.
   So `sudo -u root -e file` and `sudo -ke file` are edits, while
   `sudo -ue root file` (a user named `e`) and `sudo cmd -e` are not.
 - **Sudoers caveat:** a sudoers policy that forbids preserving the environment

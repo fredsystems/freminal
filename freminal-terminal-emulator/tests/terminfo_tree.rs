@@ -157,14 +157,46 @@ fn source_compiles_from_stdin_to_the_committed_entry() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let committed = include_bytes!("../../res/terminfo/x/xterm-freminal");
-    let compiled = ["x/xterm-freminal", "78/xterm-freminal"]
-        .iter()
-        .find_map(|rel| std::fs::read(dir.path().join(rel)).ok())
-        .expect("tic wrote the entry in the letter or the hex layout");
-    assert!(
-        compiled == committed,
-        "stdin compile differs from res/terminfo/x/xterm-freminal: res/freminal.ti changed \
+    // The compiled bytes differ between ncurses versions, so compare what the
+    // host's `infocmp` decompiles from each tree instead.
+    let committed_tree = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("res")
+        .join("terminfo");
+    let home = tempfile::tempdir().expect("empty home");
+    let decompile = |tree: &std::path::Path| -> Result<String, String> {
+        let out = Command::new("infocmp")
+            .args(["-x", "xterm-freminal"])
+            .env("TERMINFO", tree)
+            .env_remove("TERMINFO_DIRS")
+            .env("HOME", home.path())
+            .output()
+            .map_err(|err| format!("`infocmp` is not available ({err})"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "infocmp could not read xterm-freminal from {}: {}",
+                tree.display(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    };
+    let compiled = match decompile(dir.path()) {
+        Ok(text) => text,
+        Err(reason) if reason.contains("is not available") => {
+            skip_unless_ci(&format!("{reason}; stdin compile not checked"));
+            return;
+        }
+        Err(reason) => panic!("{reason}"),
+    };
+    let committed = decompile(&committed_tree).unwrap_or_else(|reason| panic!("{reason}"));
+    assert_eq!(
+        compiled, committed,
+        "stdin compile decompiles differently from res/terminfo: res/freminal.ti changed \
          without regenerating the committed tree; run `cargo xtask terminfo`"
     );
 }

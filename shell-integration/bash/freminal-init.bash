@@ -98,9 +98,32 @@ fi
 # passed through unchanged, because sudo refuses `--preserve-env` with an edit.
 # This is freminal's own implementation, written from sudo(8)'s option syntax.
 if [[ ",${FREMINAL_SHELL_FEATURES:-}," == *",sudo,"* && -n "${TERMINFO:-}" ]]; then
+	# Resolves a long-option name (without the leading dashes) the way sudo
+	# does: an exact name wins, otherwise a prefix of exactly one name.  The
+	# full name, or nothing for an unknown or ambiguous one, is left in
+	# __freminal_sudo_long.
+	__freminal_sudo_long_name() {
+		local candidate found=""
+		local matches=0
+		__freminal_sudo_long=""
+		for candidate in askpass auth-type background bell chdir chroot close-from command-timeout edit group help host list login login-class no-update non-interactive other-user preserve-env preserve-groups prompt remove-timestamp reset-timestamp role set-home shell stdin type user validate version; do
+			if [[ "$candidate" == "$1" ]]; then
+				__freminal_sudo_long="$candidate"
+				return 0
+			fi
+			if [[ "$candidate" == "$1"* ]]; then
+				matches=$((matches + 1))
+				found="$candidate"
+			fi
+		done
+		if [[ "$matches" -eq 1 ]]; then
+			__freminal_sudo_long="$found"
+		fi
+	}
+
 	# Succeeds when the sudo arguments request an edit before the command word.
 	__freminal_sudo_is_edit() {
-		local word rest letter
+		local word rest letter name
 		local takes_value="no"
 		for word in "$@"; do
 			if [[ "$takes_value" == "yes" ]]; then
@@ -111,13 +134,22 @@ if [[ ",${FREMINAL_SHELL_FEATURES:-}," == *",sudo,"* && -n "${TERMINFO:-}" ]]; t
 			--)
 				return 1
 				;;
-			--edit)
-				return 0
+			--*)
+				name="${word#--}"
+				name="${name%%=*}"
+				__freminal_sudo_long_name "$name"
+				case "$__freminal_sudo_long" in
+				edit)
+					return 0
+					;;
+				auth-type | chdir | chroot | close-from | command-timeout | group | host | login-class | other-user | prompt | role | type | user)
+					# Takes its value from the next word unless given as --name=value.
+					if [[ "$word" != *=* ]]; then
+						takes_value="yes"
+					fi
+					;;
+				esac
 				;;
-			--chdir | --chroot | --close-from | --group | --host | --prompt | --role | --type | --command-timeout | --other-user | --user)
-				takes_value="yes"
-				;;
-			--*) ;;
 			-?*)
 				rest="${word#-}"
 				while [[ -n "$rest" ]]; do
@@ -127,10 +159,15 @@ if [[ ",${FREMINAL_SHELL_FEATURES:-}," == *",sudo,"* && -n "${TERMINFO:-}" ]]; t
 					e)
 						return 0
 						;;
-					[CDghpRrTtUu])
+					[aCcDgpRrTtUu])
+						# The value is the rest of the word, or the next word.
 						if [[ -z "$rest" ]]; then
 							takes_value="yes"
 						fi
+						break
+						;;
+					h)
+						# An optional value: only the rest of this word.
 						break
 						;;
 					esac

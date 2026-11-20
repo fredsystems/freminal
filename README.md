@@ -187,7 +187,7 @@ Packages that carry the entry system-wide, which also covers `sudo` and tmux ser
 - The `.deb` and `.rpm` packages install it under `/usr/share/terminfo`.
 - Nix: `packages.<system>.terminfo` provides only `share/terminfo`, for servers that do not need Freminal itself. On NixOS, import `freminal.nixosModules.default` and set `programs.freminal.terminfo.enable = true;`.
 
-`sudo` resets its environment, so a program run under `sudo` loses the pane's copy and only finds one of those system-wide copies. To avoid that, Freminal's bash, zsh and fish integrations wrap `sudo` so it keeps `TERMINFO` (`sudo --preserve-env=TERMINFO ...`; `sudo -e` / `--edit` is left alone), as Ghostty's `sudo` shell-integration feature does. Unlike Ghostty, where it is opt-in, this is on by default. A sudoers policy that forbids preserving the environment makes `sudo` refuse the command; if yours does, turn it off:
+`sudo` resets its environment, so a program run under `sudo` loses the pane's copy and only finds one of those system-wide copies. To avoid that, Freminal's bash, zsh and fish integrations wrap `sudo` so it keeps `TERMINFO` (`sudo --preserve-env=TERMINFO ...`; `sudo -e` / `--edit` is left alone). This is on by default. A sudoers policy that forbids preserving the environment makes `sudo` refuse the command; if yours does, turn it off:
 
 ```toml
 [shell_integration]

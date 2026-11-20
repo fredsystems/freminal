@@ -83,6 +83,17 @@ fn quote(arg: &str) -> String {
 /// Source the integration under `shell`, run `sudo <args>` (optionally after
 /// `prelude`), and return the argv the fake `sudo` printed, as `[a] [b] ...`.
 fn run_sudo(shell: TestShell, env: &Env<'_>, prelude: &str, args: &[&str]) -> String {
+    run_sudo_after(shell, env, prelude, "", args)
+}
+
+/// As [`run_sudo`], with `postlude` run after sourcing and before `sudo`.
+fn run_sudo_after(
+    shell: TestShell,
+    env: &Env<'_>,
+    prelude: &str,
+    postlude: &str,
+    args: &[&str],
+) -> String {
     let tmp = tempfile::tempdir().expect("tempdir");
     let resources = tmp.path().join("resources");
     assert!(!sync_to_disk(&resources).has_errors());
@@ -114,7 +125,10 @@ fn run_sudo(shell: TestShell, env: &Env<'_>, prelude: &str, args: &[&str]) -> St
     } else {
         format!("source {}", quote(&script.display().to_string()))
     };
-    let command = format!("{prelude}\n{source}\nsudo {}", quoted_args.join(" "));
+    let command = format!(
+        "{prelude}\n{source}\n{postlude}\nsudo {}",
+        quoted_args.join(" ")
+    );
 
     let mut cmd = Command::new(shell.program());
     match shell {
@@ -178,6 +192,26 @@ fn preserved(rest: &str) -> String {
     format!("{PRESERVED} {rest}")
 }
 
+/// The scan must not depend on zsh options that change string subscripts.
+#[test]
+fn zsh_scan_is_independent_of_ksh_arrays() {
+    let shell = TestShell::Zsh;
+    if !shell.is_installed() {
+        eprintln!("SKIP: zsh is not installed");
+        return;
+    }
+    let ksh = |args: &[&str]| run_sudo_after(shell, &SUDO_ON, "", "setopt KSH_ARRAYS", args);
+    assert_eq!(ksh(&["-ke", "f"]), "[-ke] [f]");
+    assert_eq!(ksh(&["-u", "root", "-e", "f"]), "[-u] [root] [-e] [f]");
+    assert_eq!(ksh(&["--ed", "f"]), "[--ed] [f]");
+    assert_eq!(ksh(&["-ue", "root", "f"]), preserved("[-ue] [root] [f]"));
+    assert_eq!(
+        ksh(&["--us", "root", "ls"]),
+        preserved("[--us] [root] [ls]")
+    );
+    assert_eq!(ksh(&["ls"]), preserved("[ls]"));
+}
+
 /// `sudo <args>` with the whole-argv expectation: the flag is added, or not.
 fn expect_argv(shell: TestShell, args: &[&str], flag_added: bool) {
     let rest = args
@@ -195,7 +229,7 @@ fn expect_argv(shell: TestShell, args: &[&str], flag_added: bool) {
 
 #[test]
 fn commands_get_preserve_env() {
-    let cases: [&[&str]; 14] = [
+    let cases: [&[&str]; 20] = [
         &["ls"],
         &["ls", "-l", "/tmp"],
         &["-u", "root", "ls"],
@@ -214,6 +248,17 @@ fn commands_get_preserve_env() {
         &["-u", "-e", "ls"],
         &["-g", "wheel", "VAR=1", "ls"],
         &["-n", "ls"],
+        // `h` takes its value only from the rest of its own word.
+        &["-hfoo", "ls"],
+        // `--login` is an exact name even though it prefixes `login-class`.
+        &["--login", "ls"],
+        // Ambiguous prefix: unknown, takes no value.
+        &["--re", "ls"],
+        // `--preserve-env` takes a value only with `=`.
+        &["--preserve-env", "ls"],
+        &["--preserve-env=X", "ls"],
+        // `-a` requires a value, which is not mistaken for the command.
+        &["-a", "x", "ls"],
     ];
     for_each_shell(|shell| {
         for args in cases {
@@ -224,7 +269,7 @@ fn commands_get_preserve_env() {
 
 #[test]
 fn edit_invocations_are_left_unchanged() {
-    let cases: [&[&str]; 12] = [
+    let cases: [&[&str]; 22] = [
         &["-e", "f"],
         &["--edit", "f"],
         &["-u", "root", "-e", "f"],
@@ -237,6 +282,18 @@ fn edit_invocations_are_left_unchanged() {
         &["-ku", "root", "--edit", "f"],
         &["--chdir", "/tmp", "--edit", "f"],
         &["-e", "-u", "root", "f"],
+        // Unique long-option prefixes.
+        &["--ed", "f"],
+        &["--edi", "f"],
+        &["--us", "root", "-e", "f"],
+        &["--ho", "h", "--edit", "f"],
+        &["--login-c", "c", "-e", "f"],
+        // Value-required options consume the next word, `h` does not.
+        &["-h", "-e", "f"],
+        &["-a", "x", "-e", "f"],
+        &["-c", "cls", "-e", "f"],
+        &["--auth-type", "x", "-e", "f"],
+        &["--login-class", "c", "-e", "f"],
     ];
     for_each_shell(|shell| {
         for args in cases {

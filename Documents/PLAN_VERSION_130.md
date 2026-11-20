@@ -11900,6 +11900,13 @@ checking P7 against sudo's own option table (`src/parse_args.c`, `sudo_short_opt
   stdin-compiled entry against `infocmp -x` of the committed tree (both read with the host's
   `infocmp`, `TERMINFO` pointed at each tree; header lines naming the file are dropped).
   Byte-equality of the committed tree with the archive stays.
+- **Status: done (2026-11-20).** Scan rewritten to the P7 rules in all three shells (a long-name
+  list and a `__freminal_sudo_long_name` prefix helper each), clean-room attested again. zsh
+  helpers start with `emulate -L zsh`; `zsh_scan_is_independent_of_ksh_arrays` was shown to
+  fail without it. Sixteen new cross-shell cases (`--ed`, `-h -e`, `-a`/`-c`, abbreviated
+  value options, `--login` exact, ambiguous `--re`). The stdin-compile test compares
+  `infocmp -x` output (comments dropped, `TERMINFO_DIRS` cleared, empty `HOME`); a `cols#81`
+  edit was shown to differ. The README's remaining Ghostty comparison sentence was removed.
 
 #### 151 Status notes
 

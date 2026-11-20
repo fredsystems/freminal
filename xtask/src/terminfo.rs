@@ -54,8 +54,9 @@ fn tree_paths() -> Result<Vec<PathBuf>> {
 /// to change leaves the git working tree untouched.
 ///
 /// The committed bytes are whatever the host's `tic` produced, and they can
-/// differ between ncurses versions.  The tests check tree/tar consistency and
-/// `res/freminal.ti` against `tic` on the same host, not a fixed byte image.
+/// differ between ncurses versions.  The tests check tree/tar byte consistency, and
+/// compare `infocmp -x` of the committed tree with `infocmp -x` of a fresh
+/// stdin compile of `res/freminal.ti` on the same host, not a fixed byte image.
 ///
 /// `tic -x` compiles into a temporary directory; the compiled bytes of each
 /// entry are then written to the four paths of [`tree_paths`] (identical bytes
