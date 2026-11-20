@@ -13,6 +13,16 @@
 
 use freminal_common::base64::{Base64Error, StreamDecoder, StreamPosition};
 
+/// Most bytes a pending partial base64 quantum can flush at the end of a stream.
+const MAX_QUANTUM_FLUSH_BYTES: usize = 2;
+
+/// Upper bound on the bytes decoding `chunk_len` base64 characters can emit,
+/// counting a partial quantum carried over from an earlier chunk (at most 3
+/// characters, each emitting at most 3/4 of a byte).
+const fn max_decoded_len(chunk_len: usize) -> usize {
+    chunk_len.saturating_add(3).saturating_mul(3) / 4
+}
+
 /// Size caps applied by a [`BoundedChunkAssembler`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkLimits {
@@ -61,8 +71,9 @@ pub enum ChunkError {
 /// [`push`](Self::push) and [`finish`](Self::finish) returns the same error.
 /// Abandoning a transfer is the owner's job: it drops the assembler.
 ///
-/// The total cap bounds the *length* of the assembled data, not its allocation:
-/// `Vec` growth can transiently reserve up to about twice the total cap.
+/// The total cap bounds both the length and the allocation of the assembled
+/// data: growth is reserved explicitly and clamped to the total cap, so the
+/// buffer's capacity never exceeds [`ChunkLimits::max_total_bytes`].
 #[derive(Debug)]
 pub struct BoundedChunkAssembler {
     /// The caps this assembler enforces.
@@ -138,14 +149,11 @@ impl BoundedChunkAssembler {
         if let Some(err) = self.failure {
             return Err(err);
         }
-        self.decoder
-            .finish(&mut self.data)
+        let mut flushed = Vec::with_capacity(MAX_QUANTUM_FLUSH_BYTES);
+        std::mem::take(&mut self.decoder)
+            .finish(&mut flushed)
             .map_err(ChunkError::from)?;
-        if self.data.len() > self.limits.max_total_bytes {
-            return Err(ChunkError::TotalTooLarge {
-                max: self.limits.max_total_bytes,
-            });
-        }
+        self.append_within_cap(&flushed)?;
         Ok(self.data)
     }
 
@@ -169,21 +177,35 @@ impl BoundedChunkAssembler {
                 // Any padding slot still open on the base64 stream must not
                 // outlive the raw bytes that now sit between it and later input.
                 self.decoder = StreamDecoder::new();
-                if self.data.len().saturating_add(chunk.len()) > self.limits.max_total_bytes {
-                    return Err(self.total_too_large());
-                }
-                self.data.extend_from_slice(chunk);
+                self.append_within_cap(chunk)?;
             }
             ChunkEncoding::Base64 => {
-                // The chunk is at most `max_chunk_bytes` long, so decoding it
-                // overshoots the total cap by a bounded amount before the check.
                 self.base64_fed = self.base64_fed.saturating_add(chunk.len());
-                self.decoder.feed(chunk, &mut self.data)?;
-                if self.data.len() > self.limits.max_total_bytes {
-                    return Err(self.total_too_large());
-                }
+                // Decode into a scratch buffer sized for the worst case, so a
+                // chunk that would overshoot the total cap is rejected before
+                // it can grow the assembled buffer past the cap.
+                let mut decoded = Vec::with_capacity(max_decoded_len(chunk.len()));
+                self.decoder.feed(chunk, &mut decoded)?;
+                self.append_within_cap(&decoded)?;
             }
         }
+        Ok(())
+    }
+
+    /// Append `bytes`, reserving capacity that never exceeds the total cap.
+    ///
+    /// Growth doubles (amortised O(1) appends) but is clamped to the cap.
+    fn append_within_cap(&mut self, bytes: &[u8]) -> Result<(), ChunkError> {
+        let max = self.limits.max_total_bytes;
+        let needed = self.data.len().saturating_add(bytes.len());
+        if needed > max {
+            return Err(self.total_too_large());
+        }
+        if needed > self.data.capacity() {
+            let target = needed.max(self.data.capacity().saturating_mul(2).min(max));
+            self.data.reserve_exact(target - self.data.len());
+        }
+        self.data.extend_from_slice(bytes);
         Ok(())
     }
 
@@ -464,5 +486,82 @@ mod tests {
             ChunkError::Base64(Base64Error::InvalidLength { len: 5 }).to_string(),
             "invalid base64 length 5"
         );
+    }
+
+    const SMALL_CAP: ChunkLimits = ChunkLimits {
+        max_chunk_bytes: 7,
+        max_total_bytes: 100,
+    };
+
+    #[test]
+    fn raw_growth_never_reserves_past_the_total_cap() {
+        let mut a = BoundedChunkAssembler::new(SMALL_CAP);
+        for _ in 0..14 {
+            a.push(&[0xAB; 7], ChunkEncoding::Raw).unwrap();
+            assert!(a.capacity() <= SMALL_CAP.max_total_bytes);
+            assert!(a.capacity() >= a.len());
+        }
+        assert_eq!(a.len(), 98);
+        assert_eq!(a.capacity(), 100);
+        // The next chunk would overshoot; it is rejected without growing.
+        assert!(a.push(&[0; 7], ChunkEncoding::Raw).is_err());
+        assert_eq!(a.capacity(), 0);
+    }
+
+    #[test]
+    fn base64_growth_never_reserves_past_the_total_cap() {
+        let mut a = BoundedChunkAssembler::new(ChunkLimits {
+            max_chunk_bytes: 8,
+            max_total_bytes: 100,
+        });
+        // 8 base64 characters decode to 6 bytes.
+        for _ in 0..16 {
+            a.push(b"YWJjZGVm", ChunkEncoding::Base64).unwrap();
+            assert!(a.capacity() <= 100);
+        }
+        assert_eq!(a.len(), 96);
+        // 96 + 6 > 100: rejected, and the buffer is released, not grown.
+        assert_eq!(
+            a.push(b"YWJjZGVm", ChunkEncoding::Base64),
+            Err(ChunkError::TotalTooLarge { max: 100 })
+        );
+        assert_eq!(a.capacity(), 0);
+    }
+
+    #[test]
+    fn finish_flush_stays_within_the_cap_without_growing_past_it() {
+        let mut a = BoundedChunkAssembler::new(ChunkLimits {
+            max_chunk_bytes: 8,
+            max_total_bytes: 7,
+        });
+        a.push(b"YWJjZGVm", ChunkEncoding::Base64).unwrap();
+        a.push(b"Zw", ChunkEncoding::Base64).unwrap();
+        assert!(a.capacity() <= 7);
+        assert_eq!(a.finish().unwrap(), b"abcdefg");
+    }
+
+    #[test]
+    fn finish_flush_over_the_cap_is_rejected() {
+        let mut a = BoundedChunkAssembler::new(ChunkLimits {
+            max_chunk_bytes: 8,
+            max_total_bytes: 6,
+        });
+        a.push(b"YWJjZGVm", ChunkEncoding::Base64).unwrap();
+        a.push(b"Zw", ChunkEncoding::Base64).unwrap();
+        assert_eq!(a.finish(), Err(ChunkError::TotalTooLarge { max: 6 }));
+    }
+
+    #[test]
+    fn max_decoded_len_bounds_every_decode() {
+        for n in 0..64 {
+            for pending in 0..4_usize {
+                let mut decoder = StreamDecoder::new();
+                let mut sink = Vec::new();
+                decoder.feed(&b"AAAA"[..pending], &mut sink).unwrap();
+                sink.clear();
+                decoder.feed(&vec![b'A'; n], &mut sink).unwrap();
+                assert!(sink.len() <= max_decoded_len(n), "n={n} pending={pending}");
+            }
+        }
     }
 }

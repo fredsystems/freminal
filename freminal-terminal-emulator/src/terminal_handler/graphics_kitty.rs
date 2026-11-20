@@ -1423,7 +1423,7 @@ impl TerminalHandler {
 
         // Look up the previously transmitted image.
         let Some(stored_image) = self.buffer.image_store().get(id).cloned() else {
-            tracing::warn!(
+            tracing::debug!(
                 "Kitty graphics: a=p for unknown image id={image_id} \
                  (store has {} images)",
                 self.buffer.image_store().len(),
@@ -10218,7 +10218,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_put_unknown_id_logs_a_bounded_message() {
+    fn kitty_put_unknown_id_logs_a_bounded_debug_message() {
         use crate::log_capture::{capture, warnings};
 
         let (mut handler, _rx) = kitty_handler();
@@ -10238,14 +10238,26 @@ mod tests {
             });
         });
 
+        // The client already gets ENOENT on the wire, so a client probing an
+        // unknown id every frame must not fill the log above debug level.
         let warns = warnings(&events);
-        assert_eq!(warns.len(), 1, "exactly one warn: {warns:?}");
-        let warn = &warns[0].1;
-        assert!(warn.contains("9999"), "warn names the requested id: {warn}");
-        assert!(warn.contains("20"), "warn carries the store size: {warn}");
+        assert!(warns.is_empty(), "unknown-id a=p must not warn: {warns:?}");
+        let summary = events
+            .iter()
+            .find(|(level, text)| *level == tracing::Level::DEBUG && text.contains("unknown"))
+            .map(|(_, text)| text.as_str())
+            .expect("a debug line reports the unknown id");
         assert!(
-            !warn.contains('[') && !warn.contains("stored image ids"),
-            "warn must not list the stored ids: {warn}"
+            summary.contains("9999"),
+            "debug names the requested id: {summary}"
+        );
+        assert!(
+            summary.contains("20"),
+            "debug carries the store size: {summary}"
+        );
+        assert!(
+            !summary.contains('[') && !summary.contains("stored image ids"),
+            "summary must not list the stored ids: {summary}"
         );
 
         let debug = events

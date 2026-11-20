@@ -7990,6 +7990,11 @@ Stale stub text was corrected at the same time:
   on resize", two 125.C6 reflow tests) were rewritten to the 147.18 semantics.
   `buffer_resize` / `reflow_full_depth`: within noise (a back-to-back rerun; the first run's
   baseline was taken under load).
+- **147.13 (done).** `BoundedChunkAssembler` grows through `append_within_cap`: the cap is
+  checked first, then capacity doubles clamped to the cap (`reserve_exact`). Base64 chunks
+  decode into a scratch buffer bounded by `max_decoded_len` and are checked before they are
+  appended; `finish()` flushes the final quantum the same way. Small-cap tests pin capacity
+  `<=` cap for raw, base64 and the flush. The unknown-id `a=p` log is `debug!`.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
