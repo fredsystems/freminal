@@ -8016,6 +8016,14 @@ Stale stub text was corrected at the same time:
   against kitty's source and aligns both. The orchestrator also gated
   `FreminalGui::broadcast_host_capabilities` to the daemon platforms: 147.11 left the
   daemon glue as its only caller, which `check-windows` flagged as dead code.
+- **147.16 (done).** `lint_markdown` also excludes `.direnv`, `**/.direnv` and
+  `**/node_modules` (`.opencode/node_modules` was a second noise source), and `lint()` no
+  longer swallows its failure. With that glob markdownlint-cli2 lints the 62 tracked `.md`
+  files with 0 issues: the ~550 MD060/MD033 errors cited in 126.C1 had already been cleared,
+  so no prettier pass or scoped rule was needed. 126.C1 is closed by this. Noted, not
+  changed: the pre-commit hook's Nix-store markdownlint config disables MD033 and MD060 while
+  `.markdownlint-cli2.yaml` does not (the repo config is the stricter of the two and passes
+  today), and no GitHub workflow runs `cargo xtask lint`, so the gate is local.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

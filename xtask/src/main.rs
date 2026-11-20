@@ -526,16 +526,13 @@ fn coverage() -> Result<()> {
     ])
 }
 
-/// Lint formatting, typos, clippy, and docs (and a soft fail on markdown)
+/// Lint formatting, typos, clippy, docs, and markdown
 fn lint() -> Result<()> {
     lint_clippy()?;
     lint_docs()?;
     lint_format()?;
     lint_typos()?;
-    if let Err(err) = lint_markdown() {
-        tracing::warn!("known issue: markdownlint is currently noisy and can be ignored: {err}");
-    }
-    Ok(())
+    lint_markdown()
 }
 
 /// Run clippy on the project: every workspace package except the vendored
@@ -608,8 +605,21 @@ fn fix_format() -> Result<()> {
 }
 
 /// Lint markdown files using [markdownlint-cli2](https://github.com/DavidAnson/markdownlint-cli2)
+///
+/// The globs exclude build output (`target`), the direnv cache (`.direnv`,
+/// which holds full copies of the flake inputs) and vendored `node_modules`;
+/// none of it is first-party markdown.
 fn lint_markdown() -> Result<()> {
-    cmd!("markdownlint-cli2", "**/*.md", "!target", "!**/target").run_with_trace()?;
+    cmd!(
+        "markdownlint-cli2",
+        "**/*.md",
+        "!target",
+        "!**/target",
+        "!.direnv",
+        "!**/.direnv",
+        "!**/node_modules"
+    )
+    .run_with_trace()?;
 
     Ok(())
 }
