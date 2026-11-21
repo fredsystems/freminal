@@ -23,7 +23,8 @@
 //!
 //! Repaint scheduling (`App::pointer_motion_needs_repaint`) is a
 //! completely separate axis, untouched by this module — see
-//! `Documents/PLAN_124_RENDER_EFFICIENCY.md` 124.3/124.3a/124.3b.
+//! `Documents/DESIGN_DECISIONS.md`, "Damage Model (Task 124)" / "Pointer
+//! motion and PTY mouse reports are separate axes".
 
 use crossbeam_channel::Sender;
 

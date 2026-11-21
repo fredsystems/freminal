@@ -43,7 +43,7 @@ use super::view_state::ViewState;
 /// the oldest entry is dropped each time a new finished-command event arrives.
 /// The cap exists so a long-running shell cannot grow GUI memory without
 /// bound, and matches the per-pane history quota called out in
-/// `Documents/PLAN_VERSION_090.md` Task 72.9.
+/// Task 72.9.
 pub const RECENT_COMMANDS_CAP: usize = 64;
 
 // ── PaneId ───────────────────────────────────────────────────────────

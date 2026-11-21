@@ -283,7 +283,8 @@ fn settle_idle_compaction(buf: &mut Buffer) {
 /// (`freminal/src/gui/pty.rs`): compaction must catch up before compression
 /// has anything eligible to compress, so `compact_idle_scrollback` is always
 /// called first. This is the number the Task 119 "flat + LZ4" plan table
-/// (`Documents/PLAN_VERSION_120.md` ~851-855) is measured against.
+/// (see `Documents/DESIGN_DECISIONS.md`, "Scrollback Memory and Resize Cost
+/// (Tasks 118-120)") is measured against.
 fn settle_idle_compression(buf: &mut Buffer) {
     let _ = buf.compact_idle_scrollback(usize::MAX);
     let _ = buf.compress_idle_scrollback(usize::MAX);
@@ -384,7 +385,8 @@ fn print_report(label: &str, build: impl Fn() -> Buffer) {
     //     window (scrollback stays compressed; only the visible window is
     //     touched, mirroring steady-state rendering). This is the "flat + LZ4"
     //     number from the Task 119 feasibility-spike table
-    //     (`Documents/PLAN_VERSION_120.md` ~851-855) made measurable.
+    //     (see `Documents/DESIGN_DECISIONS.md`, "Scrollback Memory and Resize
+    //     Cost (Tasks 118-120)") made measurable.
     let (compressed_bpl, rss_compressed) = {
         let mut compressed = build();
         settle_idle_compression(&mut compressed);

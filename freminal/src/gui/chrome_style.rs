@@ -10,26 +10,27 @@
 //!
 //! `build_visuals` is a **pure function**: given style geometry and a color
 //! palette it produces a fully-specified `Visuals`.  It does **not** apply
-//! the result to any egui context — that is wired in subtask 112.4.
+//! the result to any egui context — callers (`gui::rendering`, `app_impl`)
+//! apply it via `set_visuals`.
 //!
 //! ## Widget state color scheme
 //!
-//! All colors are derived from the active [`ThemePalette`].  No hues are
-//! hard-coded except for the documented reverse-video white.
+//! All colors come from the active [`ThemePalette`]'s resolved
+//! [`ChromeRole`]s (authored upstream for vetted themes, best-fit or
+//! contrast-derived for raw palettes) — never from guessed ANSI slots, which
+//! produced invisible borders and low-contrast tabs. No hues are hard-coded
+//! except for the documented reverse-video white.
 //!
-//! | State           | `bg_fill` / `weak_bg_fill`               | `bg_stroke` color        | `fg_stroke` color      | `expansion`                    |
-//! |-----------------|------------------------------------------|--------------------------|------------------------|-------------------------------|
-//! | `noninteractive`| `background` (window/panel surface)      | `ansi[0]` (dim border)   | `foreground` (text)    | `0.0`                          |
-//! | `inactive`      | `ansi[0]` (button rest bg)               | `ansi[0]` (dim border)   | `foreground` (text)    | `0.0`                          |
-//! | `hovered`       | `selection_bg` (highlight bg)            | `selection_fg`           | `foreground`           | `widget_hover_expansion`       |
-//! | `active`        | `selection_bg` at 80% alpha (pressed)    | `selection_fg`           | `foreground`           | `widget_hover_expansion`       |
-//! | `open`          | `ansi[8]` (bright-black, lifted bg)      | `foreground`             | `foreground`           | `widget_hover_expansion`       |
+//! | State            | `bg_fill` / `weak_bg_fill`         | `bg_stroke` color | `fg_stroke` color                 | `expansion`              |
+//! |------------------|------------------------------------|-------------------|-----------------------------------|--------------------------|
+//! | `noninteractive` | `ChromeRole::Surface`              | `ChromeRole::Border` | `chrome_text_on(fill)`         | `0.0`                    |
+//! | `inactive`       | `ChromeRole::SurfaceVariant`       | `ChromeRole::Border` | `chrome_text_on(fill)`         | `0.0`                    |
+//! | `hovered`        | `ChromeRole::SurfaceHover`         | `ChromeRole::Border` | `chrome_text_on(fill)`         | `widget_hover_expansion` |
+//! | `active`, `open` | `ChromeRole::Accent`               | `ChromeRole::Border` | `ChromeRole::OnAccent`         | `widget_hover_expansion` |
 //!
-//! `ansi[0]` is the "black" slot in the palette — typically a very dark or
-//! slightly-lifted neutral that reads as a dim border against the background.
-//! `ansi[8]` is the "bright black" slot — slightly lighter than `ansi[0]`,
-//! used for the *open* (combo-box / drop-down) state to visually distinguish
-//! it from the inactive resting state.
+//! `chrome_text_on` picks a legible text color (WCAG AA) against the fill it
+//! is drawn on; `Accent` / `OnAccent` is a designed pair that is legible by
+//! construction.
 
 use conv2::ConvUtil;
 use egui::style::{Selection, WidgetVisuals, Widgets};
@@ -351,7 +352,7 @@ pub fn build_visuals(
 ///
 /// `Spacing` lives on [`egui::Style`], not [`egui::Visuals`], so padding
 /// cannot be returned from [`build_visuals`]; this sibling is applied
-/// alongside `set_visuals` (the per-frame style hook in 112.4, and the gallery
+/// alongside `set_visuals` (the per-frame style hook, and the gallery
 /// example). It bumps button/menu/window/item padding so chrome does not feel
 /// cramped — Modern is more generous than Retro per the profile defaults.
 ///

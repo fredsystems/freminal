@@ -13,12 +13,12 @@
 //!
 //! - [`StyleProfile`] — a named preset (`Modern` or `Retro`) that seeds a
 //!   [`GuiTheme`].
-//! - [`GuiTheme`] — a flat bag of geometry values consumed by subtask 112.3a
-//!   to produce the actual egui `Visuals`.
+//! - [`GuiTheme`] — a flat bag of geometry values consumed by the GUI's
+//!   chrome styling to produce the actual egui `Visuals`.
 //!
-//! The baseline numbers chosen here are **starting-point defaults** that will
-//! be empirically tuned in subtask 112.3a once the values can be evaluated
-//! in a running UI.  Do not treat them as final.
+//! The baseline numbers chosen here are the tuned baselines (locked in
+//! subtask 112.3a); see `Documents/DESIGN_DECISIONS.md`, "UI Chrome Styling
+//! and Bundled Assets (Tasks 111, 112)".
 
 use serde::{Deserialize, Serialize};
 
@@ -30,9 +30,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Each variant provides a [`defaults`](StyleProfile::defaults) method that
 /// returns a [`GuiTheme`] populated with sensible baseline values for that
-/// visual style.  These baselines are **starting-point estimates** — they
-/// will be empirically tuned in subtask 112.3a once the values can be
-/// evaluated in a running UI.
+/// visual style.  These are the tuned baselines locked in subtask 112.3a.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StyleProfile {
@@ -59,9 +57,7 @@ impl Default for StyleProfile {
 impl StyleProfile {
     /// Return the baseline [`GuiTheme`] geometry for this profile.
     ///
-    /// The values here are **starting-point defaults** and will be
-    /// empirically tuned in subtask 112.3a.  Treat them as reasonable
-    /// first guesses, not final decisions.
+    /// The values here are the tuned baselines locked in subtask 112.3a.
     ///
     /// # Modern baseline rationale
     ///
@@ -129,7 +125,7 @@ impl StyleProfile {
 ///
 /// This struct carries the *shape* of the UI — radii, weights, and spacing —
 /// without any dependency on egui or any other GUI crate.  It is consumed by
-/// subtask 112.3a to derive an egui `egui::Visuals` combined with
+/// the GUI's chrome styling to derive an egui `egui::Visuals` combined with
 /// a [`ThemePalette`](crate::themes::ThemePalette) for colors.
 ///
 /// **No color values are stored here.**  Use [`ThemePalette`](crate::themes::ThemePalette)

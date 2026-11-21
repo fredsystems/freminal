@@ -986,7 +986,7 @@ mod present_region_scissor_tests {
 /// Subtask 124.14's own pixel test: the plan's mandated deliverable that a
 /// `Region` frame and a `Full` frame of the same state produce identical
 /// pixels ("124.14"'s "correctness argument that must be verified, not
-/// assumed" in `PLAN_124_RENDER_EFFICIENCY.md`).
+/// assumed").
 ///
 /// Read the module doc above `present_region_scissor_tests` before reading
 /// this: this harness drives [`HeadlessRenderer`] directly and issues no

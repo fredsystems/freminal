@@ -14,7 +14,8 @@ lines**, `central_body` **2,033**, `write_input_to_terminal` grew a
 up cached ad hoc across ~10 `PerWindowState` fields with no name, no
 type and no invariant.
 
-Full case study: `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md`.
+Full case study: `Documents/DESIGN_DECISIONS.md`, "Orchestration
+Extraction (Task 122)".
 Architecture invariants that constrain any answer:
 `freminal-architecture`.
 

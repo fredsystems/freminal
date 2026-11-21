@@ -29,7 +29,8 @@
 //! - A content change survives snapshots the GUI never renders (`row_epochs`
 //!   is level-triggered against the consumer's own baseline, unlike the
 //!   sticky `content_changed` bool it replaced — see Task 124.12 and
-//!   `Documents/PLAN_124_RENDER_EFFICIENCY.md` "The defect, stated once").
+//!   `Documents/DESIGN_DECISIONS.md`, "Damage Model (Task 124)" / "A bool
+//!   cannot cross a many-producers-to-one-consumer boundary").
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -670,7 +671,8 @@ fn extra_rows_change_invalidates_cache() {
 //
 //   cargo test -p freminal-terminal-emulator --test snapshot_build task_113_new_data_resets_extra_rows
 //
-// See Documents/PLAN_VERSION_100.md "Task 113" for the full diagnosis.
+// See Documents/DESIGN_DECISIONS.md "Primary-Buffer Height Grow (Task 113)"
+// for the full diagnosis.
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
 fn task_113_new_data_resets_extra_rows() {
@@ -706,8 +708,9 @@ fn task_113_new_data_resets_extra_rows() {
 // It changes exactly when the rendered content at window row `r` changed
 // since the previous flatten of the window, and — unlike `content_changed` —
 // it is level-triggered rather than edge-triggered: it survives the many
-// snapshots the GUI never renders. See `Documents/PLAN_124_RENDER_EFFICIENCY.md`
-// "The defect, stated once" / "The fix, stated once".
+// snapshots the GUI never renders. See `Documents/DESIGN_DECISIONS.md`,
+// "Damage Model (Task 124)" / "A bool cannot cross a many-producers-to-one-
+// consumer boundary" and "Per-row content epoch".
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Resize `emu` to a small, exact-row-count terminal so tests can target one
@@ -826,7 +829,7 @@ fn a_change_survives_the_snapshots_the_gui_never_renders() {
     // stated once" table and the reason `row_epochs` exists at all. That
     // half was verified empirically when this test was first written (Task
     // 124.11) and is preserved in git history and
-    // `Documents/PLAN_124_RENDER_EFFICIENCY.md`; it is no longer restatable
+    // `Documents/DESIGN_DECISIONS.md` ("Damage Model (Task 124)"); it is no longer restatable
     // here because Task 124.12 deleted the field it exercised. What remains
     // is the surviving half: `row_epochs` must NOT go stale under the exact
     // same conditions that made the bool go stale.

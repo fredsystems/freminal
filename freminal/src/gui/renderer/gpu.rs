@@ -2281,8 +2281,8 @@ pub(super) fn sync_atlas_to_texture(
 /// realistic idle and light-decoration sizes while remaining far below the
 /// bulk uploads (measured at 99,840 bytes for an 80x24 grid) where orphaning
 /// is unambiguously right. It is **not** a measured optimum: see this
-/// subtask's findings block in `PLAN_124_RENDER_EFFICIENCY.md`, which
-/// records that the prize is one zero-byte GL call per gated upload plus an
+/// "GPU buffer orphaning" section of `Documents/DESIGN_DECISIONS.md`
+/// ("Damage Model (Task 124)"), which records that the prize is one zero-byte GL call per gated upload plus an
 /// unmeasured amount of driver allocator churn.
 pub(super) const SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES: usize = 4096;
 

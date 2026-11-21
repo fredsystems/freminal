@@ -12,7 +12,9 @@
 //! [`super`]). A default build does not see this code at all — there is no
 //! per-call branch, no log, no counters, nothing to pay for.
 //!
-//! Task 123, `PLAN_123_GL_MEASUREMENT_HARNESS.md`, subtask 123.2.
+//! Task 123, subtask 123.2; see `Documents/DESIGN_DECISIONS.md`, "GL Call
+//! Boundary and Measurement Harnesses (Task 123)" / "Phase 1: the recording
+//! harness".
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

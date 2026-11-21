@@ -6,28 +6,18 @@ This document tracks features and work items that are **not yet assigned to a ve
 Items here are either deferred pending further design thinking, or are existing tracked tasks from
 the Master Plan that have not been folded into a release.
 
-For scoped, versioned work see:
-
-- `PLAN_VERSION_030.md` — v0.3.0 (Daily Driver)
-- `PLAN_VERSION_040.md` — v0.4.0 (Search & Protocol)
-- `PLAN_VERSION_050.md` — v0.5.0 (Multi-Instance & Visual)
-- `PLAN_VERSION_060.md` — v0.6.0 (Foundation / eframe Replacement)
-- `PLAN_VERSION_070.md` — v0.7.0 (Recording & Layouts)
-- `PLAN_VERSION_080.md` — v0.8.0 (Correctness & Polish — hard gate)
-- `PLAN_VERSION_090.md` — v0.9.0 (Modern Workflow Terminal, stubs)
-- `PLAN_VERSION_100.md` — v0.10.0 (Power-User Toolkit, stubs)
-- `PLAN_VERSION_110.md` — v0.11.0 (Platform Play, stubs)
-- `PLAN_VERSION_120.md` — v0.12.0 (Completeness & Credibility, stubs)
+For scoped, versioned work see the version roadmap in `MASTER_PLAN.md`. Completed versions'
+plan documents are retired; their durable decisions live in `DESIGN_DECISIONS.md`.
 
 ### Promotion Note (post-v0.7.0 audit)
 
 Items B.1, B.2, B.3, B.7, and B.8 below have been **promoted from deferred into scheduled
 versions** as a result of the post-v0.7.0 senior-engineer audit:
 
-- **B.1 (Remote Mux)** and **B.7 (SSH Integration)** → absorbed into **Task 86** in v0.11.0.
-- **B.2 (Command Palette)** → absorbed into **Task 83** in v0.10.0.
-- **B.3 (Quick-Select / Hints)** → absorbed into **Task 82** in v0.10.0.
-- **B.8 (IME / CJK)** → absorbed into **Task 88** in v0.12.0.
+- **B.1 (Remote Mux)** and **B.7 (SSH Integration)** → absorbed into **Task 86** in v0.15.0.
+- **B.2 (Command Palette)** → absorbed into **Task 83** in v0.14.0.
+- **B.3 (Quick-Select / Hints)** → absorbed into **Task 82** in v0.14.0.
+- **B.8 (IME / CJK)** → absorbed into **Task 88** in v0.16.0.
 
 Their entries below are retained for historical context but the source of truth is now the
 respective version plan document.
@@ -261,11 +251,89 @@ interactive-only, and remain `Full`.
 
 ---
 
+### B.12 — Close-Guard and Multi-Pane Follow-ups (from Task 98)
+
+**Severity: Low** | **Reference: Tasks 74, 76, 98 (v0.9.0)**
+
+- "Close Other Panes" button (closes only panes without a running command) on the tab/window
+  close dialog.
+- Optional auto-confirm timer; show the real command text (needs `CommandBlock` to capture it).
+- `[close_guard] guard_app_quit` has no code path (Quit closes only the focused window): remove
+  the option or implement a multi-window quit.
+- Cross-tab/cross-window broadcast with explicit pane selection; notification batching; command
+  history search across panes.
+
+**Scope:** Small to Medium, per item.
+
+---
+
+### B.13 — Chrome UI Font and Menu-Bar Hover-Switch (from Task 112)
+
+**Severity: Low** | **Reference: Task 112 (v0.10.0), subtasks 112.3b and 112.15, never delivered**
+
+- **Chrome font.** egui chrome text uses epaint's built-in proportional font (Ubuntu Light), because
+  `setup_font_files` only overrides `FontFamily::Monospace`. Intended design: a toolkit-agnostic
+  `UiFont` on `GuiTheme` (Modern = proportional, Retro = monospace), mapped to egui families in
+  `fonts.rs`. A proportional face must clear the bundled-font licence gate.
+- **Menu-bar hover-switch.** Clicking one top-level menu then hovering a sibling does not switch:
+  egui's `SubMenuButton` opens on hover only when no menu is open. Re-check on the current egui;
+  otherwise the fix is a custom armed-menu-bar state machine.
+
+**Scope:** Small per item.
+
+---
+
+### B.14 — Render Measurement-Surface Residuals
+
+**Severity: Low** | **Reference: Tasks 123-125**
+
+Each is worth doing only if its trigger fires.
+
+1. **`Gl` facade across the `freminal-windowing` boundary.** The windowing crate calls `glow` directly,
+   so the recording harness omits two calls per `Full` frame and the raw-call guard is blind to that
+   crate. Trigger: a measurement that needs the windowing-layer calls recorded.
+2. **An instrument spanning egui, the app paint callback and the windowing clear.** No test reproduces
+   blend-against-stale at `background_opacity < 1.0` through the full-draw arm, and the full-draw scissor
+   is covered only by structure (`HeadlessRenderer` issues no `glClear` and hardcodes opacity 1.0).
+   Trigger: any change to the paint callbacks or the partial-present clear.
+3. **Promote `gl-pixel.yml` to a required check** after a recorded stability period. Root-cause any
+   flake; never widen the tolerance or add retries.
+4. **Pointer-workload parity.** The Task 125 interactive pointer screen was never run. Run it only if a
+   pointer-cost report arrives.
+
+**Scope:** Small each.
+
+---
+
+### B.15 — Dynamic Scrollback Compaction Pacing
+
+**Severity: Low** | **Reference: Task 118 follow-up (`TODO` in `freminal/src/gui/pty.rs`)**
+
+Idle compaction and compression run at a fixed interval and budget, chosen small so a per-tick
+burst stays cheap on weak hardware. The price is a slow catch-up after a very large dump (about
+25 s to settle 100k lines). A dynamic pacer (larger budget or shorter interval while a large
+backlog exists, decaying once caught up) would give fast catch-up without a large fixed burst.
+**Trigger:** a report of memory staying high after a large dump. Measure first. **Scope:** Small.
+
+---
+
+### B.16 — Reconcile the Two Key-Encoding Functions
+
+**Severity: Low** | **Reference: Task 122.C1**
+
+`control_key` and `egui_key_to_terminal_input` (`freminal/src/gui/terminal/input.rs`) look like
+duplicates and are not (they disagree on `Key::Space`, and only `control_key` has the C0 table).
+`key_encoding_characterisation_tests` pins both across the whole `egui::Key` range, so a
+reconciliation is safe to attempt, but any change must update those tests deliberately. Coordinate
+with Task 137, which owns key identity. **Scope:** Small.
+
+---
+
 ### A.2 — Split Panes
 
 **Status: Subsumed by Task 58 (Built-in Multiplexer) in v0.5.0.**
 
-Task 58 in `PLAN_VERSION_050.md` implements built-in terminal multiplexing with a binary pane
+Task 58 (see `DESIGN_DECISIONS.md`, "Built-in Multiplexer / PaneTree") implements built-in terminal multiplexing with a binary pane
 tree, directional navigation, resize, zoom, and all the functionality described below. See
 Task 58 for the full design.
 
@@ -334,7 +402,7 @@ a project website at `freminal.dev`. Separate repository.
 
 ## Notes
 
-- B.1 (Remote Mux) remains deferred — local muxing is now Task 58 in v0.5.0.
+- B.1 (Remote Mux) remains deferred — local muxing is Task 58 (v0.5.0); remote mux is Task 86.
 - B.2, B.3, B.7, and B.8 are deferred pending design decisions — not rejected.
 - B.9 (Logging Hygiene) was added 2026-05-17 from a `bugs.txt` audit item.
 - A.2 (Split Panes) is subsumed by Task 58 (Built-in Multiplexer) in v0.5.0.

@@ -26,7 +26,8 @@
 //!
 //! When the look is signed off, copy the geometry values back into
 //! [`StyleProfile::defaults`] (in `freminal-common`) and record them in
-//! `PLAN_VERSION_100.md` under "112.3a — locked baselines".
+//! `Documents/DESIGN_DECISIONS.md`, "UI Chrome Styling and Bundled Assets
+//! (Tasks 111, 112)".
 
 use freminal::gui::chrome_style::build_visuals;
 use freminal_common::gui_theme::{GuiTheme, StyleProfile};

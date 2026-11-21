@@ -31,7 +31,8 @@
 //!   Shells that don't emit OSC 133 C fall back to `command_start_row`
 //!   (the pre-fix behaviour: command line is folded with the output).
 //! - Running blocks (`end_row.is_none()`) cannot be folded, matching the
-//!   spec in `PLAN_VERSION_090.md` §72.10.
+//!   spec for Task 72.10 (`Documents/DESIGN_DECISIONS.md`, "Command Blocks,
+//!   Gutters and Fold (Tasks 72, 73)").
 //! - Degenerate ranges where `start > end_row` are dropped.
 //!   They should never occur in well-formed OSC 133 streams; we treat them
 //!   as data corruption and silently ignore them rather than panicking.

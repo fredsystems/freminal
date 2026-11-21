@@ -846,7 +846,7 @@ impl TerminalHandler {
     ///
     /// Table 5-9 also predates these, which freminal resets because the
     /// reference terminals do (the reset table in
-    /// `Documents/PLAN_VERSION_130.md` records each source):
+    /// `Documents/PLAN_VERSION_130_0.md` records each source):
     /// - the cursor style → the configured one
     ///   ([`Self::set_configured_cursor_visual_style`]) (xterm, Ghostty);
     /// - `modifyOtherKeys` → level 0 (xterm, Ghostty, `WezTerm`);

@@ -486,8 +486,9 @@ pub trait App {
     /// uncoupled axes (repaint scheduling vs. this synchronous observation),
     /// not one gating the other. This is what lets an app deliver an
     /// immediate PTY mouse-tracking report on every motion even on a frame
-    /// the repaint gate suppresses (see `Documents/PLAN_124_RENDER_EFFICIENCY.md`
-    /// 124.3/124.3a). `freminal-windowing` itself knows nothing about mouse
+    /// the repaint gate suppresses (see `Documents/DESIGN_DECISIONS.md`,
+    /// "Damage Model (Task 124)" / "Pointer motion and PTY mouse reports are
+    /// separate axes"). `freminal-windowing` itself knows nothing about mouse
     /// reports, PTY encoding, or terminal modes — this hook's only job is
     /// to deliver the raw pointer position and chorded modifiers to the app
     /// synchronously; every downstream decision is the app's.

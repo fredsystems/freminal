@@ -2329,9 +2329,11 @@ fn viewport_framebuffer_geometry(ui: &Ui, terminal_rect: egui::Rect, ppp: f32) -
 ///
 /// Decided before the rebuild body runs, because the body is byte-for-byte
 /// the same either way: [`VertexRebuild::Bounded`] means "full rebuild,
-/// bounded *damage*", never a bounded rebuild. Bounding the vertex upload
-/// itself is Task 125, gated on a fixed-stride relayout that does not exist
-/// yet.
+/// bounded *damage*", never a bounded rebuild. The vertex upload stays
+/// whole-buffer because no instance buffer has a fixed per-row stride; Task
+/// 125 measured a fixed-stride relayout and refuted it (see
+/// `Documents/DESIGN_DECISIONS.md`, "Performance Parity and the `RowStore`
+/// (Task 125)").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FullRebuildDamage {
     /// Content changed only within known bounds -- the frame's
@@ -3615,9 +3617,11 @@ impl FreminalTerminalWidget {
             // report bounded damage, decided BEFORE the (identical either
             // way) rebuild body runs below. `VertexRebuild::Bounded` means
             // "full rebuild, bounded *damage*" (Task 124.14): the rebuild
-            // itself never changes shape or becomes partial -- bounding the
-            // vertex upload itself is Task 125, gated on a fixed-stride
-            // relayout that does not exist yet.
+            // itself never changes shape or becomes partial -- the vertex
+            // upload stays whole-buffer because no instance buffer has a
+            // fixed per-row stride (Task 125 measured a fixed-stride relayout
+            // and refuted it; see `Documents/DESIGN_DECISIONS.md`,
+            // "Performance Parity and the `RowStore` (Task 125)").
             let full_rebuild = decide_full_rebuild(
                 dirty.rebuild,
                 dirty.observations,

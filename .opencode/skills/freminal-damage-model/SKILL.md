@@ -174,7 +174,7 @@ always to report more, never less.
   call-count test cannot catch a violation of this; only the pixel
   harness can.
 
-## 8. Boundary with Task 125 -- do not cross it here
+## 8. The present is bounded, the upload is not
 
 `PaneFrameDamage::Region` / `VertexRebuild::Bounded` bound the **present**
 (clear, draw, present), not the **upload**. A `Bounded` frame still runs a
@@ -182,7 +182,10 @@ full vertex rebuild and `upload_verts` still writes the whole instance
 buffer, because none of `bg_instances`, `fg_instances`, or `deco_verts`
 has a fixed stride per row. Do not claim per-row GPU upload, do not change
 the vertex emission format, and do not touch `upload_verts` from a damage
-change -- that is Task 125, gated on this task's own measurements.
+change. Task 125 measured a fixed-stride relayout and refuted it (no upload
+or GPU gap against WezTerm and Ghostty); its settled design constraints are
+in `Documents/DESIGN_DECISIONS.md`, "Performance Parity and the `RowStore`
+(Task 125)". Reviving it needs new measured evidence.
 
 ## 9. Review checklist
 
@@ -224,8 +227,8 @@ Before landing a damage-model change, confirm:
   the bound anyway "since it's probably fine".
 - You are about to weaken the `Full` fallback (e.g. remove a short-circuit
   in `decide_frame_damage`, or the `age == 0` fallback in windowing).
-- You are about to touch Task 125's territory: `upload_verts`, the vertex
-  emission format, or per-row GPU upload.
+- You are about to change `upload_verts`, the vertex emission format, or
+  introduce per-row GPU upload (refuted by Task 125; needs new evidence).
 - The pixel harness cannot reach the presentation change you are making
   (as 124.23 recorded for its own full-draw-arm fix) -- say so rather than
   claiming coverage you don't have.

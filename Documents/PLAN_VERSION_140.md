@@ -48,8 +48,9 @@ new-tab menu gains a profile picker; a configurable keybinding cycles profiles.
 
 Open questions (decide at activation):
 
-- Relationship to Workspace Env (Task 75) — is a profile a subset of a workspace, or
-  orthogonal?
+- Relationship to layout environment: Task 75 shipped per-pane `env` only. Layout-wide env,
+  per-layout theme/font override, profile binding and per-tab notification filters (out of
+  scope in v0.9.0) land here. Is a profile a subset of a workspace, or orthogonal?
 - Profile inheritance / composition semantics.
 - Migration from current single-config users.
 
@@ -184,6 +185,10 @@ title field exists), `freminal-common/src/config.rs` (toggle — follow
 Open questions (decide at activation): always-on vs only-when-multiple-panes vs
 config-driven; bar height (cells vs pixel band); focused-pane accent; read-only vs
 affordances (close/zoom/rename). Triaged from `bugs.txt` Idea 2 (2026-05-17).
+
+Carried over from v0.9.0 (former Task 75.3, never built): when a pane was spawned with a
+non-empty `extra_env` (from a layout), show a small badge in the pane title bar with a
+tooltip listing the overridden variables.
 
 ---
 

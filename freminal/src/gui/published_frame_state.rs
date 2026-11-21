@@ -113,9 +113,9 @@ impl Default for PanePointerReportInputs {
 /// menu/tab-bar, split-border and toast-pill rects, the cached central
 /// content rect and gutter inset, the staged §3.3 chrome signals, and the
 /// resize-overlay HUD state. They had no collective name or enforced
-/// invariant before this type; see
-/// `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md`'s "122.1 audit result"
-/// section for the line-by-line inventory this type was built from. It is a
+/// invariant before this type; see `Documents/DESIGN_DECISIONS.md`,
+/// "Orchestration Extraction (Task 122)" for the rationale (subtask 122.1's
+/// audit was the line-by-line inventory this type was built from). It is a
 /// **wrapper, not a redesign**: every field keeps its pre-existing type,
 /// including `chrome_head_rects`'s `Option<Vec<egui::Rect>>` — that
 /// `None`/`Some(vec![])` distinction is semantic (no frame has rendered

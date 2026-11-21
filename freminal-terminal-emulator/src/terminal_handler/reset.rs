@@ -9,7 +9,7 @@
 //! field cannot be added without being classified here -- either reset per
 //! kind, or bound to `_` with the reason it survives.  The authoritative row
 //! list, with the xterm / kitty / Ghostty / `WezTerm` sources, is the "131 Reset
-//! table" in `Documents/PLAN_VERSION_130.md`.
+//! table" in `Documents/PLAN_VERSION_130_0.md`.
 //!
 //! `TerminalState` owns a further slice of reset state (DECCKM, DECNKM, the
 //! parser) and resets it itself.

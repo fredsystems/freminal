@@ -22,8 +22,7 @@
 //!
 //! The beep and cwd functions are best-effort: if the platform has no
 //! supported path, they silently no-op (beep) or return `None` (cwd) and emit
-//! a trace log.  See subtasks 71.14 (bell) and 71.16 (CWD) in
-//! `Documents/PLAN_VERSION_080.md`.
+//! a trace log.  See subtasks 71.14 (bell) and 71.16 (CWD).
 
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};

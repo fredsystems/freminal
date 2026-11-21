@@ -13,9 +13,10 @@
 > This is **not** a `PLAN_VERSION_*.md` and these phases are **not** in
 > `MASTER_PLAN.md`. This document is the **decision record** for the
 > egui-rewrite question plus the rewrite-if-chosen plan (Phases 1-5). The
-> **performance remediation work itself** is tracked separately as **Task 121**
-> in `Documents/PLAN_121_PERF_REMEDIATION.md` (summarised in
-> `PLAN_VERSION_120.md`), and it stands regardless of how this decision falls.
+> **performance remediation work itself** was Task 121 (closed; its plan is
+> retired to git history and its lessons are in `DESIGN_DECISIONS.md`, "Render
+> Performance: the Phase 0 / Task 121 outcome"), and it stands regardless of how
+> this decision falls.
 > §2A below is the source of truth for the Phase 0 measurements that Task 121's
 > subtasks are derived from.
 >
@@ -560,11 +561,13 @@ big-bang cutover.
 
 ### Phase 1 — orchestration extraction (no behaviour change)
 
-> **SUPERSEDED (2026-08-02). This phase's plan content is now
-> `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md`**, which is the authoritative
-> breakdown for Task 122 and replaces the 1.1–1.6 list below. That document was
-> written at activation against the real code and reaches materially different
-> conclusions from this section — read it, not this list.
+> **SUPERSEDED (2026-08-02) and complete.** This phase was executed as Task 122
+> (merged via PR #472), whose plan replaced the 1.1–1.6 list below and is now
+> retired to git history. Its durable decisions are in `DESIGN_DECISIONS.md`,
+> "Orchestration Extraction (Task 122)". Whether to promote its modules
+> (`PublishedFrameState`, `pointer_motion.rs`, `frame_drain.rs`,
+> `terminal/frame_dirty.rs`) to an orchestration crate was explicitly deferred,
+> not decided (maintainer, 2026-08-02).
 >
 > **Where the activation pass disagreed with §8, and why:**
 >
@@ -586,7 +589,8 @@ big-bang cutover.
 >   `freminal-common`, with a `geometry_interop.rs` seam.
 >
 > **The line counts below are stale and were already stale when written.** Do not
-> quote them. `PLAN_122` carries the re-measurement.
+> quote them. `DESIGN_DECISIONS.md`, "Orchestration Extraction", carries the
+> re-measurement.
 
 Required under any outcome, including abandoning the rewrite. Since Phase 0 showed
 the rewrite case is a maintainability judgement rather than a performance
@@ -720,25 +724,16 @@ title bar), 97 (dynamic tab width and overflow) and 85 (powerline status bar)
 are all always-visible chrome, and the v0.18/v0.19 AI-assist versions add
 modals. Anything built on egui before Phase 3 inherits the port.
 
-Also note: **Task 121 now exists in `MASTER_PLAN.md`.** The tracking gap this
-section previously flagged — five merged pull requests (#458, #460, #461, #464
-and #465) under a task number that lived only in branch names — is closed. Task
-121 "Performance Remediation" is carried by v0.12.0, summarised in
-`PLAN_VERSION_120.md`, and broken down in full in
-`Documents/PLAN_121_PERF_REMEDIATION.md`.
+Also note: **Task 121 ("Performance Remediation", v0.12.0) is closed**, and its
+surviving work landed as Tasks 123–125. The gaps catalogued in §2A were worked
+there; the residuals are `FUTURE_PLANS.md` B.11 and B.14. §8's Phase 0.5 (the
+`DESIGN_DECISIONS.md` entry) was delivered as Task 124.8. The #436 chrome cache
+was deleted (Task 124.5), so any text below that treats chrome caching as a live
+subsystem is historical.
 
-That document is the work tracker; this document is the decision record. The
-gaps catalogued in §2A ("Finding 3's known gaps", "The unifying next step",
-"Beyond scheduling: per-frame cost", "Still unmeasured") are tracked there as
-subtasks 121.12 through 121.28. §8's Phase 0.5 and the outstanding half of Phase
-0.2 are tracked as 121.27 and 121.25.
-
-**Phase 1 is tracked as Task 122 ("Orchestration Extraction") in
-`MASTER_PLAN.md`, carried by v0.12.0** — `Stub`, with §8 Phase 1 as its plan
-content and a summary in `PLAN_VERSION_120.md`. It was previously in no plan
-document at all despite being declared required under any outcome, which made this
-section's "re-sequence once Phase 1 lands" circular: nothing scheduled Phase 1, so
-nothing could land, so the re-sequence never triggered. Task 122 breaks that loop.
+**Phase 1 was Task 122 ("Orchestration Extraction", v0.12.0), now complete.** It
+was previously in no plan document at all despite being declared required under
+any outcome; scheduling it broke that loop.
 
 Phases 2-5 remain unsequenced and untracked by design: they are the rewrite, and
 the rewrite is undecided. Do not add them to `MASTER_PLAN.md` before the decision

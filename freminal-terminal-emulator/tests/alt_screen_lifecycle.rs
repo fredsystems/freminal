@@ -16,7 +16,7 @@
 //! direction.
 //!
 //! The reference behaviour is the "131 Decisions" section of
-//! `Documents/PLAN_VERSION_130.md` (the consensus of xterm, Ghostty, `WezTerm`
+//! `Documents/PLAN_VERSION_130_0.md` (the consensus of xterm, Ghostty, `WezTerm`
 //! and kitty).
 
 use crossbeam_channel::Receiver;

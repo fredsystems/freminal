@@ -90,8 +90,10 @@ pub(super) struct FrameDirtyObservations {
 /// [`Self::Bounded`] (Task 124.14) means **"full vertex rebuild, bounded
 /// damage"**, not a bounded rebuild: the caller still runs the exact same
 /// full-rebuild code as [`Self::ReevaluateFullRebuild`] (`upload_verts`
-/// stays a whole-buffer write — bounding *that* is Task 125, gated on a
-/// fixed-stride vertex relayout that does not exist yet), but it may report
+/// stays a whole-buffer write because no instance buffer has a fixed
+/// per-row stride; Task 125 measured a fixed-stride relayout and refuted it,
+/// see `Documents/DESIGN_DECISIONS.md`, "Performance Parity and the
+/// `RowStore` (Task 125)"), but it may report
 /// [`crate::gui::renderer::PaneFrameDamage::Region`] instead of `Full` for
 /// the frame's damage, because the caller already knows content changed
 /// only within a known set of rows and no other full-repaint-forcing
@@ -1344,7 +1346,8 @@ mod evaluate_frame_dirty_state_tests {
         assert!(!outcome.observations.hover_changed);
     }
 
-    /// OBLIGATION 1 of `PLAN_123_GL_MEASUREMENT_HARNESS.md` confirmed the
+    /// OBLIGATION 1 of Task 123 (see `Documents/DESIGN_DECISIONS.md`, "Damage
+    /// Model (Task 124)") confirmed the
     /// always-new-`Arc` finding that was Task 124.1's premise: a re-flatten
     /// that produces byte-identical content in a freshly-allocated `Arc`
     /// used to be reported as a content change, forcing a full vertex
@@ -2370,7 +2373,7 @@ mod evaluate_frame_dirty_state_tests {
     /// disproved before 124.14b-ii was implemented: the hover tint is
     /// baked into the background instance buffer *inside* `terminal_rect`,
     /// the same surface selection paints to, not the gutter strip itself
-    /// (see `PLAN_124_RENDER_EFFICIENCY.md`'s 124.14b recon correction).
+    /// (Task 124.14b recon correction).
     /// Renamed from
     /// `hover_change_alongside_a_row_change_still_yields_reevaluate_not_rows`
     /// -- inverted per this subtask's mandate, not merely adjusted, because

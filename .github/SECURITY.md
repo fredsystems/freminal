@@ -37,7 +37,8 @@ they judge that disclosure serves users better than waiting. A typical case
 is a finding that the public fuzz targets rediscover within seconds, where
 withholding details would not keep it confidential. In that case remediation
 is tracked openly, in the published advisory and in
-[`PLAN_VERSION_130.md`](../Documents/PLAN_VERSION_130.md), and the advisory
+the plan document for the remediating task (Task 148 is in
+[`PLAN_VERSION_130_0_b.md`](../Documents/PLAN_VERSION_130_0_b.md)), and the advisory
 is updated with the patched version once a release contains the fix.
 
 When reporting, please include as much of the following as you can:

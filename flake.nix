@@ -591,7 +591,7 @@
               #
               # These are set explicitly rather than by adding
               # `pkgs.mesa.llvmpipeHook` to the package list, which is what
-              # PLAN_123's 123.10 originally specified. The hook would set the
+              # Task 123.10 originally specified. The hook would set the
               # same three variables, but its contents cannot be inspected
               # without building it, and a setup hook that silently overrides
               # an explicitly-set variable is exactly the kind of

@@ -129,6 +129,7 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | `freminal-state-representation`    | About to add a `bool` field or `bool` parameter, pass a bare `true` / `false`, add a bool pair that can't both be true, transport a bool across a crate/thread/frame boundary, or lean on an `excessive_bools` allow. Named domain enums (`BlinkState::Enabled`); and the three cases where a bool is correct.                                                        |
 | `freminal-modal-input-suppression` | Adding / debugging a GUI modal, dialog, or overlay with a text field. Register in `ui_overlay_open` + `lock_focus(true)` or it can't be typed in.                                                                                                                                                                                                                     |
 | `freminal-module-cohesion`         | About to add a type to an existing file whose name describes a different concept, add a second unrelated test module, or add to a file you had to scroll to the end of. One *concept* per module; path should name the concept; decline splits that widen visibility.                                                                                                 |
+| `freminal-terminfo`                | Editing `res/freminal.ti`, an XTGETTCAP arm, a capability-backed sequence or key, TERM resolution, or terminfo packaging. Declare only what freminal implements; `cargo xtask terminfo` regenerates.                                                                                                                                                                  |
 | `freminal-windows-crosscheck`      | Before any PR, esp. `#[cfg(windows)]` / `portable-pty` / path / thread changes. Run `cargo xtask check-windows` (clippy for windows-gnu) locally.                                                                                                                                                                                                                     |
 | `agent-orchestration-protocol`     | About to spawn sub-agents. Action classes, scope, prohibitions, stop conditions. Mandatory.                                                                                                                                                                                                                                                                           |
 | `autonomy-boundaries`              | Executing a multi-step plan. Scope is the boundary, not a step count; irreversible operations need approval.                                                                                                                                                                                                                                                          |
@@ -342,8 +343,9 @@ the assigned scope is the boundary, not a step count. Finish the
 version, then report.
 
 Pre-existing bugs surfaced mid-task become numbered cleanup entries in
-the host task's plan document (see Task 72.16 in
-`Documents/PLAN_VERSION_090.md` for the convention -- that is the
+the host task's plan document, numbered `NN.CM` in the task's own
+numbering space (see the `126.C1` entry in
+`Documents/PLAN_VERSION_130_0.md` for the convention -- that is the
 freminal example of the generic procedure in
 `agent-orchestration-protocol`).
 

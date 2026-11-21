@@ -84,6 +84,8 @@ the boundary.)
 - Where hooks live and how they are loaded/reloaded (orthogonal to `config.toml`).
 - Which already-shipped subsystems expose hooks first vs later (status bar segments —
   Task 85; AI prompt hook; notification filtering — Task 76).
+- `#[non_exhaustive]` policy for the public hook API types (Task 70 deferred the decision to
+  this task; `TerminalOutput` already carries it, so decide whether it becomes a rule).
 
 ---
 

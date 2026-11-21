@@ -367,7 +367,8 @@ fn a_small_decoration_payload_reuses_its_allocation_instead_of_orphaning() {
 
 #[test]
 fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
-    // REGRESSION GUARD FOR 124.9 — see `PLAN_124_RENDER_EFFICIENCY.md`.
+    // REGRESSION GUARD FOR 124.9 — see `Documents/DESIGN_DECISIONS.md`,
+    // "Damage Model (Task 124)".
     // This test was written by Task 123 to pin the *defect*, and inverted
     // (not deleted) by 124.9, which is the only guard this behaviour has.
     //

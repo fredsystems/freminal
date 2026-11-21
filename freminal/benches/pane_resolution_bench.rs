@@ -208,8 +208,9 @@ fn build_balanced_tree(pane_count: usize) -> (PaneTree, Vec<PaneId>) {
 /// worse for [`PaneTree::find`] of the last leaf: a full depth-first search
 /// visits the same `n` leaves and `n-1` internal nodes under either shape,
 /// only in a different order. Both shapes are measured for both functions so
-/// that the recorded baseline (see the "122.14 recorded baseline" section of
-/// `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md`) states the difference
+/// that the recorded baseline (see `Documents/DESIGN_DECISIONS.md`,
+/// "Orchestration Extraction (Task 122)" / "Benchmarking pane resolution on
+/// a development laptop") states the difference
 /// rather than leaving it to be assumed.
 fn build_chain_tree(pane_count: usize) -> (PaneTree, Vec<PaneId>) {
     let mut id_gen = PaneIdGenerator::new(0);

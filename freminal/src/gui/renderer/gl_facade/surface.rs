@@ -5,15 +5,16 @@
 
 //! The frozen GL call surface.
 //!
-//! Task 123, `PLAN_123_GL_MEASUREMENT_HARNESS.md`, subtask 123.1 — the
+//! Task 123, subtask 123.1 (see `Documents/DESIGN_DECISIONS.md`, "GL Call
+//! Boundary and Measurement Harnesses (Task 123)") — the
 //! audited enumeration of every `glow::HasContext` method the `freminal`
 //! crate calls — plus the test-time guard that keeps that enumeration
 //! honest until the facade migration (123.2–123.5) lands.
 
 /// Every `glow::HasContext` method freminal calls, sorted and de-duplicated.
 ///
-/// This is the frozen surface `PLAN_123` subtask 123.1 audited. The plan
-/// document's own original enumeration (written before this audit) said
+/// This is the frozen surface Task 123 subtask 123.1 audited. The plan's
+/// own original enumeration (written before this audit) said
 /// **47** and omitted two call sites: `create_program` (`gpu.rs:1614`) and
 /// `create_shader` (`gpu.rs:1643`), both written as multi-line method
 /// chains (`gl` on one line, `.create_program()` / `.create_shader(..)` on
@@ -251,7 +252,8 @@ mod tests {
     /// - It scans the `freminal` crate only. `freminal-windowing` calls
     ///   `clear_color`/`clear` directly on its own `glow::Context`
     ///   (`gl_context.rs`), and this guard is blind to it by construction.
-    ///   See the "disclosed gap" note in `PLAN_123`'s Findings.
+    ///   See `Documents/DESIGN_DECISIONS.md`, "GL Call Boundary and
+    ///   Measurement Harnesses (Task 123)" / "Why a concrete `Gl` facade".
     ///
     /// Both require deliberate action rather than an accident, which is why
     /// the heuristic is judged worth having — but it should not be mistaken

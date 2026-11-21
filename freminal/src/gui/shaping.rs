@@ -129,8 +129,8 @@ pub struct ShapedLine {
 /// (`RunCache`) alongside the line cache. The line cache is keyed by line
 /// index, so a one-line scroll invalidates every line even though most of
 /// their runs are byte-identical to runs shaped a moment ago at a different
-/// index (see the 124.16 findings block in
-/// `Documents/PLAN_124_RENDER_EFFICIENCY.md`). The run cache is keyed by
+/// index (see `Documents/DESIGN_DECISIONS.md`, "Damage Model (Task 124)" /
+/// "Shaping: run-level cache"). The run cache is keyed by
 /// `(face_id, ligatures, run text)` instead, so it can still hit across that
 /// shift.
 pub struct ShapingCache {
@@ -3150,8 +3150,8 @@ mod tests {
 /// the structural finding rather than a timing, so they are deterministic
 /// and platform-independent.
 ///
-/// The headline results are recorded in 124.16's findings block in
-/// `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
+/// The headline results are recorded in `Documents/DESIGN_DECISIONS.md`,
+/// "Damage Model (Task 124)" / "Shaping: run-level cache".
 #[cfg(test)]
 mod shaping_cache_hit_rate {
     use super::{FormatTag, ShapingCache, ShapingCacheStats};

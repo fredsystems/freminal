@@ -73,8 +73,8 @@ pub struct PaneDamageInput {
 ///    correction is recorded here because Task 123's Obligation 2
 ///    investigated exactly that hypothesis: a reader trusting the old
 ///    wording would have taken a **false confirmation** of a diagnosis
-///    that 123 refuted (see 124.C1 in
-///    `Documents/PLAN_124_RENDER_EFFICIENCY.md`).
+///    that 123 refuted (see Task 124.C1 and `Documents/DESIGN_DECISIONS.md`,
+///    "Damage Model (Task 124)" / "The two missing states").
 /// 2. Otherwise, `toast_active` short-circuits to `Full`.
 /// 3. Otherwise, `per_pane_damage` is walked in order (this must be the
 ///    same order as `pane_layout`, i.e. only the panes actually rendered
@@ -190,8 +190,7 @@ pub fn decide_frame_damage(
         // loop above -- any of those returned `Full` immediately) AND no
         // pane or search overlay pushed a single rect -- every rendered
         // pane genuinely changed nothing this frame. This is the exact
-        // case the doc comment above (step 4) and
-        // `PLAN_124_RENDER_EFFICIENCY.md`'s 124.2 describe: present
+        // case the doc comment above (step 4) and Task 124.2 describe: present
         // nothing rather than a full clear + present of pixel-identical
         // content.
         freminal_windowing::FrameDamage::None
@@ -357,7 +356,7 @@ mod tests {
         assert_full(&decide_frame_damage(false, true, &panes));
     }
 
-    /// OBLIGATION 2 of `PLAN_123_GL_MEASUREMENT_HARNESS.md`: diagnose the
+    /// OBLIGATION 2 of Task 123: diagnose the
     /// 121.31 full-present-during-pointer-motion anomaly, with the startup
     /// toast held fixed.
     ///
@@ -393,7 +392,7 @@ mod tests {
     /// It does not, and has not since #459 item 9: `app_impl.rs` computes
     /// `force_full` with `pointer_forces_full_present(pointer_moving,
     /// pointer_over_chrome, border_drag_active)`. Recorded as cleanup entry
-    /// 123.C1 in `PLAN_123_GL_MEASUREMENT_HARNESS.md`.
+    /// 123.C1.
     #[test]
     fn pointer_motion_over_content_is_partial_once_the_toast_confound_is_removed() {
         let d = PaneDamageRect {
@@ -624,8 +623,9 @@ mod tests {
 
     /// The test that pins why `PaneFrameDamage::Region` carries a `Vec`
     /// rather than a single bounding box (124.14a's design decision,
-    /// `PLAN_124_RENDER_EFFICIENCY.md` §124.14a: "rows 3 and 40 changed
-    /// would present the 37 rows between them").
+    /// see `Documents/DESIGN_DECISIONS.md`, "Damage Model (Task 124)" / "The
+    /// two missing states": "rows 3 and 40 changed would present the 37 rows
+    /// between them").
     ///
     /// Two non-contiguous rects must both survive aggregation, in order,
     /// rather than being collapsed into their enclosing bounding box. If a

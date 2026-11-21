@@ -7,7 +7,7 @@
 //! and DECSTR (`CSI ! p`), driven through raw bytes.
 //!
 //! The authoritative row list is the "131 Reset table" in
-//! `Documents/PLAN_VERSION_130.md`.
+//! `Documents/PLAN_VERSION_130_0.md`.
 
 use freminal_common::buffer_states::{
     mode::Mode, modes::decanm::Decanm, terminal_output::TerminalOutput,

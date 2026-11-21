@@ -3,7 +3,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! The GL call boundary (Task 123, `PLAN_123_GL_MEASUREMENT_HARNESS.md`).
+//! The GL call boundary (Task 123; see `Documents/DESIGN_DECISIONS.md`, "GL
+//! Call Boundary and Measurement Harnesses (Task 123)").
 //!
 //! This module owns exactly one concept: the seam between freminal's
 //! renderer code and the concrete `glow::Context` it draws through. That

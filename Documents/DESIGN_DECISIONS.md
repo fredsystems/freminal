@@ -1,6 +1,6 @@
 # Design Decisions
 
-Durable architectural decisions and reference data extracted from completed v0.2.0 task plans.
+Durable architectural decisions and reference data extracted from completed task plans.
 The full plans are available in git history. This document captures only the "why" that cannot
 be recovered from reading the current code.
 
@@ -828,6 +828,8 @@ decisions below capture _why_ the format is shaped this way.
    platforms and render as squares on systems with limited font coverage.
    A plain `"X"` or egui's built-in close icon is universally reliable.
    Visual polish is not worth broken rendering.
+   _Superseded by Task 112: chrome glyphs come from `ChromeIcon` in the
+   bundled font; see "UI Chrome Styling and Bundled Assets"._
 2. **Per-pane search overlay ID.** The scrollback-search overlay uses
    `egui::Id::new(("search_overlay", pane_id))` so each pane has
    independent search state and positioning. A shared Area ID caused egui
@@ -894,8 +896,8 @@ Three options were considered:
    show on screen.
 
 3. **Ghostty-style spawn-time env injection.** freminal sets shell-specific
-   env vars (`ENV` for bash, `ZDOTDIR` for zsh, `XDG_DATA_DIRS` for fish
-   and nushell) on the child process before spawn. The shell's standard
+   env vars (`ENV` for bash, `ZDOTDIR` for zsh, `XDG_DATA_DIRS` for
+   fish) on the child process before spawn. The shell's standard
    startup-file discovery finds our scripts and sources them silently
    alongside the user's normal rc files. **This is the architecture
    adopted in 72.8b.**
@@ -941,10 +943,13 @@ prompt of harmless noise. P (prompt property) does not require the
 buffer state.
 
 `Buffer::start_command_block(cwd, fid)` and `finish_command_block(exit_code, fid)`
-take the `fid` and use it for explicit A/D correlation, falling back to
-the previous "most-recent-open" heuristic only when `fid` is `None`
-(which our scripts never emit, but defensively preserves behaviour for
-historical FTCS markers in FREC recordings).
+take the `fid` and use it for explicit A/D correlation. There is no
+"most-recent-open" fallback: a D whose `fid` matches no open block is a
+no-op.
+
+`[shell_integration] set_term_program` gates both `TERM_PROGRAM` and the
+shell injection, because the two are coupled: a user who opts out of one
+is opting out of freminal's shell hooks.
 
 ### Why freminal owns the on-disk script files
 
@@ -1058,7 +1063,7 @@ surface beyond a `tracing::warn!` log line. Failure paths:
   permission denied) — PTY spawns normally without env injection. Toast
   is NOT surfaced (this happens at startup before the toast system
   exists); only logged.
-- Shell binary is unknown (not bash/zsh/fish/nushell) — no env injection.
+- Shell binary is unknown (not bash/zsh/fish) — no env injection.
   Shell starts as usual, no integration.
 - User runs an explicit `command` instead of a shell (e.g. `freminal vim`)
   — no env injection. The command runs as itself; command-aware features
@@ -1098,13 +1103,518 @@ not measurable in practice.
 
 ---
 
+## Command Blocks, Gutters and Fold (Tasks 72, 73)
+
+### Block lifecycle and coordinates
+
+A `CommandBlock` is created by OSC 133 A, annotated by B and C, and closed by D, all correlated by
+`fid` (see "Shell Integration Architecture"). Blocks live on the primary screen only: alternate
+screen entry and exit neither clear nor extend them, and the GUI suppresses the gutter, hover and
+duration label while the alternate screen is active. A block's row fields are buffer row numbers,
+never snapshot rows. Anything that draws or hits a block must translate to the visible window first
+(`translate_ranges_to_snapshot`); feeding buffer rows to a snapshot-space structure silently drops
+every block that is not in the first screenful.
+
+Fold state is view state (`ViewState`, keyed by `CommandBlockId`), never buffer state. When a block
+is evicted its fold is dropped silently, and folds are not persisted across sessions or layouts.
+
+### Duration is C to D, and an unexecuted block has none
+
+`duration()` measures `executed_at` (OSC 133 C) to `finished_at` (D). The first version measured A to
+D, which includes the time the user spent reading and typing, so an instant `ls` after a 30 s pause
+reported 30 s. A block that never saw C (Ctrl-C at an idle prompt) has no duration and never raises a
+command-finished notification: `executed()` is the shared predicate, and the notification path checks
+it explicitly so a zero threshold cannot produce a false notification. A still-running block extends
+to the cursor row, not the pane bottom.
+
+### Fold anchor and `FoldPreviousCommand`
+
+The fold range starts at `output_start_row` (C) and falls back to `command_start_row` (B) only for a
+shell that never emits C; starting at B hides the prompt and the typed command. `FoldPreviousCommand`
+folds the most recent completed block, not the block under the cursor: the PTY cursor is always on the
+live prompt, after every completed block, so a cursor-containment rule never fires. The placeholder's
+"N lines hidden" uses the block's full height, not the clipped on-screen range.
+
+### Transport: a dedicated channel, not a `WindowCommand` variant
+
+Finished blocks reach the GUI over a per-pane `Sender<CommandFinishedEvent>`, drained by the PTY
+consumer thread. `WindowCommand` only wraps viewport and report manipulations; a `CommandFinished`
+variant would have pulled the GUI enum into the handler crate or restructured the PTY loop.
+`Pane::recent_commands` is a ring capped at 64, so a long-lived shell cannot grow GUI memory without
+bound.
+
+### The gutter
+
+- **One inset, two consumers.** The left inset is computed once per frame and used for both the column
+  count sent to the PTY and the terminal rect the renderer draws. Deriving either independently
+  desynchronises wrapping and cursor addressing.
+- **Hit zone.** The whole inset is the click and hover target. Gutter pixels lie outside
+  `terminal_rect`, so DEC mouse modes, selection and URL hover never see them.
+- **The gutter is the only hover trigger.** Tinting a block when the pointer was over any of its cells
+  fired during text selection and with mouse-tracking applications, so the cell trigger was removed.
+- **The duration label floats** just inside the cell grid, anchored to the block's last visible row,
+  instead of widening the gutter or sitting on the prompt row, which scrolls away first.
+- **Live hover needs two things.** The gutter must be a `Sense::click()` egui region, or a bare
+  pointer move never wakes a frame; and a hover-only change must rebuild the background instance
+  buffer, because the tint is baked into it. Either alone shows nothing.
+
+### Command-history palette (Task 72.15)
+
+The palette merges the shell-history seed with this session's live commands, kept parallel
+(`history_seed` beside `recent_commands`) and merged at render time. Extending `CommandBlock` with
+command text was rejected: every buffer-row consumer would have to handle a variant with no rows. The
+merge is newest-first with a global text dedup, because the rendered list is capped after filtering;
+an oldest-first merge pushed this session's commands past the cap. The binding is `Ctrl+Shift+M`:
+`Ctrl+R` is the shell's reverse search, `Ctrl+Shift+R` recording, `Ctrl+Shift+P` the command palette.
+Selecting an entry types it without a trailing newline, so the user reviews and presses Enter.
+
+OSC 1338 exists because `HISTFILE` is often a shell variable set in `.zshrc`, invisible to the
+environment freminal spawned the shell with. The shell reports its evaluated value after its rc files
+have run, and a sequence-tagged seed lets that report win regardless of arrival order.
+
+## Paste, Broadcast and Close Guards (Tasks 74, 77, 98)
+
+### Paste guard
+
+- **Where it runs.** The `input.rs` paste sites have no `Config`, no compiled-regex cache and no
+  per-window dialog state, so paste is deferred to `update()`, which has all three. `PasteGuard`
+  (compiled regexes) lives on the GUI, not on the serde config value. Bad regexes are reported, not
+  fatal at load (`freminal-common` has no UI to toast from), and are skipped at match time.
+- **The clipboard is read once, by the windowing layer.** On Ctrl/Cmd+V the event loop reads the
+  clipboard through the cross-window egui path (Wayland's per-window clipboard breaks `arboard`) and
+  injects `Event::Paste`; menu "Paste" arrives as `ViewportCommand::RequestPaste` and becomes the same
+  injection. Re-reading the clipboard in the GUI fails on the common path.
+- **Bypass.** `PasteUnsafe` defaults to `Ctrl+Shift+Alt+V`, because `Ctrl+Shift+V` is `Paste`. The
+  interceptor converts any `command + v` into `Event::Paste`, so the bypass is recognised by the Alt
+  modifier on that event, not by the `BindingMap`.
+- **Target is captured at open.** The dialog records the destination `(TabId, PaneId)` when it opens.
+  With focus-follows-mouse, moving onto the dialog's buttons changes the active pane, and resolving
+  against the current active pane pasted into the wrong pane. A closed target drops the paste.
+- **Triggers.** Multi-line, control characters (C0/C1 except `\n`, `\r`, `\t`) and an opt-in pattern
+  list. A bad regex never blocks paste.
+
+### Broadcast
+
+Broadcast is per tab and keyboard-only. Mouse, scroll-derived arrow keys, mouse-tracking reports,
+resize, focus and selection are pane-local. A key or paste is broadcast as the active pane's encoded
+bytes (bracketed-paste wrapping decided by the active pane), not re-encoded per destination; Task 137
+owns encoding per destination.
+
+### Close guard
+
+A pane is "running" only when its latest block has seen C and not D; an idle prompt, or a prompt after
+Ctrl-C with no C, never blocks close. Detection is OSC 133 only: `/proc` or process-tree introspection
+was rejected as platform-specific and unnecessary now that shell integration is injected by default. A
+pane that never saw a prompt marker is "unknown" and blocks only if `unknown_blocks` is set, which keeps
+`vim`, `cat` and shells without integration closeable. Window close goes through `on_close_requested`;
+a confirmed force close is remembered per window so the `ViewportCommand::Close` round trip is not
+re-prompted. The dialog shows the pane title, because `CommandBlock` carries no command text.
+
+## Tab Titles, Focus and the Active-Pane Highlight (Tasks 94, 109, 110)
+
+- **Tab title precedence.** The default policy is `prefix` (`"{custom}: {osc}"`). The old behaviour
+  cleared a custom name whenever the shell set an OSC 0/1/2 title, which made renaming pointless under
+  any prompt framework. The OSC title always stays in the snapshot; the policy decides what is shown,
+  and `OscWins` is the only policy where an OSC title clears `custom_name`. Persisted names are
+  `LayoutTab::custom_name`, distinct from the author-supplied `title` seed (`LAYOUT_FORMAT.md`).
+- **Focus follows the mouse** (default on): hover changes only the keyboard target and never retargets
+  in-flight mouse input. Tab switching stays click-to-focus.
+- **Active-pane highlight.** With three or more panes, every interior divider edge of the active pane
+  is highlighted over its full length; outer window edges never are. With exactly two panes they share
+  one divider, so surrounding either lights the same line; that divider is half-filled on the active
+  side (classic tmux). The trigger is whole-tab pane count: a per-divider rule wrongly split the shared
+  bar in the three-pane case.
+
+## Startup Failure and Teardown (Tasks 106, 107)
+
+- **A window with no `PerWindowState` renders nothing**, so a failed only-shell spawn used to leave a
+  blank, unrecoverable window. The app-level `fatal_error` panel renders for that window and offers
+  Exit. A failed sub-pane with other shells alive is only a toast plus a skipped pane.
+- **Bash injection must keep the shell as `args[0]`.** On a default-program builder the first pushed
+  argument becomes the executable, so `cmd.arg("--posix")` made bash unspawnable. Use
+  `replace_default_prog([shell, "--posix"])`.
+- **Reader shutdown is classified, not silenced.** The PTY consumer thread exits first when the GUI
+  drops the input channel, so the reader may legitimately fail one last send. A flag set by the consumer
+  before it exits distinguishes expected teardown (`debug`) from a receiver that vanished early
+  (`error`).
+- **Every window destroys its egui-glow painter** with the GL context current (`close_window()` and
+  `exiting()`; `destroy()` is idempotent). The standalone Settings window is its own winit window.
+- **Version embedding had three independent `unknown` paths:** a local build (no `rerun-if-changed` on
+  git `HEAD`/refs), CI (shallow, tagless checkout; build jobs use `fetch-depth: 0` and
+  `fetch-tags: true`), and Nix (`cleanSource` strips `.git`, so the flake passes `v<version>-<rev>`
+  through an env override `build.rs` honours verbatim). Fixing one leaves the other two broken.
+
+## Notification Defaults and Detection (Task 76)
+
+Delivery is in "Desktop Notification Backends (Task 150)". Notifications are opt-in
+(`[notifications] enabled = false`) because they are noisy and platform-dependent, while the paste guard
+is on by default because it prevents real foot-guns. OSC 9 and OSC 777 have no capability query, so
+clients detect freminal through `TERM_PROGRAM=freminal`. The Settings "Test Notification" button
+bypasses the `enabled` master switch (but not per-category routing).
+
+## Layout Environment Scope (Task 75)
+
+Only per-pane `env` is supported. A layout-wide env table, per-layout theme or font, and profile
+binding are deferred to Profiles (Task 78); per-pane env covers the realistic cases.
+
+---
+
+## Auto-Detected URLs (Task 71.7b)
+
+Plain URLs (`http`, `https`, `file`, `ftp`, `mailto`) in output from programs that do not
+emit OSC 8 are made clickable by the same hover/click machinery as OSC 8.
+
+- **Detection runs inside the per-row flatten cache, not on the PTY read path.** The
+  rejected design scanned in `TerminalHandler` after each PTY batch and stamped matches onto
+  cells, adding allocations per batch on the hot path under bursty output (`cat bigfile`,
+  build logs). Auto-detected URLs therefore never touch cells and never enter cell-level
+  OSC 8 storage. The cost is paid once per dirty row (`RowCacheEntry` carries `bytes`,
+  `byte_to_char` and `auto_urls`) and later frames reuse it. No allocation or per-batch work
+  may be added to `handle_incoming_data` / `process_outputs` for this.
+- **OSC 8 wins.** Detected ranges are spliced into the tag sequence at merge time, and a tag
+  that already carries a URL is never overlaid.
+- **`url_detect` lives in `freminal-buffer`**, its only caller; the emulator crate would have
+  needed a dependency inversion.
+- **Syntactic only.** Byte-based matching (`regex::bytes`) with GFM-style termination:
+  whitespace or control bytes end the match, trailing `.,;:!?` is stripped, and closers are
+  stripped only when unbalanced, so `.../Foo_(bar)` survives. No validation, no unescaping,
+  and no bare-path detection (`/tmp/foo`): users write `file://`, matching WezTerm, iTerm2
+  and kitty.
+- Toggling `ui.auto_detect_urls` invalidates every cache entry.
+
+## Persisted Runtime State vs Config (Task 71)
+
+`config.toml` is declarative user intent. State the program writes on the user's behalf
+(today only `first_run_complete`) lives in a separate, always-writable `state.toml`
+(`freminal_common::app_state`; paths are in the module header). The trigger was a NixOS
+home-manager user whose `config.toml` is a read-only symlink: mutating it failed with
+`EROFS`, raised an error toast, and re-opened the welcome overlay on every launch.
+`OnboardingConfig` stays only for back-compat parsing, and a `true` value is migrated
+forward. Anything the program mutates on its own (dismissed prompts, tips) goes in
+`state.toml`, never in `config.toml`.
+
+## Surfacing Failures: Toasts, Not Modals (Task 71)
+
+Recoverable failures that used to log and vanish (PTY spawn failure, layout load/save
+failure, malformed layout files, shader compile errors) surface as non-blocking toasts. A
+modal or banner was rejected as more intrusive than the failure warrants.
+
+- Code that cannot reach the GUI state (the GL `PaintCallback` closures) records
+  `last_error`, and the main thread drains it at the top of **every window's `update()`**.
+  Draining only on the spawn path surfaced a compile error one window creation too late.
+- Startup failures must be reachable by the toast system, so the first PTY spawn happens in
+  `on_window_created`, not before the event loop (a failure there used to exit silently
+  through `main`). A positional `command` also suppresses last-session restore, or the
+  requested command never runs.
+- Auto-save failures during shutdown are log-only: the UI is already tearing down.
+
+## Channel Boundedness (Task 70)
+
+A blanket "bound all channels" was rejected after a per-channel audit.
+
+- The PTY read path is already backpressured by the OS pipe. Bounding it with _block_
+  duplicates the kernel; bounding it with _drop_ corrupts output (bytes lost mid-sequence).
+- `input_tx` is unbounded on purpose: it carries keystrokes, which must never be dropped. Its
+  reply traffic is bounded at the source by the per-pane window-command budgets (Task 148).
+- Only diagnostic traffic may drop on overflow: the FREC writer channel and the notification
+  workers are bounded and drop on full, so they cannot stall a frame.
+
+Any future bound needs measured high-water depths across platforms and workloads
+(`cat large_file`, `yes`, `find /`, recording on and off); without that data a bound is a
+guess.
+
+## Library-Crate Hygiene (Task 70)
+
+- **`TerminalHandler` belongs in `freminal-terminal-emulator`.** It is escape-sequence
+  semantics, graphics protocols and PTY write paths; `freminal-buffer` stays a pure data
+  model.
+- **Thread names** are `freminal-<role>-<pane_id>`. `pane_id` alone is used because it is
+  process-globally unique and the tab id is not reachable from the crate that owns the PTY
+  threads.
+- **Open-ended numeric namespaces stay `usize`.** SGR and DA2 parameters are not closed sets,
+  so they are not enums. Closed sets (ED, EL, TBC) are enums.
+- **"Complete" is audit-gated.** Tasks 26, 29, 30 and 31 were marked Complete while
+  violations remained (casts, a bool-to-enum miss, oversized files). A completion claim needs
+  a verification pass, not just the plan row.
+
+## Screen Reverse Video (DECSCNM) Rendering (Task 115)
+
+DECSCNM (`CSI ? 5 h`) is a **per-pane** mode, applied at render time to that pane's cells
+only. Chrome (menu bar, tab bar, inter-pane background) never reacts to it. Before Task 115
+the only consumer was the egui visuals builder, which repainted the whole window from the
+_active pane's_ snapshot, so one pane's DECSCNM recoloured every pane. A window-global flag
+cannot be correct with more than one pane.
+
+- A cell's effective reverse is `SGR 7 XOR DECSCNM` (DEC/xterm semantics). It is implemented
+  without touching `StateColors`: its accessors already return SGR-7-resolved colours, so
+  under DECSCNM the vertex builders call the _opposite_ accessor (`effective_fg` /
+  `effective_bg` in `renderer/vertex.rs`). Every per-cell colour read in the renderer goes
+  through those two helpers; underline and strikethrough follow the same effective state.
+- The flag comes from the pane's own snapshot (`ScreenInversion`). The buffer and parser do
+  not know about the XOR.
+
+## Text Selection State Machine (Task 116)
+
+A click-drag selection used to clear itself on release and then stay stuck. Three invariants
+fix it:
+
+1. **Finalize from tracked state, never from a re-derivation.** Mouse-up commits the
+   `selection.end` that `PointerMoved` maintained. Recomputing from the release position went
+   through `visible_window_start`, which depends on the snapshot's `total_rows`; PTY output
+   between the last move and the release shifted it, the end collided with the anchor, and
+   `anchor == end` is the "plain click, collapse" path.
+2. **A commit is an edge, distinct from `is_selecting`.** The content-changed auto-clear runs
+   after input processing, in the frame where release already cleared `is_selecting`.
+   `ViewState::selection_committed_this_frame` suppresses the auto-clear for exactly that
+   frame. Do not weaken the `snap.content_changed` (versus `Arc::ptr_eq`) distinction it
+   relies on.
+3. **Interrupted drags finalize through the same collapse-or-keep rule.** Suppressed input, a
+   menu, search, scrollbar drag, or a release outside the origin pane all end a drag without a
+   release. `SelectionState::finalize_interrupted_drag` keeps a real range and clears a
+   zero-length one, so `anchor`/`end` are never stranded (a stranded selection made the next
+   press take the "clear, don't start a drag" branch).
+
+## DECSLRM Scroll Confinement and Half-Width Wrap (Task 117)
+
+- **Confinement has one decision point.** With DECLRMM enabled, every scroll that moves
+  existing rows (SU, SD, IL, DL, margin-triggered LF/IND/RI/NEL) is confined to the
+  left/right margins by the `scroll_slice_{up,down}_confined(_n)` helpers in
+  `buffer/scroll.rs`. A new scroll path must go through them. The first fix patched only the
+  primary-buffer helpers and missed the alternate-screen arms of `handle_lf` / `handle_ri`,
+  so every scroll change must be tested on **both** buffer types.
+- **Half-width wrap halves the span, not the stored column count.** On DECDWL/DECDHL rows
+  `row_wrap_bounds` halves the usable span (at least 1), including the DECSLRM span. The
+  row's stored column count is unchanged, so line width stays a render attribute everywhere
+  except the wrap boundary.
+
+---
+
+## UI Chrome Styling and Bundled Assets (Tasks 111, 112)
+
+### Why CaskaydiaCove Nerd Font is the bundled face
+
+The ligature feature (`liga` + `calt`, on by default) did nothing with the previous bundled MesloLGS
+Nerd Font Mono: its GSUB table held only `rtla`. CaskaydiaCove NF is a superset of MesloLGS (full Nerd
+set plus Braille) and makes ligatures work out of the box. Constraints for any future font change:
+
+- **Bundle the `Cove` (Code) variant under the name "CaskaydiaCove".** Cascadia Code's OFL reserves
+  the name "Cascadia Code"; the Nerd Fonts patch renames it. `CaskaydiaMono` strips ligatures and must
+  not be used.
+- **`isFixedPitch=0` is benign.** ASCII advances are uniform; the flag is unset only because Nerd icons
+  are double-width.
+- **Ligatures are `calt` chaining substitutions into "ligature piece" glyphs**, not many-to-one
+  collapses: shaped glyph count is unchanged and glyph IDs change. Tests assert on ID difference with
+  ligatures on versus off, never on count reduction or a specific ID.
+- **Hack was dropped** (never loaded). "Detect the platform default font" was rejected: platform fonts
+  have neither ligatures nor powerline glyphs.
+- **Licence gate:** no font is bundled until its licence is confirmed to permit redistribution.
+
+### One centralized chrome style layer
+
+All non-terminal chrome (menus, tabs, modals, toasts, dialogs, overlays) is styled by one function,
+`chrome_style::build_visuals`, from the active `ThemePalette` plus a `StyleProfile` (`Modern`: rounded,
+roomy; `Retro`: square, dense, heavier strokes). The terminal buffer has its own renderer and is out of
+scope.
+
+- **Data in `freminal-common`, mapping in the binary.** `GuiTheme` / `StyleProfile` are plain serde
+  data with no egui types; `build_visuals` and `apply_chrome_spacing` live in `chrome_style.rs`, as
+  `ThemePalette` / `colors.rs` do. Spacing cannot live in `Visuals`, so it is a sibling function.
+- **Chrome colours come from authored UI roles, not borrowed ANSI slots.** Deriving chrome from
+  `background`/`foreground`/`ansi[..]` produced invisible borders (Tokyo Night's `ansi[0]` is nearly
+  its background) and low-contrast active tabs, because a terminal palette declares no UI surfaces.
+  `ThemePalette` carries optional `chrome_*` roles, copied from upstream for vetted themes (never
+  invented); raw palettes fall back to best-fit, then a contrast-guaranteed derivation. Do not tune
+  contrast per theme: a fix is a transcribed upstream role or a resolver improvement for a whole class.
+- **Apply visuals globally (`ctx.set_visuals`), never in a scoped `ui.scope`.** egui draws combo-box
+  dropdowns and context menus in a top-level popup layer that ignores scoped style.
+- **One application point, one cache.** The per-frame style hook rebuilds only when the
+  `(display mode, palette, opacity, GuiTheme)` key changes. The standalone Settings window has its own
+  egui context and applies `build_visuals` itself; anything new with its own context must do the same.
+- **The tuning gallery is a cargo example** (`cargo run -p freminal --example chrome_gallery`), calling
+  the real `build_visuals` for every built-in theme. It is a developer instrument, not a settings tab.
+
+### Action glyphs are an icon font, not emoji, SVG or a PNG atlas
+
+On Linux several chrome symbols were emoji codepoints that rendered as tofu without a system emoji
+font. Chrome symbols now come from `ChromeIcon`, mapping each variant to a Nerd Font codepoint in the
+bundled face, drawn monospace and tinted. Rejected: SVG via `egui_extras` + `resvg` (a heavy crate chain
+for about 15 icons) and a pre-rasterised PNG atlas (opaque diffs, manual UV upkeep, one atlas per DPI).
+A small supplemental icon TTF is the fallback for a symbol with no Nerd Font equivalent. Icons are
+monochrome by design, which is what makes them tintable; every codepoint is checked against the bundled
+face's cmap by a guard test.
+
+## Primary-Buffer Height Grow (Task 113)
+
+On the primary screen a height _grow_ appends no rows: it pops trailing pristine `ScrollFill` rows below
+the cursor and lets the bottom-anchored window reveal real scrollback above. `rows.len()` may therefore
+be less than `height`, as after `Buffer::new`, and the GUI pads below the live bottom. Appending blank
+rows (the original behaviour) accumulated an unreclaimable tail under the cursor across grow/shrink
+cycles (a tiling WM, repeated font-size changes), stranding the live prompt in scrollback until `clear`.
+The alternate screen keeps its strict `rows.len() == height` invariant and top-anchored growth.
+
+## Kitty Keyboard: Raw-Key Delivery and the Transition Rule (Task 114)
+
+egui's `Key` enum has no variant for keypad operators, media keys, or Print/Pause/Menu; winit's
+`KeyCode` carries them all. `Handler::window_event` in `freminal-windowing` intercepts only that blocked
+physical-key set and calls `App::on_raw_key_event`; egui-winit stays the translator for every other key.
+A raw-winit-primary rewrite was rejected as far larger and riskier (Task 137 revisits that choice). The
+GUI does not encode in the callback: it queues onto `PerWindowState.pending_raw_keys` and drains in
+`update()`, where the active pane's super state, keyboard-mode snapshot and input funnel are in scope.
+
+The protocol reports **transitions; it does not diff state.** Rules for any lock-key or modifier work:
+
+- Never synthesise a press or release from a state delta (for example on focus gain). The protocol
+  has no resync event, and a fabricated release corrupts flag-8 consumers.
+- Never track or report keys while unfocused, and never add a background keyboard-polling thread.
+- On focus loss, clear held-key tracking and emit nothing.
+- Ambient lock bits decorate other keys' reports; they are never events themselves.
+
+Why the lock bits are absent is under "freminal current-state deltas: keyboard" in
+`KITTY_PROTOCOL_REFERENCE.md`.
+
+---
+
+## Scrollback Memory and Resize Cost (Tasks 118-120)
+
+### Why scrollback rows are stored compactly
+
+A live `Cell` is 72 bytes: an 18-byte `TChar`, a 40-byte `FormatTag` duplicated in full on every
+cell, two flags, and an 8-byte `Option<Box<ImagePlacement>>` that is `None` for essentially every
+text cell. Adjacent cells almost always share one `FormatTag`. A feasibility spike (100k-line
+corpora) measured the saving from run-length sharing of formatting and dropping the image slot:
+
+| Corpus                  | Live cells   | Compact (Task 118) | Compact + LZ4 (Task 119) |
+| ----------------------- | ------------ | ------------------ | ------------------------ |
+| Shell session (typical) | ~4160 B/line | ~345 B/line (12x)  | ~106 B/line (~39x)       |
+| Source / logs           | ~3739 B/line | ~310 B/line (12x)  | ~120 B/line (~31x)       |
+| High-entropy coloured   | ~5800 B/line | ~732 B/line (8x)   | ~625 B/line (~9x)        |
+
+The compact form (`CompactRow`) is the only thing safe to byte-compress, because a live `Cell`
+holds `Arc` and `Box` pointers. It is lossless. Only rows that have scrolled out of the visible
+window are compacted. Rows holding an inline image opt out (rare, and the `Box` complicates the
+flat encoding for no gain). A compact row also holds no `row_cache` entry: that second flattened
+copy of cold history was part of the saving. The settled cost is ~1.0-1.7 KB/line for realistic
+coloured scrollback, so the default limit was raised from 4000 to 10000 at roughly constant memory.
+
+### Compaction lives inside `Row`, not `Buffer`
+
+Making `Buffer.rows` a `Vec<StoredRow { Live, Compact }>` touches ~228 `self.rows[...]` sites across
+all of `buffer/`; giving `Row` an internal storage enum confines the change to `row.rs`. Neither costs
+anything on the hot paths, so correctness risk decided it. `Row`'s borrow-returning accessors are the
+decompaction seam: a compact row materialises to `Live` on first access. The compact form is internal
+to `freminal-buffer`; snapshots and the GUI never see it. Resize does not decompact the whole buffer:
+`reflow_rows` moves each row's cells out by value (`Row::into_cells`) and only restores LZ4 blocks up
+front, because a block is one blob.
+
+### Compaction and compression are idle work, never hot-path work
+
+The most recent snapshot reaching the user is worth more than getting the memory saving immediately.
+Compacting synchronously in `enforce_scrollback_limit` put the cost on hot paths (`softwrap_heavy`
++45%, because reflowing one long line to width 10 creates ~420 scrollback rows inside the timed
+resize). So:
+
+- No hot path compacts. Rows that scroll into history stay `Live` until idle.
+- The PTY consumer thread's `select!` loop has an idle arm that runs a bounded budget of
+  `compact_idle_scrollback` then `compress_idle_scrollback` (compact first: only compact rows are
+  compression candidates). The thread still owns `TerminalEmulator` exclusively. The arm is not
+  re-armed once nothing is left, so a quiescent terminal is never woken forever. Interval and
+  budgets are constants in `freminal/src/gui/pty.rs`.
+- After the backlog drains, a one-shot `malloc_trim(0)` returns freed pages to the OS (glibc only).
+
+### LZ4 only, in blocks
+
+- **LZ4 (`lz4_flex`, pure Rust, block format) is the only codec.** A zstd tier was dropped: a C
+  dependency and a Windows cross-check burden for a ratio gain that does not justify it.
+- **Blocks, never per line.** A ~40-byte line compresses terribly and pays fixed per-call overhead.
+  A block is 256 rows (~88 KB flat, ~34 us to decompress). Per-call overhead, block granularity and
+  allocation churn govern the on-the-fly cost, hence a reusable scratch buffer.
+- **Single residency.** A row is `Live`, `Compact`, or in exactly one compressed block, never two.
+  Touching a block decompresses it to `Compact` (not `Live`) and removes it from the block store;
+  the idle tick compresses it again later. A decompressed-block LRU was planned and not built.
+- The visible rows and the compact rows near the viewport are never compressed.
+
+### Resize: coalesce, do not window
+
+Measured 2026-10-08: a full-scrollback reflow was ~100-190 ms at the 10k default and ~1-1.5 s at the
+100k maximum; LZ4 added only ~25-50%. The cost is proportional to scrollback depth, not to the width
+delta. The real defect was uncoalesced drags: the GUI sends one `InputEvent::Resize` per frame in which
+the grid changes, and the PTY thread reflowed every intermediate size in order while processing no
+output (a 60-column drag queued ~3.8 s of reflow at 10k). About 70% of reflow time was `Cell`
+clone/drop and per-row image-cell counting.
+
+- **Coalesce on the PTY thread**, where the backlog forms. A GUI-side debounce was rejected: it adds
+  latency to every resize and cannot help a backlog that forms during a long reflow.
+- **Order is preserved.** Only a `Resize` superseded by a later `Resize` is dropped; the first
+  non-resize event ends the drain. The child only sees the applied size (`TIOCSWINSZ`), and a FREC
+  recording holds one `PaneResize` for it.
+- **Move, do not clone.** `reflow_to_width` consumes the rows it discards; the image scan and recount
+  are skipped when `image_cell_count` is zero (an exact, debug-asserted invariant).
+- Result: 26-67 ms per resize at 10k. Windowed reflow was not built; see `FUTURE_PLANS.md` B.10.
+
+Every width change reflows: font zoom, gutter toggle, pane split, zoom/unzoom, closing a pane, window
+snap or maximize, and the Settings preview. Height-only changes do not.
+
+## Orchestration Extraction (Task 122)
+
+### What was actually wrong
+
+`App::update` had grown to 3,132 lines, its `central_body` closure to 2,033, `widget.rs::show` to
+1,882, and `write_input_to_terminal` to 1,226 lines with 17 parameters. The drift was entirely in the
+frame path, with one nameable cause: **render-time state written during a frame purely so a consumer
+outside any frame can read it, with no name, type or invariant.** The out-of-frame pointer-motion
+repaint predicate needed toast phase, resize-HUD schedule, toast geometry, pane layout and gutter
+widths, and each was cached ad hoc on `PerWindowState`.
+
+Three lifetime classes were separated, because only one was unowned:
+
+- **Intra-frame drains** (`take_frame_damage`, `take_chrome_damage`): drained by
+  `freminal-windowing` synchronously after `update()`, reset-on-read. Left alone.
+- **Cross-event-boundary reads** from the `CursorMoved` fast path between `update()` calls: given a
+  type, `PublishedFrameState`. Each field reaches its final value at most once per completing
+  `update()`, from one site; it is one frame stale by construction; an early-returning `update()`
+  leaves the previous values intact.
+- **Cross-module next-frame caches** on `PaneRenderCache`: noted, not restructured.
+
+### Decisions
+
+- **Modules designed as if they were crates.** Crate extraction needs maintainer sign-off and is
+  deferred, not decided (see `DECOUPLING_FRAMEWORK.md`).
+- **The `App` trait keeps `egui::Pos2`.** The app side converts to `freminal_common::geometry::Point`
+  on entry. Changing the trait would widen a no-behaviour-change refactor into API design the egui
+  decision has not been made for.
+- **Neutral geometry is scoped to `panes/mod.rs`'s own math.** `Rect::contains` is inclusive on all
+  four bounds: `split_rect` gives both halves the same boundary coordinate, and a half-open rule would
+  make every split a one-pixel dead stripe.
+- **`write_input_to_terminal` is not decomposed.** Its concerns are interleaved, and the apparent
+  duplicate is a trap: `control_key` maps `Space` to `Ctrl(NUL)` and has a C0 table,
+  `egui_key_to_terminal_input` maps `Space` to a space and has none, and both are right for their call
+  sites. Characterisation tests pin the divergence (FUTURE_PLANS B.16). Its parameters were named
+  instead (`InputCarryState`, `PaneFocus`).
+- **Success criterion: the pointer-motion pane-resolution chain is headlessly testable**, not line
+  counts.
+
+### Extraction that does not relocate makes the file bigger
+
+Three subtasks extracted logic but left the new types and tests in the god file, which then grew. Each
+was fixed by moving the concept to its own module (`pointer_motion.rs`, `frame_drain.rs`,
+`terminal/frame_dirty.rs`) with visibility no wider than `pub(super)`. **An extraction is not done until
+the extracted code has a home outside the file it came from.**
+
+### Benchmarking pane resolution on a development laptop
+
+The `pane_resolution_bench` IDs are nanosecond-scale: two pinned runs of the identical binary differed
+by more than 15% on 12 of 39 IDs. They are good for algorithmic shape within one run and for
+order-of-magnitude changes, not for a 15% gate; do not report per-ID percentage deltas.
+
+---
+
 ## Render Performance: the Phase 0 / Task 121 outcome (Task 124.8)
 
 ### Why this entry exists at all
 
 `Documents/DECOUPLING_FRAMEWORK.md` §2A is the source of truth for the
-Phase 0 measurements, and `PLAN_121_PERF_REMEDIATION.md` is the closed
-record of the work. This entry exists because both are documents a future
+Phase 0 measurements, and Task 121's plan (retired; in git history) was
+the work tracker. This entry exists because both are documents a future
 reader has to know to go looking for, and because the durable lesson is not
 in either one's conclusions — it is in **how often the conclusions were
 wrong**.
@@ -1181,6 +1691,255 @@ a test that agrees with you.
    issue #459 had deleted, and it stated precisely the hypothesis under
    investigation — a reader checking the docs would have taken a false
    confirmation of a refuted diagnosis (fixed as 124.C1).
+
+### The chrome cache: final disposition
+
+The #436 chrome cache was removed (Task 124.5), not merely disabled. `ChromeMode::Replay` skipped
+_constructing_ chrome widgets, and egui resolves hit-testing against the **previous** frame's widget
+set, so unbuilt widgets were uninteractable. That shipped in 0.12.0-beta.7 as lost tab clicks and
+inconsistent pane-border drags, worst while a TUI ran in a pane.
+
+- **Hover is not evidence the cache works.** A `Replay` frame replays the cached texture, highlight
+  included, so hover looks live while the widget set behind it is absent.
+- **Input latency appears before dropped clicks.** A click that landed on a `Replay` frame waited for
+  the next `Full` frame. If a cache is ever reintroduced, watch for latency first.
+- **No scheduling policy repairs it.** The frame whose mode decides whether a click can land is the
+  frame _before_ an event that has not happened yet. Three code-reading hypotheses were each disproved
+  by one click test; measure this subsystem, do not argue about it.
+- **The sound variant** (cache tessellated output while still constructing the widgets) has a measured
+  ceiling of chrome construction 32.9 us plus tessellation 10.3 us, about 8% of a ~434 us frame. It was
+  not built; it would bring back egui assumption A12.
+
+### Candidates declined, refuted or never built
+
+Recorded so they are not re-litigated; each stands on its own measurement.
+
+| Candidate                                       | Verdict            | Why                                                                                                                                                                                               |
+| ----------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Incremental vertex-instance build (#459 item 3) | Refuted (Task 125) | Per-row instance counts are content-dependent, so one cell shifts every later row's offset; `deco_verts` is not row-major; a maintained offset index is the bug class of issue #432.              |
+| ASCII / simple-text shaping fast path (item 4)  | Dead on arrival    | ASCII does not imply "cannot ligate" (`->`, `=>`, `!=`), so the only safe gate is `ligatures == false`, which is not the default. The surviving lever was the run-level shaping cache (Task 124). |
+| Compute-dispatched buffer clear (item 6)        | No freminal lever  | freminal issues a plain `glClear`; the compute clear is Mesa radeonsi's internal fast-clear. The clear is load-bearing: default-background cells emit no quad because the clear paints them.      |
+| `wayland_client_handle` call frequency (item 7) | Not actionable     | freminal fetches the handle once per window; the callers are in calloop-wayland-source and winit, and the sample share was suspect.                                                               |
+| Per-`CursorMoved` `Vec` allocations             | Refuted            | `layout()` + `iter_panes()` cost ~22.8 ns at one pane, ~1.4% of the residual they were blamed for.                                                                                                |
+| Unbounded suppressed-pointer fallback           | Rejected           | Driven by `Context::repaint_causes()`, it depends on five egui internals, two of them present-day holes, for ~0.075% of a core over the 500 ms fallback.                                          |
+| Config kill switch for pointer suppression      | Rejected           | It ships two code paths and tests neither. Scheduling behaviour is not a user toggle; the remedy for misbehaviour is fix or revert.                                                               |
+
+A CPU meter cannot discriminate between vetoed and unvetoed pointer paths (a ~1.1% burst lasting a few
+hundred ms averages to 0.1-0.2%). Use the `frame-profiling` counters.
+
+---
+
+## GL Call Boundary and Measurement Harnesses (Task 123)
+
+### Why a concrete `Gl` facade
+
+`glow::HasContext` is sealed: it is implemented only for glow's own `native::Context`, so a recording
+wrapper cannot implement it. The facade is a concrete `Gl<'a>` over an internal `Real` / `Recording`
+enum, never a trait object or a generic parameter; a trait would have forced generics onto about 52
+`&glow::Context` parameters, and the enum keeps the `Real` arm monomorphic.
+
+The call surface is frozen in `gl_facade/surface.rs` (`GL_CALL_SURFACE`: draw, state and upload calls
+plus the timer-query and capability calls added by Task 125). A test walks the `freminal` crate and
+fails if `HasContext` is mentioned outside an allowlist, in both directions, so a new raw call fails and
+a stale allowlist entry fails.
+
+Known boundary: `freminal-windowing` still calls `glow` directly (`GlState::clear`, `clear_scissored`,
+the offscreen context, the GPU timing source). The guard cannot see it, and the recording log omits two
+zero-byte calls (`clear_color`, `clear`) on every `Full` frame. Extending the facade needs either
+exporting `Gl` from a lower crate or duplicating it (FUTURE_PLANS B.14).
+
+### Zero cost is verified by reading assembly, not by benchmarking
+
+The facade adds at most one pointer load in front of an indirect jump into the driver; a Criterion
+benchmark could only fail to detect that. `assets/ci/check-gl-dispatch-codegen.sh` builds
+`gl_facade/codegen_probe.rs` (`gl-codegen-probe`) at `--release` and fails on conditional control flow
+in the emitted bodies. The realistic shape (build the facade once, make several calls) is folded by LLVM
+into an alias of the direct-call version. It is a manual script, not a `#[test]`, because it is
+toolchain- and architecture-specific. A default build pins `size_of::<Gl>() == size_of::<&Context>()`.
+
+### Phase 1: the recording harness
+
+The `Recording` arm fabricates handles, needs no GPU or display, and runs in the normal four-platform
+test matrix. Its tests are gated on `gl-recording` and run in CI only because `xtask test` passes
+`--all-features`; if that flag is dropped the harness stops running and nothing fails.
+
+Reference data (80x24, bundled font, `pixels_per_point = 1.0`):
+
+| Workload            | Calls | Draws | State changes | Uploads | Bytes     |
+| ------------------- | ----- | ----- | ------------- | ------- | --------- |
+| One-time init       | 261   | 0     | 30            | 2       | 96        |
+| Full redraw, steady | 52    | 2     | 21            | 4       | ~200,000  |
+| Cursor-only, steady | ~48   | 2     | ~19           | ~2      | ~576      |
+| Toast present       | 121   | 4     | 41            | 10      | 4,658,448 |
+
+A full rebuild costs roughly 350x the bytes of a cursor-only frame for roughly 1.08x the calls: the
+cursor-only path is a bandwidth optimisation, not a call-count one. Call count is independent of grid
+size; only instance count and bytes scale. The harness drives the renderer below the GUI layer, so it
+measures what each path costs, not which path a frame takes.
+
+### Phase 2: the pixel harness
+
+- Linux-only. winit has no headless backend and the CI `test` matrix does not run under Nix, so the
+  harness has its own `gl-pixel` dev shell and an advisory `.github/workflows/gl-pixel.yml` (weekly plus
+  manual), not a job in `nightly.yml`, where a rasteriser change could block a release.
+- `glPixelEnv` (llvmpipe) is set in the `gl-pixel` shell only, never in `default` or `ci`: in `default`
+  it forced every interactively run freminal onto the CPU rasteriser.
+- The tolerance is exact, decided before any golden existed. A golden is only comparable on the
+  rasteriser that captured it (the `.renderer` sidecar); llvmpipe numbers are never performance
+  evidence.
+- `freminal-windowing/src/frame_paint_harness.rs` runs egui's head/band/tail split on an offscreen
+  surface with a caller-chosen buffer age, which is what makes the real double-buffered case (age 2)
+  testable.
+
+## Damage Model (Task 124)
+
+The rules live in the `freminal-damage-model` skill; this records why the model has this shape.
+
+### A bool cannot cross a many-producers-to-one-consumer boundary
+
+The dirty signal was collapsed to a `bool` at four places between the buffer and the GPU. The emulator
+computed an accurate content diff and the GUI discarded it for `Arc::ptr_eq`, because a sticky
+`content_changed` bool went stale across the roughly 14 snapshots published between rendered frames. A
+monotonic counter compared against a baseline the consumer holds cannot be lost by a skipped frame.
+
+### Per-row content epoch
+
+- It lives on the merge output (`MergeCache::row_epochs`), not on `RowCacheEntry`: URL refinement is
+  applied at merge time and never written back, and per-row counters over an absolute-indexed cache
+  alias when the window slides.
+- One globally monotonic `u64` on `Buffer`, deliberately not a content hash: a collision is an
+  under-report, and an under-report is silent visual corruption. The stamp can only over-report.
+- `Row::dirty` means "was written to"; the epoch means "actually changed". Full-screen TUIs rewrite
+  identical bytes by idiom.
+- The basis is `chars`, post-refinement `tags`, `line_width` and inline image placements, compared in
+  one choke point (`RowRenderBasis::row_renders_identically`). Compare a whole `ImagePlacement`
+  literally: an omitted field is corruption, a field that does not matter only costs a repaint.
+- Only under-reporting is dangerous, so every "does not bump" test needs a "does bump" control.
+  `debug_verify_epochs` is an always-on `debug_assertions` oracle for the carrying direction.
+- Accepted over-reporter: an alternate-screen round trip restamps every row (a per-buffer merge-cache
+  stash was declined because an incorrect stash under-reports).
+
+### The two missing states
+
+- `PaneFrameDamage::Region(Vec<PaneDamageRect>)` carries rects, not one bounding box: a bbox is lossy
+  (rows 3 and 40 would present the 37 between them). An empty rect set is reported as `Full`.
+- `FrameDamage::None` still runs egui's UI pass but skips tessellation, clear, paint and swap, and
+  records no `DamageHistory` entry.
+- `VertexRebuild::Bounded` bounds the present, not the upload. `upload_verts` writes whole buffers,
+  because no instance buffer has a fixed stride per row (see "Fixed-stride relayout" under Task 125).
+- Selection and hover damage are cached in screen-row space, because buffer-absolute and snapshot-row
+  spaces alias when the window moves. Hover tint is baked into the background buffer.
+- Search crosses the terminal/chrome split: the framebuffer is one surface, so search highlight rows
+  and the floating search-bar bounds (plus egui's popup shadow margin) are composed into `FrameDamage`.
+
+### Partial present was inert, and three defects hid behind it
+
+`decide_partial_present` required `buffer_age() == 1`. A double-buffered GPU surface reports 2 in
+steady state, so on real hardware the path was taken 0 times in 8,160 frames; llvmpipe reports 1,
+which is why a first, llvmpipe-contaminated measurement concluded the gate was open.
+
+- Windowing owns the staleness arithmetic: `DamageHistory` unions the current damage with the previous
+  `age - 1` frames and publishes one bounding `PresentRegion`. The app emits rects and never learns
+  `buffer_age`. `age == 0` or history deeper than retained falls back to `Full`.
+- Every egui primitive's clip rect is intersected with that region (head/band/tail chrome painted
+  unconditionally, and the opaque `CentralPanel` erased everything outside the band).
+- The clear is scissored to the region, not skipped: skipping it makes translucent content blend
+  against stale pixels (`a*fill + (1-a)*stale`).
+- The app's full-draw paint arm reads the same `PresentRegion` through one helper as the partial arm.
+- One region governs clip, clear, draw and present. Multi-rect scissoring is a later optimisation to
+  justify by measurement.
+- Result (AMD GPU, Hyprland, sustained output): `buffer_age()` is 2 on every query and 86-88% of frames
+  take the partial path, with no corruption.
+
+The clear itself is not removable: it is two zero-byte calls on a fast-clear path. Painting every cell
+opaque would delete window transparency (Task 34), an alpha-zero quad writes nothing under blending, and
+disabling blending breaks the image and shader layers.
+
+### Pointer motion and PTY mouse reports are separate axes
+
+A mouse report used to be encoded only inside the frame path, masked by `mouse_tracking_active` forcing
+a repaint on every motion event.
+
+- Reports are emitted from a synchronous, PTY-agnostic `freminal-windowing::App` hook
+  (`pty_mouse_report.rs`), independent of scheduling; one physical motion produces at most one report.
+- Held-button state is window-owned; per-pane state could strand a press across a focus or tab change.
+- Repaint suppression is positional (content cell, gutter row, scrollbar hit rect, outside, unknown),
+  not a bool: a scrollbar A -> B move is `true -> true` as a bool but still needs a repaint. Missing
+  geometry resolves to unknown and forces a repaint. A drag always forces.
+- Result: a pointer over `btop` gave 920 events/s, 99.89% suppressed (~4.9 fps, btop's own redraws).
+
+### Shaping: run-level cache
+
+The line cache is keyed by line index, so a one-line scroll missed every line although 23 of 24 rows
+were byte-identical. `ShapingCache` also holds a content-addressed run cache keyed by exact
+`(FaceId, LigatureShaping, run text, per-character widths)` (exact equality, not a hash; widths joined
+the key because equal text with different grapheme widths aliased). Two generations, rotating only on
+miss-bearing calls; templates are shaped at column 0 and rebased on a hit. A one-line scroll went
+975.7 -> 198.4 us.
+
+### GPU buffer orphaning
+
+`upload_verts` orphans small payloads only above `SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES` (4 KiB, a bound,
+not a measured optimum). `glBufferSubData` is synchronous with respect to prior GL commands, so skipping
+the orphan cannot tear; issue #432's corruption was CPU-side offset bookkeeping.
+
+## Performance Parity and the `RowStore` (Task 125)
+
+### Parity verdicts
+
+Measured against WezTerm and Ghostty on a Radeon RX 7900 XTX under Hyprland, 10 workloads; the protocol
+is in `PROFILING.md`. A gap is material only if the bootstrap 95% CI of the paired task-clock delta
+excludes zero and the median delta is at least 0.5 ms per wall-second.
+
+| Candidate                             | Verdict      |
+| ------------------------------------- | ------------ |
+| Idle / cursor-blink / retained chrome | refuted      |
+| Fixed-stride per-row uploads          | refuted      |
+| Incremental CPU row construction      | refuted      |
+| Persistent GPU buffers                | refuted      |
+| Scheduling / wakeups                  | refuted      |
+| Presentation / compositor             | refuted      |
+| Scroll-aware row reuse                | refuted      |
+| Scrollback eviction                   | confirmed    |
+| Pointer workload                      | inconclusive |
+
+`sustained-output` was 428.9 ms/s against 19.9 (WezTerm) and 37.1 (Ghostty): 96.5% of samples were in
+`memmove` under `Vec::drain` in `Buffer::enforce_scrollback_limit`. Once scrollback is full, every line
+feed shifted ~20,000 entries.
+
+### Fixed-stride relayout (refuted)
+
+Do not revive it without new evidence. If it is revisited: fixed stride beats a maintained offset table
+(the table must be invalidated on every per-row content, format and blink-visibility change); padded
+slots must emit no fragments, because `DefaultBackground` means "leave pixels untouched"; `deco_verts`
+keeps its cursor-quad-last invariant, which makes the cursor-only patch offset stable.
+
+### Scrollback eviction and the `RowStore`
+
+- Rows were addressed by physical position in three manually synchronised `Vec`s (`rows`, `row_cache`,
+  `row_block_map`), so front eviction shifted storage and every holder of a row index had to be
+  rewritten or silently drifted (selection, DECSC, kitty placements). Batched eviction was rejected: it
+  stays O(retained), loosens the exact limit and keeps the drift bugs.
+- `RowStore` keeps the three `Vec`s with a shared moving `head` plus a `base: RowNumber`. Eviction
+  replaces slots with placeholders and advances `head` and `base`; it compacts at `max(live / 2, 64)`
+  dead slots. `VecDeque` was rejected: flatten needs single contiguous `&mut` slices.
+- `RowNumber(u64)` is never reused. RIS and ED 3 advance `base` rather than resetting it; the alternate
+  screen's namespace starts at `1 << 63`. Width-changing reflow installs rows at the old `next_number()`
+  and returns a `ReflowRemap` for prompts, blocks, saved cursor, images and kitty placements; anything
+  not remapped falls below `base` and is detectably invalid instead of aliasing.
+- Cursor position and `scroll_offset` stay screen-relative; prompts, block rows, image origins, kitty
+  placements and GUI selection/search anchors are logical.
+- Search staleness is keyed on `BufferExtent { row_base, total_rows }`, because a sum does not change
+  across ED 3.
+- Result: a 200-line burst at capacity fell from 4.39 ms to ~118 us; eviction no longer scales with
+  retained rows. `sustained-output` became 8.9 ms/s versus 19.2 and 37.5.
+
+### Benchmark-validity cautions
+
+- `sustained-output` repeats `seq 1 200`, so the screen is identical after each burst and row epochs
+  make Freminal paint almost nothing. `sustained-output-varying` (`seq n n+199`) removes that effect;
+  Freminal still used the least CPU and GPU of the three.
+- An OSC 133 workload only exercises blocks if the marks carry freminal's `freminal=1;fid=` parameters.
 
 ---
 

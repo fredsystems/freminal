@@ -8,7 +8,7 @@
 //!
 //! Everything is driven through raw bytes, exactly as the PTY thread does.
 //! The reference behaviour is the consensus of xterm, Ghostty, `WezTerm` and
-//! kitty; see `Documents/PLAN_VERSION_130.md` ("131 Decisions").
+//! kitty; see `Documents/PLAN_VERSION_130_0.md` ("131 Decisions").
 
 use freminal_buffer::cell::Cell;
 use freminal_common::cursor::CursorVisualStyle;

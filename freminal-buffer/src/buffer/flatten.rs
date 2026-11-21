@@ -4406,8 +4406,8 @@ mod row_epoch_tests {
     // ────────────────────────────────────────────────────────────────
     // 6 — wrapped-URL group redetection bumps a row that was never
     //     itself written to (the case a `RowCacheEntry`-keyed design
-    //     would have missed; see finding (c) in
-    //     Documents/PLAN_124_RENDER_EFFICIENCY.md)
+    //     would have missed; see Documents/DESIGN_DECISIONS.md, "Damage
+    //     Model (Task 124)" / "Per-row content epoch")
     // ────────────────────────────────────────────────────────────────
 
     #[test]

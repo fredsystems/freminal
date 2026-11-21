@@ -19,8 +19,9 @@
 # the definition of a flaky test.
 #
 # So this is a reproducible manual/CI-dispatch check whose result is
-# recorded in `PLAN_123_GL_MEASUREMENT_HARNESS.md` alongside the toolchain
-# that produced it, rather than a gate that would be fragile by nature.
+# recorded in `Documents/DESIGN_DECISIONS.md` ("GL Call Boundary and
+# Measurement Harnesses (Task 123)" / "Zero cost is verified by reading
+# assembly, not by benchmarking") alongside the toolchain that produced it, rather than a gate that would be fragile by nature.
 
 set -euo pipefail
 

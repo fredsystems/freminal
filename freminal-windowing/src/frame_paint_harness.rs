@@ -742,7 +742,9 @@ mod tests {
     /// every primitive's `clip_rect` with the redraw region before
     /// painting on a `Taken` frame, which is what turns this from a defect
     /// pin into a fix pin. This inversion is mandatory, not a rewrite of
-    /// convenience -- see `PLAN_124_RENDER_EFFICIENCY.md`'s 124.18.
+    /// convenience -- see Task 124.18 and `Documents/DESIGN_DECISIONS.md`,
+    /// "Damage Model (Task 124)" / "Partial present was inert, and three
+    /// defects hid behind it".
     #[test]
     fn a_taken_partial_present_preserves_pixels_outside_the_damage_region() {
         let Some(mut driver) = new_driver_or_skip(
@@ -1120,8 +1122,9 @@ mod tests {
     /// (`GlState::clear_scissored`, reached through
     /// `FrameSurface::clear_region_to`), which is what turns this from a
     /// defect pin into a fix pin. This inversion is mandatory, not a
-    /// rewrite of convenience -- see `PLAN_124_RENDER_EFFICIENCY.md`'s
-    /// 124.20.
+    /// rewrite of convenience -- see Task 124.20 and
+    /// `Documents/DESIGN_DECISIONS.md`, "Damage Model (Task 124)" / "Partial
+    /// present was inert, and three defects hid behind it".
     #[test]
     fn a_taken_frame_scissors_the_clear_to_the_redraw_region() {
         let Some(mut driver) =

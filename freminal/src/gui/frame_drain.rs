@@ -18,8 +18,9 @@
 //!
 //! This is a **pure move**: no logic changed, no test assertion changed,
 //! and the test count is identical to before the move. See
-//! `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` subtask 122.11a for the
-//! rationale and the line-count history that motivated it.
+//! `Documents/DESIGN_DECISIONS.md`, "Orchestration Extraction (Task 122)" /
+//! "Extraction that does not relocate makes the file bigger" (subtask
+//! 122.11a) for the rationale that motivated it.
 //!
 //! [`FreminalGui::route_window_manipulation_events`] (`app_impl.rs`)
 //! deliberately stays behind: it takes `&self` and touches enough

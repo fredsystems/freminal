@@ -10295,7 +10295,8 @@ mod coverage_gap_tests {
 //
 //   cargo test -p freminal-buffer --lib task_113_smoke
 //
-// See Documents/PLAN_VERSION_100.md "Task 113" for the full diagnosis.
+// See Documents/DESIGN_DECISIONS.md "Primary-Buffer Height Grow (Task 113)"
+// for the full diagnosis.
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod task_113_smoke {
