@@ -1526,7 +1526,7 @@ mod tests {
 
     #[test]
     fn request_paste_command_sets_only_paste_flag() {
-        // Regression (PLANNING #1 / Task 106.1): the terminal right-click
+        // Regression (Task 106.1): the terminal right-click
         // "Paste" menu sends `ViewportCommand::RequestPaste`. Before the fix
         // this command fell through to the catch-all log-and-ignore arm, so
         // right-click paste silently did nothing.
