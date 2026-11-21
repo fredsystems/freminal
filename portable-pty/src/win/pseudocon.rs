@@ -3,20 +3,19 @@ use crate::cmdbuilder::CommandBuilder;
 use crate::win::procthreadattr::ProcThreadAttributeList;
 use anyhow::{Error, bail, ensure};
 use filedescriptor::{FileDescriptor, OwnedHandle};
-use lazy_static::lazy_static;
 use shared_library::shared_library;
 use std::ffi::OsString;
 use std::io::Error as IoError;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::{LazyLock, Mutex};
 use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
 use winapi::shared::winerror::{HRESULT, S_OK};
-use winapi::um::handleapi::*;
-use winapi::um::processthreadsapi::*;
+use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+use winapi::um::processthreadsapi::{CreateProcessW, PROCESS_INFORMATION};
 use winapi::um::winbase::{
     CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
@@ -58,18 +57,12 @@ fn load_conpty() -> anyhow::Result<ConPtyFuncs> {
     // We prefer to use a sideloaded conpty.dll and openconsole.exe host deployed
     // alongside the application.  We check for this after checking for kernel
     // support so that we don't try to proceed and do something crazy.
-    if let Ok(sideloaded) = ConPtyFuncs::open(Path::new("conpty.dll")) {
-        Ok(sideloaded)
-    } else {
-        Ok(kernel)
-    }
+    Ok(ConPtyFuncs::open(Path::new("conpty.dll")).unwrap_or(kernel))
 }
 
-lazy_static! {
-    static ref CONPTY: anyhow::Result<ConPtyFuncs> = load_conpty();
-}
+static CONPTY: LazyLock<anyhow::Result<ConPtyFuncs>> = LazyLock::new(load_conpty);
 
-/// Returns a reference to the loaded ConPty functions, or an error if conpty is unavailable.
+/// Returns a reference to the loaded `ConPty` functions, or an error if conpty is unavailable.
 fn conpty() -> anyhow::Result<&'static ConPtyFuncs> {
     CONPTY
         .as_ref()
@@ -102,18 +95,21 @@ impl PseudoCon {
         let result = unsafe {
             (funcs.CreatePseudoConsole)(
                 size,
-                input.as_raw_handle() as _,
-                output.as_raw_handle() as _,
+                input.as_raw_handle().cast(),
+                output.as_raw_handle().cast(),
                 PSEUDOCONSOLE_INHERIT_CURSOR
                     | PSEUDOCONSOLE_RESIZE_QUIRK
                     | PSEUDOCONSOLE_WIN32_INPUT_MODE,
-                &mut con,
+                &raw mut con,
             )
         };
+        // The pseudo console holds its own duplicates of these pipe ends; close
+        // ours now so the child sees EOF once the master side goes away.
+        drop(input);
+        drop(output);
         ensure!(
             result == S_OK,
-            "failed to create pseudo console: HRESULT {}",
-            result
+            "failed to create pseudo console: HRESULT {result}"
         );
         Ok(Self { con })
     }
@@ -131,9 +127,9 @@ impl PseudoCon {
         Ok(())
     }
 
-    pub fn spawn_command(&self, cmd: CommandBuilder) -> anyhow::Result<WinChild> {
+    pub fn spawn_command(&self, cmd: &CommandBuilder) -> anyhow::Result<WinChild> {
         let mut si: STARTUPINFOEXW = unsafe { mem::zeroed() };
-        si.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
+        si.StartupInfo.cb = u32::try_from(mem::size_of::<STARTUPINFOEXW>())?;
         // Explicitly set the stdio handles as invalid handles otherwise
         // we can end up with a weird state where the spawned process can
         // inherit the explicitly redirected output handles from its parent.
@@ -164,30 +160,28 @@ impl PseudoCon {
                 ptr::null_mut(),
                 0,
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
-                cwd.as_ref()
-                    .map(|c| c.as_slice().as_ptr())
-                    .unwrap_or(ptr::null()),
-                &mut si.StartupInfo,
-                &mut pi,
+                cmd.environment_block().as_mut_slice().as_mut_ptr().cast(),
+                cwd.as_ref().map_or(ptr::null(), |c| c.as_slice().as_ptr()),
+                &raw mut si.StartupInfo,
+                &raw mut pi,
             )
         };
         if res == 0 {
             let err = IoError::last_os_error();
             let msg = format!(
-                "CreateProcessW `{:?}` in cwd `{:?}` failed: {}",
-                cmd_os,
+                "CreateProcessW `{}` in cwd `{:?}` failed: {}",
+                cmd_os.display(),
                 cwd.as_ref().map(|c| OsString::from_wide(c)),
                 err
             );
-            log::error!("{}", msg);
-            bail!("{}", msg);
+            log::error!("{msg}");
+            bail!("{msg}");
         }
 
         // Make sure we close out the thread handle so we don't leak it;
         // we do this simply by making it owned
-        let _main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
-        let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) };
+        let _main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread.cast()) };
+        let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess.cast()) };
 
         Ok(WinChild {
             proc: Mutex::new(proc),

@@ -3,12 +3,17 @@ use anyhow::{Error, ensure};
 use std::io::Error as IoError;
 use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
-use winapi::um::processthreadsapi::*;
+use winapi::um::processthreadsapi::{
+    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    UpdateProcThreadAttribute,
+};
 
-const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
+const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
 
 pub struct ProcThreadAttributeList {
-    data: Vec<u8>,
+    /// Backed by `usize` words, not bytes, so the buffer has the pointer
+    /// alignment `PROC_THREAD_ATTRIBUTE_LIST` requires.
+    data: Vec<usize>,
 }
 
 impl ProcThreadAttributeList {
@@ -19,7 +24,7 @@ impl ProcThreadAttributeList {
                 ptr::null_mut(),
                 num_attributes,
                 0,
-                &mut bytes_required,
+                &raw mut bytes_required,
             )
         };
         // Allocate the buffer zero-initialized rather than
@@ -27,11 +32,11 @@ impl ProcThreadAttributeList {
         // bytes as an initialized `&mut [u8]` — UB, flagged by
         // `clippy::uninit_vec`). The win32 APIs below populate the bytes;
         // the extra memset of this small buffer is negligible.
-        let mut data = vec![0u8; bytes_required];
+        let mut data = vec![0usize; bytes_required.div_ceil(mem::size_of::<usize>())];
 
-        let attr_ptr = data.as_mut_slice().as_mut_ptr() as *mut _;
+        let attr_ptr = data.as_mut_slice().as_mut_ptr().cast();
         let res = unsafe {
-            InitializeProcThreadAttributeList(attr_ptr, num_attributes, 0, &mut bytes_required)
+            InitializeProcThreadAttributeList(attr_ptr, num_attributes, 0, &raw mut bytes_required)
         };
         ensure!(
             res != 0,
@@ -41,8 +46,8 @@ impl ProcThreadAttributeList {
         Ok(Self { data })
     }
 
-    pub fn as_mut_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
-        self.data.as_mut_slice().as_mut_ptr() as *mut _
+    pub const fn as_mut_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+        self.data.as_mut_slice().as_mut_ptr().cast()
     }
 
     pub fn set_pty(&mut self, con: HPCON) -> Result<(), Error> {

@@ -34,11 +34,11 @@ fn openpty(size: PtySize) -> anyhow::Result<(UnixMasterPty, UnixSlavePty)> {
         // BSDish systems may require mut pointers to some args
         #[allow(clippy::unnecessary_mut_passed)]
         libc::openpty(
-            &mut master,
-            &mut slave,
+            &raw mut master,
+            &raw mut slave,
             ptr::null_mut(),
             ptr::null_mut(),
-            &mut size,
+            &raw mut size,
         )
     };
 
@@ -144,8 +144,9 @@ fn tty_name(fd: RawFd) -> Option<PathBuf> {
 /// On Big Sur, Cocoa leaks various file descriptors to child processes,
 /// so we need to make a pass through the open descriptors beyond just the
 /// stdio descriptors and close them all out.
+///
 /// This is approximately equivalent to the darwin `posix_spawnattr_setflags`
-/// option POSIX_SPAWN_CLOEXEC_DEFAULT which is used as a bit of a cheat
+/// option `POSIX_SPAWN_CLOEXEC_DEFAULT` which is used as a bit of a cheat
 /// on macOS.
 /// On Linux, gnome/mutter leak shell extension fds to wezterm too, so we
 /// also need to make an effort to clean up the mess.
@@ -197,7 +198,7 @@ impl PtyFd {
             libc::ioctl(
                 self.0.as_raw_fd(),
                 libc::TIOCSWINSZ as _,
-                &ws_size as *const _,
+                &raw const ws_size,
             )
         } != 0
         {
@@ -212,14 +213,7 @@ impl PtyFd {
 
     fn get_size(&self) -> Result<PtySize, Error> {
         let mut size: winsize = unsafe { mem::zeroed() };
-        if unsafe {
-            libc::ioctl(
-                self.0.as_raw_fd(),
-                libc::TIOCGWINSZ as _,
-                &mut size as *mut _,
-            )
-        } != 0
-        {
+        if unsafe { libc::ioctl(self.0.as_raw_fd(), libc::TIOCGWINSZ as _, &raw mut size) } != 0 {
             bail!(
                 "failed to ioctl(TIOCGWINSZ): {:?}",
                 io::Error::last_os_error()
@@ -233,7 +227,7 @@ impl PtyFd {
         })
     }
 
-    fn spawn_command(&self, builder: CommandBuilder) -> anyhow::Result<std::process::Child> {
+    fn spawn_command(&self, builder: &CommandBuilder) -> anyhow::Result<std::process::Child> {
         let configured_umask = builder.umask;
 
         let mut cmd = builder.as_command()?;
@@ -259,7 +253,11 @@ impl PtyFd {
                     }
 
                     let empty_set: libc::sigset_t = std::mem::zeroed();
-                    libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
+                    libc::sigprocmask(
+                        libc::SIG_SETMASK,
+                        &raw const empty_set,
+                        std::ptr::null_mut(),
+                    );
 
                     // Establish ourselves as a session leader.
                     if libc::setsid() == -1 {
@@ -344,7 +342,7 @@ impl SlavePty for UnixSlavePty {
         &self,
         builder: CommandBuilder,
     ) -> Result<Box<dyn Child + Send + Sync>, Error> {
-        Ok(Box::new(self.fd.spawn_command(builder)?))
+        Ok(Box::new(self.fd.spawn_command(&builder)?))
     }
 }
 

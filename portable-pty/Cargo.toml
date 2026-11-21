@@ -28,7 +28,6 @@ smol.workspace = true
 
 [target."cfg(windows)".dependencies]
 bitflags.workspace = true
-lazy_static.workspace = true
 shared_library.workspace = true
 winapi = { workspace = true, features = [
   "consoleapi",
@@ -43,3 +42,6 @@ winreg.workspace = true
 [features]
 default = []
 serde = ["dep:serde"]
+
+[lints]
+workspace = true

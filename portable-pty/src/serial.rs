@@ -1,4 +1,5 @@
 //! This module implements a serial port based tty.
+//!
 //! This is a bit different from the other implementations in that
 //! we cannot explicitly spawn a process into the serial connection,
 //! so we can only use a `CommandBuilder::new_default_prog` with the
@@ -43,23 +44,23 @@ impl SerialTty {
         }
     }
 
-    pub fn set_baud_rate(&mut self, baud: u32) {
+    pub const fn set_baud_rate(&mut self, baud: u32) {
         self.baud = baud;
     }
 
-    pub fn set_char_size(&mut self, char_size: CharSize) {
+    pub const fn set_char_size(&mut self, char_size: CharSize) {
         self.char_size = char_size;
     }
 
-    pub fn set_parity(&mut self, parity: Parity) {
+    pub const fn set_parity(&mut self, parity: Parity) {
         self.parity = parity;
     }
 
-    pub fn set_stop_bits(&mut self, stop_bits: StopBits) {
+    pub const fn set_stop_bits(&mut self, stop_bits: StopBits) {
         self.stop_bits = stop_bits;
     }
 
-    pub fn set_flow_control(&mut self, flow_control: FlowControl) {
+    pub const fn set_flow_control(&mut self, flow_control: FlowControl) {
         self.flow_control = flow_control;
     }
 }
@@ -67,7 +68,7 @@ impl SerialTty {
 impl PtySystem for SerialTty {
     fn openpty(&self, _size: PtySize) -> anyhow::Result<PtyPair> {
         let mut port = SerialPort::open(&self.port, self.baud)
-            .with_context(|| format!("openpty on serial port {:?}", self.port))?;
+            .with_context(|| format!("openpty on serial port {}", self.port.display()))?;
 
         let mut settings = port.get_configuration()?;
         settings.set_raw();
@@ -150,7 +151,7 @@ impl Child for SerialChild {
 
             let port = &self.port;
             if let Err(err) = port.read_cd() {
-                log::error!("Error reading carrier detect: {:#}", err);
+                log::error!("Error reading carrier detect: {err:#}");
                 return Ok(ExitStatus::with_exit_code(1));
             }
         }
@@ -185,7 +186,7 @@ impl ChildKiller for SerialChildKiller {
     }
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-        Box::new(SerialChildKiller)
+        Box::new(Self)
     }
 }
 
@@ -305,7 +306,7 @@ impl Read for Reader {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
                         continue;
                     }
-                    log::error!("serial read error: {}", e);
+                    log::error!("serial read error: {e}");
                     return Err(e);
                 }
             }

@@ -76,7 +76,6 @@ glutin = "0.32.3"
 glutin-winit = "0.5.0"
 harfrust = "0.12.0"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
-lazy_static = "1.5.1"
 libc = "0.2.191"
 log = "0.4.35"
 lz4_flex = "0.14.2"
@@ -149,9 +148,8 @@ winreg = "0.56.0"
 # choice is explicit and a future default (for example `tokio`) cannot slip in.
 zbus = { version = "6.5.0", default-features = false, features = ["default-rt", "proxy", "tracing"] }
 
-# Members opt in with `[lints] workspace = true`. `portable-pty` deliberately
-# does NOT: it is vendored from wezterm and stays out of the workspace lint
-# policy so it can track upstream without lint churn.
+# Members opt in with `[lints] workspace = true`. Every member does, including
+# the vendored `portable-pty` (see `portable-pty/vendored.md`).
 [workspace.lints.clippy]
 # Lint groups. Priority -1 so the individual lints below can override them.
 pedantic = { level = "deny", priority = -1 }
@@ -193,8 +191,7 @@ cast_possible_wrap = "deny"
 #   - thiserror 1 via conv2 and calloop;
 #   - getrandom 0.3 and r-efi 5/6 via ahash (egui);
 #   - miniz_oxide 0.8 via png / backtrace vs 0.9 via flate2;
-#   - syn 3 via the zbus / bon proc-macros;
-#   - sysinfo 0.39 via vergen (build-dependency) vs our direct 0.40.
+#   - syn 3 via the zbus / bon proc-macros.
 # Duplicate tracking lives in `deny.toml` (`[bans] multiple-versions = "warn"`);
 # `cargo deny check` lists them. Revisit when the windowing stack moves.
 multiple_crate_versions = "allow"

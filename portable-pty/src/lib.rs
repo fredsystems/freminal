@@ -73,7 +73,7 @@ pub struct PtySize {
 
 impl Default for PtySize {
     fn default() -> Self {
-        PtySize {
+        Self {
             rows: 24,
             cols: 80,
             pixel_width: 0,
@@ -105,11 +105,23 @@ pub trait MasterPty: Downcast + Send {
     /// Inform the kernel and thus the child process that the window resized.
     /// It will update the winsize information maintained by the kernel,
     /// and generate a signal for the child to notice and update its state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the kernel rejects the new size.
     fn resize(&self, size: PtySize) -> Result<(), Error>;
     /// Retrieves the size of the pty as known by the kernel
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the size cannot be queried.
     fn get_size(&self) -> Result<PtySize, Error>;
     /// Obtain a readable handle; output from the slave(s) is readable
     /// via this stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying handle cannot be duplicated.
     fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>, Error>;
     /// Obtain a readable handle that can also report the slave's termios.
     ///
@@ -119,6 +131,11 @@ pub trait MasterPty: Downcast + Send {
     /// than requiring the [`MasterPty`] to be shared across threads. The
     /// default implementation returns an error; platforms that support it
     /// (unix) override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the platform does not support it, or if the
+    /// underlying handle cannot be duplicated.
     fn try_clone_reader_termios(&self) -> Result<Box<dyn PtyReader>, Error> {
         Err(anyhow::anyhow!(
             "try_clone_reader_termios is not supported on this platform"
@@ -128,6 +145,11 @@ pub trait MasterPty: Downcast + Send {
     /// slave end.
     /// Dropping the writer will send EOF to the slave end.
     /// It is invalid to take the writer more than once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the writer was already taken, or if the
+    /// underlying handle cannot be duplicated.
     fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>, Error>;
 
     /// If applicable to the type of the tty, return the local process id
@@ -135,8 +157,8 @@ pub trait MasterPty: Downcast + Send {
     #[cfg(unix)]
     fn process_group_leader(&self) -> Option<libc::pid_t>;
 
-    /// If get_termios() and process_group_leader() are both implemented and
-    /// return Some, then as_raw_fd() should return the same underlying fd
+    /// If `get_termios()` and `process_group_leader()` are both implemented and
+    /// return Some, then `as_raw_fd()` should return the same underlying fd
     /// associated with the stream. This is to enable applications that
     /// "know things" to query similar information for themselves.
     #[cfg(unix)]
@@ -161,9 +183,17 @@ pub trait Child: std::fmt::Debug + ChildKiller + Downcast + Send {
     /// Does not block.
     /// Returns None if the child has not yet terminated,
     /// else returns its exit status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the child's status cannot be queried.
     fn try_wait(&mut self) -> IoResult<Option<ExitStatus>>;
     /// Blocks execution until the child process has completed,
     /// yielding its exit status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if waiting on the child fails.
     fn wait(&mut self) -> IoResult<ExitStatus>;
     /// Returns the process identifier of the child process,
     /// if applicable
@@ -178,6 +208,10 @@ impl_downcast!(Child);
 /// Represents the ability to signal a Child to terminate
 pub trait ChildKiller: std::fmt::Debug + Downcast + Send {
     /// Terminate the child process
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the child cannot be signalled.
     fn kill(&mut self) -> IoResult<()>;
 
     /// Clone an object that can be split out from the Child in order
@@ -190,7 +224,11 @@ impl_downcast!(ChildKiller);
 /// Represents the slave side of a pty.
 /// Can be used to spawn processes into the pty.
 pub trait SlavePty {
-    /// Spawns the command specified by the provided CommandBuilder
+    /// Spawns the command specified by the provided `CommandBuilder`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command cannot be resolved or spawned.
     fn spawn_command(&self, cmd: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>, Error>;
 }
 
@@ -202,12 +240,14 @@ pub struct ExitStatus {
 }
 
 impl ExitStatus {
-    /// Construct an ExitStatus from a process return code
-    pub fn with_exit_code(code: u32) -> Self {
+    /// Construct an `ExitStatus` from a process return code
+    #[must_use]
+    pub const fn with_exit_code(code: u32) -> Self {
         Self { code, signal: None }
     }
 
-    /// Construct an ExitStatus from a signal name
+    /// Construct an `ExitStatus` from a signal name
+    #[must_use]
     pub fn with_signal(signal: &str) -> Self {
         Self {
             code: 1,
@@ -216,26 +256,29 @@ impl ExitStatus {
     }
 
     /// Returns true if the status indicates successful completion
-    pub fn success(&self) -> bool {
+    #[must_use]
+    pub const fn success(&self) -> bool {
         match self.signal {
             None => self.code == 0,
             Some(_) => false,
         }
     }
 
-    /// Returns the exit code that this ExitStatus was constructed with
-    pub fn exit_code(&self) -> u32 {
+    /// Returns the exit code that this `ExitStatus` was constructed with
+    #[must_use]
+    pub const fn exit_code(&self) -> u32 {
         self.code
     }
 
-    /// Returns the signal if present that this ExitStatus was constructed with
+    /// Returns the signal if present that this `ExitStatus` was constructed with
+    #[must_use]
     pub fn signal(&self) -> Option<&str> {
         self.signal.as_deref()
     }
 }
 
 impl From<std::process::ExitStatus> for ExitStatus {
-    fn from(status: std::process::ExitStatus) -> ExitStatus {
+    fn from(status: std::process::ExitStatus) -> Self {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
@@ -243,14 +286,14 @@ impl From<std::process::ExitStatus> for ExitStatus {
             if let Some(signal) = status.signal() {
                 let signame = unsafe { libc::strsignal(signal) };
                 let signal = if signame.is_null() {
-                    format!("Signal {}", signal)
+                    format!("Signal {signal}")
                 } else {
                     let signame = unsafe { std::ffi::CStr::from_ptr(signame) };
                     signame.to_string_lossy().to_string()
                 };
 
-                return ExitStatus {
-                    code: status.code().map(|c| c as u32).unwrap_or(1),
+                return Self {
+                    code: status.code().map_or(1, i32::cast_unsigned),
                     signal: Some(signal),
                 };
             }
@@ -258,10 +301,9 @@ impl From<std::process::ExitStatus> for ExitStatus {
 
         let code = status
             .code()
-            .map(|c| c as u32)
-            .unwrap_or_else(|| if status.success() { 0 } else { 1 });
+            .map_or_else(|| u32::from(!status.success()), i32::cast_unsigned);
 
-        ExitStatus { code, signal: None }
+        Self { code, signal: None }
     }
 }
 
@@ -271,7 +313,7 @@ impl std::fmt::Display for ExitStatus {
             write!(fmt, "Success")
         } else {
             match &self.signal {
-                Some(sig) => write!(fmt, "Terminated by {}", sig),
+                Some(sig) => write!(fmt, "Terminated by {sig}"),
                 None => write!(fmt, "Exited with code {}", self.code),
             }
         }
@@ -292,17 +334,21 @@ pub trait PtySystem: Downcast {
     /// Create a new Pty instance with the window size set to the specified
     /// dimensions.  Returns a (master, slave) Pty pair.  The master side
     /// is used to drive the slave side.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pty cannot be created.
     fn openpty(&self, size: PtySize) -> anyhow::Result<PtyPair>;
 }
 impl_downcast!(PtySystem);
 
 impl Child for std::process::Child {
     fn try_wait(&mut self) -> IoResult<Option<ExitStatus>> {
-        std::process::Child::try_wait(self).map(|s| s.map(Into::into))
+        Self::try_wait(self).map(|s| s.map(Into::into))
     }
 
     fn wait(&mut self) -> IoResult<ExitStatus> {
-        std::process::Child::wait(self).map(Into::into)
+        Self::wait(self).map(Into::into)
     }
 
     fn process_id(&self) -> Option<u32> {
@@ -328,8 +374,10 @@ impl ChildKiller for ProcessSignaller {
     fn kill(&mut self) -> IoResult<()> {
         if let Some(handle) = &self.handle {
             unsafe {
-                if winapi::um::processthreadsapi::TerminateProcess(handle.as_raw_handle() as _, 127)
-                    == 0
+                if winapi::um::processthreadsapi::TerminateProcess(
+                    handle.as_raw_handle().cast(),
+                    127,
+                ) == 0
                 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -349,7 +397,9 @@ impl ChildKiller for ProcessSignaller {
 impl ChildKiller for ProcessSignaller {
     fn kill(&mut self) -> IoResult<()> {
         if let Some(pid) = self.pid {
-            let result = unsafe { libc::kill(pid as i32, libc::SIGHUP) };
+            let pid = libc::pid_t::try_from(pid)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+            let result = unsafe { libc::kill(pid, libc::SIGHUP) };
             if result != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -369,7 +419,9 @@ impl ChildKiller for std::process::Child {
             // On unix, we send the SIGHUP signal instead of trying to kill
             // the process. The default behavior of a process receiving this
             // signal is to be killed unless it configured a signal handler.
-            let result = unsafe { libc::kill(self.id() as i32, libc::SIGHUP) };
+            let pid = libc::pid_t::try_from(self.id())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+            let result = unsafe { libc::kill(pid, libc::SIGHUP) };
             if result != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -394,7 +446,9 @@ impl ChildKiller for std::process::Child {
             // it's still alive after a grace period, so proceed with a kill
         }
 
-        std::process::Child::kill(self)
+        // The inherent `std::process::Child::kill`: path resolution prefers
+        // inherent methods over this trait's, so this is not a recursive call.
+        Self::kill(self)
     }
 
     #[cfg(windows)]
@@ -422,6 +476,7 @@ impl ChildKiller for std::process::Child {
     }
 }
 
+#[must_use]
 pub fn native_pty_system() -> Box<dyn PtySystem + Send> {
     Box::new(NativePtySystem::default())
 }
