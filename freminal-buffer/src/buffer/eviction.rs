@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Front eviction of rows from a [`Buffer`] (Task 125.15).
+//! Front eviction of rows from a [`Buffer`].
 //!
 //! Every path that removes rows from the front of the row store --
 //! `enforce_scrollback_limit`, `scroll_up`, `erase_scrollback`, the

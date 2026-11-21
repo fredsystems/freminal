@@ -12,9 +12,9 @@
 //! does, and that function also fills the title, inner/outer rects, focus,
 //! maximised/minimised and fullscreen fields, which would change behaviour
 //! elsewhere in the app. So freminal fills in just this one field itself.
-//! The consumer is the XTWINOPS resize/move clamp (Task 148.17,
-//! `freminal/src/gui/rendering.rs::monitor_bounds`), which falls back to a
-//! fixed extent whenever the size is `None` (cleanup 148.C4).
+//! The consumer is the XTWINOPS resize/move clamp
+//! (`freminal/src/gui/rendering.rs::monitor_bounds`), which falls back to a
+//! fixed extent whenever the size is `None`.
 //!
 //! # Computation
 //!
@@ -38,8 +38,8 @@
 //! debounced refresh, below). It is never queried every frame; the cached value is injected into each frame's `RawInput` by
 //! [`MonitorSize::inject`].
 //!
-//! `Moved` and `Resized` fire for every pixel of a drag, so they are debounced
-//! (148.RC6): they refresh only when the cache is empty or at least
+//! `Moved` and `Resized` fire for every pixel of a drag, so they are debounced:
+//! they refresh only when the cache is empty or at least
 //! [`MONITOR_REFRESH_INTERVAL`] old ([`decide_refresh`]).  `ScaleFactorChanged`
 //! always refreshes.  A deferred refresh is remembered
 //! ([`DeferredRefresh::Pending`]) and retried on the next frame after the
@@ -77,7 +77,7 @@ pub enum MonitorRefresh {
     Defer,
 }
 
-/// Pure debounce decision for a monitor-size refresh (148.RC6).
+/// Pure debounce decision for a monitor-size refresh.
 ///
 /// `cached` is the currently cached size and `since_last_refresh` how long ago
 /// it was queried (`None` if never).  A [`RefreshCause::ScaleFactor`] always

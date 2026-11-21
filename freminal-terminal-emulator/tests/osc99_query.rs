@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! End-to-end tests for the OSC 99 `p=?` capability query and the `p=alive`
-//! gating, answered on the PTY thread from the host capabilities (Task 130.5).
+//! gating, answered on the PTY thread from the host capabilities.
 //!
 //! Each test feeds raw bytes through `TerminalState::handle_incoming_data` and
 //! inspects the bytes written to the PTY and the window commands produced.
@@ -262,7 +262,7 @@ fn alive_while_supported_pushes_one_alive_control() {
     }
 }
 
-// ── While unsupported, every request is dropped (130 review finding 14) ──────
+// ── While unsupported, every request is dropped ───────────────
 
 #[test]
 fn display_notification_while_unsupported_pushes_no_window_command() {
@@ -392,7 +392,7 @@ fn close_with_d0_is_forwarded_at_once() {
     );
 }
 
-// ── Gate before reassembly; pending cleared on disable (130 review N5) ──────
+// ── Gate before reassembly; pending cleared on disable ───────────────────
 
 /// The title of the single `Notification99` command in `state`, if there is
 /// exactly one.

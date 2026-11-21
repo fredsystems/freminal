@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Window-lifecycle requests raised during a frame (issue #512).
+//! Window-lifecycle requests raised during a frame.
 //!
 //! `PerWindowState` used to carry two independent `bool` fields,
 //! `pending_new_window` and `pending_quit_all`, each written from two call
@@ -11,7 +11,7 @@
 //! deferred-action dispatcher (`gui/actions.rs`) — and drained from a third,
 //! `FreminalGui::update()` (`gui/app_impl.rs`).
 //!
-//! Issue #512 was exactly this fan-in/fan-out shape going wrong: the drain
+//! A past bug had exactly this fan-in/fan-out shape going wrong: the drain
 //! used to sit near the top of `update()`, upstream of both places that set
 //! the flags for the *current* frame. A flag set later in the same
 //! `update()` call could therefore never be observed until some *other*
@@ -71,7 +71,7 @@ impl WindowLifecycleRequests {
     /// peek at `wants_new_window` / `wants_quit_all` and then separately
     /// clear the flags, because that reintroduces the two-step
     /// read-then-write race this type exists to prevent (see the module
-    /// doc, issue #512).
+    /// doc).
     pub(super) fn take(&mut self) -> Self {
         std::mem::take(self)
     }

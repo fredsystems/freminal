@@ -103,7 +103,7 @@ pub enum SettingsAction {
     /// structurally impossible. See `VisualPreview`'s doc for the design
     /// rationale and the bug this replaced.
     ///
-    /// The accompanying `PreviewTrigger` (issue #452 phase C) is metadata
+    /// The accompanying `PreviewTrigger` is metadata
     /// about *timing*, not a second revert mechanism: it tells the caller
     /// whether this snapshot is an in-progress edit (debounce expensive
     /// fields normally) or a revert (apply expensive fields immediately and
@@ -362,7 +362,7 @@ impl SettingsModal {
     /// Replace the draft with `live_config` so that a subsequent `open()`
     /// (or the currently-open modal) reflects on-disk state.
     ///
-    /// Used by the "Reload Config" menu action (subtask 71.17) to keep the
+    /// Used by the "Reload Config" menu action to keep the
     /// settings draft in sync with a live config reloaded from `config.toml`.
     /// Preserves the currently-selected tab and other transient UI state.
     pub(super) fn sync_from_config(&mut self, live_config: &Config) {
@@ -394,7 +394,7 @@ impl SettingsModal {
     ///
     /// Read-only sessions never have "unsaved" edits from the user's
     /// perspective (Apply is disabled), so they never report unsaved
-    /// changes here. Used by the owning-window close guard (issue #401) to
+    /// changes here. Used by the owning-window close guard to
     /// decide whether closing the terminal window that opened Settings
     /// should surface a confirmation prompt.
     #[must_use]
@@ -419,9 +419,9 @@ impl SettingsModal {
     /// resolve the confirm prompt.  Callers include the embedded Cancel
     /// button and the egui window X — i.e. the modal closing *itself*.
     ///
-    /// The owning terminal window's close path (issue #401) does not use
+    /// The owning terminal window's close path does not use
     /// this method: it uses [`has_unsaved_changes`](Self::has_unsaved_changes)
-    /// plus the shared close-guard dialog (Task 98 pattern) instead, so the
+    /// plus the shared close-guard dialog instead, so the
     /// prompt renders on the terminal window being closed rather than
     /// relying on the settings window's own next frame.
     ///
@@ -644,7 +644,7 @@ impl SettingsModal {
         // *second* debounce settles). Gating this dispatch on
         // `committed_preview != preview_before` used to skip it entirely in
         // that case, leaving the stale pushed value live with no way to
-        // revert it (issue #452 post-review Blocker 1). The revert is safe
+        // revert it. The revert is safe
         // and cheap to always emit: `apply_visual_preview` diffs against
         // `self.applied_preview` and the debounce holders' own baselines, so
         // every field that already matches is a no-op.
@@ -768,7 +768,7 @@ impl SettingsModal {
 
         // See the matching comment in `show_standalone` for why this must
         // be unconditional rather than gated on `committed_preview !=
-        // preview_before` (issue #452 post-review Blocker 1).
+        // preview_before`.
         if !self.is_open && action != SettingsAction::Applied {
             return SettingsAction::Preview(self.committed_preview.clone(), PreviewTrigger::Revert);
         }
@@ -1533,7 +1533,7 @@ impl SettingsModal {
                 }
                 // Apply commits without dismissing, so a change can be judged
                 // against a live terminal and then adjusted again without
-                // reopening the dialog (issue #452).
+                // reopening the dialog.
                 let apply_btn = egui::Button::new("Apply");
                 if ui
                     .add_enabled(!is_read_only, apply_btn)
@@ -1685,8 +1685,8 @@ impl SettingsModal {
         self.show_broadcast_input_section(ui);
     }
 
-    /// Render the "Broadcast Input" section of the Tabs settings tab
-    /// (Task 74.5): the read-only shortcut display with a jump-to-keybindings
+    /// Render the "Broadcast Input" section of the Tabs settings tab:
+    /// the read-only shortcut display with a jump-to-keybindings
     /// button, and the confirm-before-enabling toggle.
     fn show_broadcast_input_section(&mut self, ui: &mut Ui) {
         ui.label("Broadcast Input:");
@@ -1725,7 +1725,7 @@ impl SettingsModal {
     }
 
     // Renders both the Shell Integration section and the Command Blocks
-    // section in one tab (per 72.5's bundling decision). The two sections
+    // section in one tab (a deliberate bundling). The two sections
     // share enough thematic context that splitting them obscures intent.
     #[allow(clippy::too_many_lines)]
     fn show_shell_integration_tab(&mut self, ui: &mut Ui) {
@@ -2378,7 +2378,7 @@ impl SettingsModal {
         );
     }
 
-    /// The Close Guard subsection of the Security tab (Task 98.9).
+    /// The Close Guard subsection of the Security tab.
     fn show_close_guard_section(&mut self, ui: &mut Ui) {
         ui.heading("Close Guard");
         ui.add_space(4.0);
@@ -2408,7 +2408,7 @@ impl SettingsModal {
         });
     }
 
-    /// The Paste Guard subsection of the Security tab (Task 77).
+    /// The Paste Guard subsection of the Security tab.
     fn show_paste_guard_section(&mut self, ui: &mut Ui) {
         ui.heading("Paste Guard");
         ui.add_space(4.0);
@@ -2930,7 +2930,7 @@ impl SettingsModal {
         action
     }
 
-    /// Commit the draft and stay open (the Apply button, issue #452).
+    /// Commit the draft and stay open (the Apply button).
     ///
     /// Lets the user try a change against a live terminal and keep adjusting
     /// without reopening the dialog for every iteration. A failed save leaves
@@ -2945,7 +2945,7 @@ impl SettingsModal {
     }
 
     /// Set the status message shown at the bottom of the Settings window to
-    /// a live-preview notice (issue #452 phase D).
+    /// a live-preview notice.
     ///
     /// Distinct call site from [`Self::commit_draft`]'s save-failure/success
     /// messages, but the same field and the same rendering. A shader-path
@@ -3372,7 +3372,7 @@ mod tests {
         assert_eq!(modal.draft.tab_title.separator, " / ");
     }
 
-    // -- Font-family picker label construction (Task 111.7) --
+    // -- Font-family picker label construction --
 
     #[test]
     fn font_family_entries_default_when_no_system_duplicate() {
@@ -3872,7 +3872,7 @@ mod tests {
         assert!(modal.is_dirty(), "edited draft should be dirty");
     }
 
-    // ── Apply without dismissing (issue #452) ────────────────────────────
+    // ── Apply without dismissing ────────────────────────────
 
     /// Open a modal writing to a throwaway config path, so the commit paths
     /// can be exercised without touching the user's real config.
@@ -3885,7 +3885,7 @@ mod tests {
         (modal, dir)
     }
 
-    /// The point of #452: commit the draft and stay open, so the user can
+    /// The point of Apply: commit the draft and stay open, so the user can
     /// judge the change against a live terminal and keep adjusting.
     #[test]
     fn apply_without_dismissing_commits_and_keeps_the_dialog_open() {

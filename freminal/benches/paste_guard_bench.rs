@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Smart paste guard analyzer benchmarks (Task 77).
+//! Smart paste guard analyzer benchmarks.
 //!
 //! [`PasteGuard::analyze`] runs on the GUI thread for every paste, so a
 //! pathological payload (a very large clipboard with every trigger enabled and

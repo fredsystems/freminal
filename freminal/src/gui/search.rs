@@ -57,8 +57,7 @@ pub enum SearchBarAction {
     Prev,
 }
 
-/// Safety classification for a search bar's actual paint bounds this frame
-/// (Task 124.14d).
+/// Safety classification for a search bar's actual paint bounds this frame.
 ///
 /// [`Self::Bounded`] means every pixel [`show_search_bar`] painted this
 /// frame stayed inside [`SearchBarFrame::paint_rect`] -- the caller may
@@ -96,7 +95,7 @@ impl SearchOverlaySafety {
     }
 }
 
-/// What [`show_search_bar`] actually drew this frame (Task 124.14d).
+/// What [`show_search_bar`] actually drew this frame.
 ///
 /// Replaces the bare [`SearchBarAction`] the function used to return, so the
 /// caller can build the search overlay's exact old/new damage instead of
@@ -115,7 +114,7 @@ pub struct SearchBarFrame {
     pub safety: SearchOverlaySafety,
 }
 
-/// Expand `area_rect` by a popup frame's drop-shadow margin (Task 124.14d).
+/// Expand `area_rect` by a popup frame's drop-shadow margin.
 ///
 /// Pure and free of any `Ui`/`Context`, so the shadow-margin arithmetic is
 /// unit-testable directly against an asymmetric [`Shadow`] -- proving all
@@ -479,8 +478,7 @@ pub fn jump_to_next_command(view_state: &mut ViewState, snap: &TerminalSnapshot)
 /// pure decomposition, not a new concept.
 ///
 /// Returns the action triggered this frame (if any) and the paint-safety
-/// classification of the tooltip-bearing controls (Prev, Next, or Close;
-/// Task 124.14d).
+/// classification of the tooltip-bearing controls (Prev, Next, or Close).
 fn show_search_bar_row_1(
     ui: &mut Ui,
     view_state: &mut ViewState,
@@ -570,7 +568,7 @@ fn show_search_bar_row_1(
 /// [`show_search_bar_row_1`].
 ///
 /// Returns the paint-safety classification of the match-case checkbox (the
-/// only tooltip-bearing control in this row; Task 124.14d). `Regex` has no
+/// only tooltip-bearing control in this row). `Regex` has no
 /// tooltip and deliberately does not contribute.
 fn show_search_bar_row_2(
     ui: &mut Ui,
@@ -609,7 +607,7 @@ fn show_search_bar_row_2(
 /// text-field input, but does NOT run the actual search — that is handled by
 /// the caller so it can be deferred or run on a changed-query signal.
 ///
-/// Returns a [`SearchBarFrame`] (Task 124.14d) carrying the triggered
+/// Returns a [`SearchBarFrame`] carrying the triggered
 /// [`SearchBarAction`], the bar's actual paint bounds, and whether those
 /// bounds are safe to treat as complete this frame -- see
 /// [`SearchOverlaySafety`].
@@ -634,7 +632,7 @@ pub fn show_search_bar(
     let anchor_pos = Pos2::new(terminal_rect.right() - 4.0, terminal_rect.top() + 4.0);
 
     let mut action = SearchBarAction::None;
-    // OR-accumulated across every tooltip-bearing control (Task 124.14d):
+    // OR-accumulated across every tooltip-bearing control:
     // Prev, Next, Close, and the "Aa" match-case checkbox. `Regex` has no
     // tooltip and deliberately does not contribute.
     let mut safety = SearchOverlaySafety::Bounded;
@@ -1087,7 +1085,7 @@ mod tests {
         assert_eq!(highlights[0].col_end, 7);
     }
 
-    // ── Logical match rows across eviction (Task 125.17) ───────────────────
+    // ── Logical match rows across eviction ───────────────────
 
     fn match_at(row: u64) -> MatchSpan {
         MatchSpan {
@@ -1254,7 +1252,7 @@ mod tests {
         assert!(!state.corpus_is_stale(snap.extent()));
     }
 
-    // ── expand_by_shadow_margin (Task 124.14d) ──────────────────────────────
+    // ── expand_by_shadow_margin ──────────────────────────────
 
     /// An asymmetric shadow -- distinct `offset` on each axis, non-zero
     /// `blur` and `spread` -- so all four margins (`left`, `right`, `top`,
@@ -1303,7 +1301,7 @@ mod tests {
         assert_eq!(expanded, area_rect);
     }
 
-    // ── jump-to-command with logical row numbers (Task 125.14) ───────────
+    // ── jump-to-command with logical row numbers ───────────
 
     /// A snapshot of `total_rows` rows, numbered from `base`, `term_height`
     /// visible, scrolled `scroll_offset` rows back, carrying `marks` as its

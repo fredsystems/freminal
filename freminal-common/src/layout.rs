@@ -460,7 +460,7 @@ impl Layout {
             LayoutTab {
                 title: t.title.as_deref().map(substitute),
                 // custom_name is a literal user rename; no variable
-                // substitution is applied (see Task 95 decisions).
+                // substitution is applied.
                 custom_name: t.custom_name.clone(),
                 active: t.active,
                 panes: t.panes.iter().map(&map_pane).collect(),
@@ -1506,7 +1506,7 @@ size = [640, 480]
     }
 
     // -----------------------------------------------------------------
-    //  Task 75.1 — per-pane env round-trip
+    //  Per-pane env round-trip
     // -----------------------------------------------------------------
 
     const TWO_PANE_ENV_LAYOUT: &str = r#"

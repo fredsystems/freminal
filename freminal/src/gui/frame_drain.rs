@@ -3,24 +3,20 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Per-frame pane-event draining (Task 122, subtask 122.11a).
+//! Per-frame pane-event draining.
 //!
 //! Everything in this module runs once per frame and walks `win.tabs` (or a
 //! `TabManager` slice of it) to drain a channel and stage the results for
 //! later handling: [`drain_command_finished_events`] drains
 //! `command_event_rx`, [`process_dead_panes`] drains `pty_dead_rx`, and
 //! [`drain_window_manipulation_commands`] drains `window_cmd_rx`. That is
-//! one coherent concept — "per-frame pane-event draining" — independently
-//! identified by two separate reviewers while auditing `app_impl.rs`'s
-//! growth across Group B (Tasks 122.5a through 122.8), even though each
-//! drain was extracted from `App::update` in a different subtask (122.7 for
-//! the first two, 122.8 for the third).
+//! one coherent concept — "per-frame pane-event draining" — even though
+//! each drain was extracted from `App::update` separately.
 //!
 //! This is a **pure move**: no logic changed, no test assertion changed,
 //! and the test count is identical to before the move. See
-//! `Documents/DESIGN_DECISIONS.md`, "Orchestration Extraction (Task 122)" /
-//! "Extraction that does not relocate makes the file bigger" (subtask
-//! 122.11a) for the rationale that motivated it.
+//! `Documents/DESIGN_DECISIONS.md`, "Orchestration Extraction" /
+//! "Extraction that does not relocate makes the file bigger" for the rationale that motivated it.
 //!
 //! [`FreminalGui::route_window_manipulation_events`] (`app_impl.rs`)
 //! deliberately stays behind: it takes `&self` and touches enough
@@ -37,8 +33,8 @@
 //! ## What deliberately does NOT live here
 //!
 //! `stage_frame_damage` / `FrameDamageInputs` / `FrameDamageObservations`
-//! (Task 122.9) and `stage_chrome_signals` / `ChromeSignalInputs` (Task
-//! 122.10) stay in `app_impl.rs`. They are frame-damage/chrome-signal
+//! and `stage_chrome_signals` / `ChromeSignalInputs`
+//! stay in `app_impl.rs`. They are frame-damage/chrome-signal
 //! *staging* — deciding what changed and packaging it for a downstream
 //! decision — not channel draining, and they do not walk `win.tabs` to
 //! drain anything. Folding them in here merely because they are also
@@ -116,12 +112,12 @@ pub(super) enum DeadPaneOutcome {
 }
 
 /// Drain `CommandFinishedEvent`s from every pane's `command_event_rx`,
-/// append each finished block to its owning pane's `recent_commands` ring
-/// (Task 72.9), flag non-active tabs that received an event, ring the bell
-/// when `[bell] on_command_finished` is set (Task 76.5), and route any
-/// resulting command-finished notifications (Task 76.4).
+/// append each finished block to its owning pane's `recent_commands` ring,
+/// flag non-active tabs that received an event, ring the bell
+/// when `[bell] on_command_finished` is set, and route any
+/// resulting command-finished notifications.
 ///
-/// Extracted from `App::update` as a zero-egui helper (Task 122.7): the
+/// Extracted from `App::update` as a zero-egui helper: the
 /// only egui touch in the original inline block —
 /// `ctx.input(|i| i.focused)` — is hoisted to the caller and passed in as
 /// `window_focus`.
@@ -153,7 +149,7 @@ pub(super) fn drain_command_finished_events(
         // Resolve the tab display name up front: `iter_panes_mut` borrows
         // `tab` mutably, so `display_name` cannot be called inside the
         // inner loop. Used for the `{tab_name}` notification template
-        // token (Task 76.5).
+        // token.
         let tab_name = tab
             .display_name(tab_title.policy, &tab_title.separator)
             .into_owned();
@@ -188,7 +184,7 @@ pub(super) fn drain_command_finished_events(
                     }
 
                     // Ring the bell on command completion when
-                    // `[bell] on_command_finished` is set (Task 76.5).
+                    // `[bell] on_command_finished` is set.
                     // Uses the configured bell mode, mirroring the
                     // `WindowManipulation::Bell` path in `rendering`.
                     if bell_config.on_command_finished {
@@ -213,7 +209,7 @@ pub(super) fn drain_command_finished_events(
         }
     }
 
-    // Route command-finished notifications collected above (Task 76.4).
+    // Route command-finished notifications collected above.
     if !command_notifications.is_empty()
         && let Ok(mut toasts) = toasts.try_borrow_mut()
     {
@@ -242,7 +238,7 @@ pub(super) fn drain_command_finished_events(
 /// `ctx`, so it performs the reinsert-and-close dance itself.
 ///
 /// Extracted from `App::update` as a zero-egui, zero-`self.windows`
-/// helper (Task 122.7): it never calls `ctx.send_viewport_cmd` and never
+/// helper: it never calls `ctx.send_viewport_cmd` and never
 /// touches `self.windows`.
 pub(super) fn process_dead_panes(
     win: &mut PerWindowState,
@@ -357,23 +353,21 @@ pub(super) fn process_dead_panes(
 /// [`FreminalGui::route_window_manipulation_events`]: super::FreminalGui::route_window_manipulation_events
 pub(super) struct WindowManipulationEvents {
     /// OSC 9 / OSC 777 notifications collected from every pane this frame,
-    /// routed after the drain loop (Task 76.4).
+    /// routed after the drain loop.
     pub(super) osc_notifications: Vec<crate::gui::notifications::NotificationRequest>,
     /// Every OSC 99 request collected from every pane this frame, in the
-    /// order the panes emitted them (Task 138.C10, G1), routed after the
+    /// order the panes emitted them, routed after the
     /// drain loop in that order:
-    /// - displays (Task 99.5a). Each carries a `Weak` clone of the
+    /// - displays. Each carries a `Weak` clone of the
     ///   originating pane's `reply_tx` (so a closed pane's PTY consumer is
     ///   never kept alive by a pending notification), the pane's
-    ///   [`Osc99Origin`], and its [`Osc99PaneState`] for the `o=` check
-    ///   (Task 138.5);
-    /// - app-to-terminal controls (`p=close` / `p=alive`, Task 99.5c);
+    ///   [`Osc99Origin`], and its [`Osc99PaneState`] for the `o=` check;
+    /// - app-to-terminal controls (`p=close` / `p=alive`);
     /// - icon bytes transmitted under a `g=` key with no text to show, which
     ///   a later display in the same list may name.
     pub(super) osc99_requests: Vec<Osc99Request>,
     /// OSC 52 clipboard events (remote write / blocked read) collected from
-    /// every pane this frame, routed to a toast after the drain loop (issue
-    /// #433).
+    /// every pane this frame, routed to a toast after the drain loop.
     pub(super) osc52_events: Vec<rendering::Osc52ToastEvent>,
 }
 
@@ -427,8 +421,8 @@ fn osc99_pane_state(
 /// `is_only_pane`). Changing this branching changes which panes may
 /// resize/move/minimize the shared OS window — do not touch it casually.
 ///
-/// Extracted from `App::update`'s `central_body` closure (Task 122.8).
-/// Unlike the zero-egui helpers extracted in Task 122.7, this is **not** an
+/// Extracted from `App::update`'s `central_body` closure.
+/// Unlike the zero-egui helpers extracted earlier, this is **not** an
 /// egui-freeing extraction: `rendering::handle_window_manipulation` itself
 /// needs `ui` (OSC 52 clipboard access, the window content rect for
 /// Report* responses), so `ui` is threaded straight through. `window_focus`
@@ -436,7 +430,7 @@ fn osc99_pane_state(
 /// named enum per `freminal-state-representation`, since it crosses this
 /// function boundary. `window_id` is the OS window being drained; together
 /// with each pane's id it forms the [`Osc99Origin`] stamped onto that pane's
-/// OSC 99 requests, alongside the pane's [`Osc99PaneState`] (Task 138.5).
+/// OSC 99 requests, alongside the pane's [`Osc99PaneState`].
 ///
 /// Takes the whole `config` rather than its `security`, `bell`, and
 /// `tab_title` sections individually to stay under clippy's
@@ -572,7 +566,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::{Duration, SystemTime};
 
-    // ── WindowFocus / DeadPaneOutcome (Task 122.7) ───────────────────────
+    // ── WindowFocus / DeadPaneOutcome ───────────────────────
     //
     // `process_dead_panes` itself is NOT unit-tested here: it takes
     // `&mut PerWindowState`, and `PerWindowState` cannot be constructed
@@ -586,7 +580,7 @@ mod tests {
     // `close_tab_at_active_selects_successor`. Extracting a further "pure"
     // helper purely to make `process_dead_panes` unit-testable would
     // re-implement the same control flow being pinned rather than test it,
-    // which is the anti-pattern this subtask's instructions call out.
+    // which is the anti-pattern.
 
     #[test]
     fn window_focus_round_trips_through_bool() {
@@ -601,7 +595,7 @@ mod tests {
         assert_ne!(DeadPaneOutcome::Continue, DeadPaneOutcome::CloseWindow);
     }
 
-    // ── drain_command_finished_events (Task 122.7) ───────────────────────
+    // ── drain_command_finished_events ───────────────────────
     //
     // Unlike `process_dead_panes`, this function takes only `&mut
     // TabManager` plus plain config values — no `PerWindowState`, no
@@ -897,9 +891,9 @@ mod tests {
         );
     }
 
-    // ── drain_window_manipulation_commands (Task 122.8) ──────────────────
+    // ── drain_window_manipulation_commands ──────────────────
     //
-    // Unlike `drain_command_finished_events` (Task 122.7), this function is
+    // Unlike `drain_command_finished_events`, this function is
     // not zero-egui: `rendering::handle_window_manipulation` needs `ui` to
     // send `ViewportCommand`s. `egui::Context::run_ui` (already used above
     // for the band-shape-range tests) supplies a real `Ui`, so the
@@ -969,7 +963,7 @@ mod tests {
         let config = Config::default();
         let ctx = egui::Context::default();
         let mut events = None;
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             events = Some(drain_window_manipulation_commands(
@@ -1036,7 +1030,7 @@ mod tests {
         let mut config = Config::default();
         config.security.allow_window_ops = true;
         let ctx = egui::Context::default();
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let _ = drain_window_manipulation_commands(
@@ -1160,7 +1154,7 @@ mod tests {
         assert_eq!(depths, vec![MAX_TITLE_STACK_DEPTH, MAX_TITLE_STACK_DEPTH]);
     }
 
-    // ── Per-pane OSC 99 state (Task 138.5) ───────────────────────────────
+    // ── Per-pane OSC 99 state ───────────────────────────────
 
     fn sample_osc99_notification() -> Notification99Data {
         Notification99Data {

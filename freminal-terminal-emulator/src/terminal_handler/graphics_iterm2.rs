@@ -113,9 +113,8 @@ impl TerminalHandler {
 
         // An explicit (non-auto) width or height request means the image is
         // scaled to fill the declared cell grid; `None`/`Auto` on both axes
-        // means the grid was derived from the native pixel size (Task
-        // 100.17). `Auto` is represented as `Some(ImageDimension::Auto)`, not
-        // `None`, so it must be checked explicitly rather than inferred from
+        // means the grid was derived from the native pixel size. `Auto` is
+        // represented as `Some(ImageDimension::Auto)`, not `None`, so it must be checked explicitly rather than inferred from
         // `Option::is_some()`.
         let width_explicit = !matches!(data.width, None | Some(ImageDimension::Auto));
         let height_explicit = !matches!(data.height, None | Some(ImageDimension::Auto));
@@ -143,9 +142,9 @@ impl TerminalHandler {
         // PTY thread always operates at the live bottom.
         //
         // iTerm2 has no placement-id concept and no `X=`/`Y=` sub-cell
-        // control key — mint a fresh placement-instance id (Task 100.18)
+        // control key — mint a fresh placement-instance id
         // so this placement never merges with an unrelated one, and pass
-        // `None` sub-cell offset (Task 100.19, kitty-only).
+        // `None` sub-cell offset (kitty-only).
         let placement_instance = next_placement_instance_id();
         let place_result = self.buffer.place_image(
             inline_image,
@@ -164,8 +163,7 @@ impl TerminalHandler {
 
         // doNotMoveCursor: the iTerm2 protocol keeps the cursor at its
         // pre-image position, i.e. on the image origin. Locate it by row
-        // number so scrollback eviction during placement cannot displace it
-        // (Task 125.C7).
+        // number so scrollback eviction during placement cannot displace it.
         if data.do_not_move_cursor {
             self.buffer.restore_cursor_to_image_origin(&place_result);
         }
@@ -574,7 +572,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // ImageSizeMode provenance (Task 100.17a)
+    // ImageSizeMode provenance
     // ------------------------------------------------------------------
 
     #[test]
@@ -784,7 +782,7 @@ mod tests {
         assert!(has_image, "Image should still be placed");
     }
 
-    /// Regression (Task 125.C7): at scrollback capacity the placement evicts
+    /// Regression: at scrollback capacity the placement evicts
     /// rows, so `doNotMoveCursor` must restore by row number, not by index.
     #[test]
     fn handle_iterm2_inline_image_do_not_move_cursor_at_scrollback_capacity() {

@@ -55,7 +55,7 @@ impl Buffer {
             cursor: CursorState::default(),
             current_tag: FormatTag::default(),
             // Compiled-in fallback used when no config value is supplied; kept
-            // in sync with `ScrollbackConfig::default` (Task 118 raised both
+            // in sync with `ScrollbackConfig::default` (both were raised
             // from 4000 to 10000 — see that impl for the data-backed rationale).
             scrollback_limit: 10_000,
             auto_detect_urls: true,
@@ -100,7 +100,7 @@ impl Buffer {
     ///
     /// Row numbers are never reset: the fresh screen is numbered from past the
     /// last row number issued on the screen being discarded, so a stale
-    /// [`RowNumber`] can never alias a post-reset row (Task 125.14).
+    /// [`RowNumber`] can never alias a post-reset row.
     pub fn full_reset(&mut self) {
         // The primary namespace continues past the primary content being
         // discarded (which, on the alternate screen, is parked in
@@ -134,12 +134,12 @@ impl Buffer {
             self.next_alt_base = self.next_alt_base.max(next);
         }
         self.rows = RowStore::from_rows_at(primary_next, [Row::new(self.width)]);
-        // Task 121 Part C: the row cache above was just replaced wholesale
+        // The row cache above was just replaced wholesale
         // with fresh, unrelated content — a stale `merge_cache` (even one
         // whose `fp` coincidentally still matches, e.g. an unchanged
         // width/height reset) must not be reused against it.
         self.merge_cache = None;
-        // Task 119: discard every compressed block and reset the per-row
+        // Discard every compressed block and reset the per-row
         // id counter alongside the row reset above (which already reset the
         // per-row block map) — a full
         // reset wipes all scrollback, so no compressed content survives it.
@@ -712,8 +712,8 @@ impl Buffer {
                 );
             }
 
-            // Each screen numbers its rows in its own namespace
-            // (Task 125.14); a parked row in the other one could alias a row
+            // Each screen numbers its rows in its own namespace;
+            // a parked row in the other one could alias a row
             // of the active screen.
             for index in 0..parked.rows.len() {
                 debug_assert_eq!(
@@ -767,8 +767,8 @@ impl Buffer {
     }
 
     /// Every compressed block's `live_rows` equals the number of block-map
-    /// entries naming it, and every block-map entry names a stored block
-    /// (Task 125.15). O(rows).
+    /// entries naming it, and every block-map entry names a stored block.
+    /// O(rows).
     #[cfg(debug_assertions)]
     fn debug_assert_block_live_rows(&self) {
         Self::debug_assert_live_rows_consistent("active", &self.rows, &self.blocks);
@@ -806,8 +806,8 @@ impl Buffer {
         }
     }
 
-    /// Every image cell lies on a row at or below its image's stamp horizon
-    /// (Task 125.15), which is what lets eviction free an image without
+    /// Every image cell lies on a row at or below its image's stamp horizon,
+    /// which is what lets eviction free an image without
     /// scanning cells. Images absent from the store are skipped (their cells
     /// have nothing to keep alive), as are protocol-retained Kitty images (see
     /// the exemption below). O(rows x cols).
@@ -954,7 +954,7 @@ mod command_block_tests {
         assert_eq!(block.output_start_row, Some(RowNumber::new(6)));
     }
 
-    // ── 73.7: OSC 133 C stamps executed_at so duration excludes prompt-wait
+    // ── OSC 133 C stamps executed_at so duration excludes prompt-wait
     #[test]
     fn mark_output_start_row_stamps_executed_at() {
         let mut buf = make_buf();

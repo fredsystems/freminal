@@ -250,11 +250,11 @@ const KKP_RIGHT_ALT_CODEPOINT: u32 = 57449;
 const KKP_RIGHT_SUPER_CODEPOINT: u32 = 57450;
 
 /// KKP lock / system-key codepoints (`CSI <codepoint> u`, flag 8 only —
-/// these are keys egui never delivers today; see Task 114). No legacy
+/// these are keys egui never delivers today). No legacy
 /// encoding exists for any of these.
 ///
-/// These are `pub` so the GUI crate's raw-key delivery wiring (Task 114.7,
-/// `TerminalInput::KittyFunctional`) can name them as
+/// These are `pub` so the GUI crate's raw-key delivery wiring
+/// (`TerminalInput::KittyFunctional`) can name them as
 /// `freminal_terminal_emulator::input::KKP_*_CODEPOINT` rather than using
 /// magic numbers.
 ///
@@ -575,9 +575,9 @@ pub enum TerminalInput {
     /// A kitty-keyboard functional key identified directly by its KKP
     /// codepoint (flag-gated `CSI <codepoint> u` form). Used for keys egui
     /// does not deliver (keypad operators/directional, media, ISO-level
-    /// shifts, lock/print/pause/menu keys) — see Task 114. The GUI computes
-    /// the codepoint from the raw winit key (114.7); this variant just carries
-    /// it to the encoder. No legacy (non-KKP) encoding exists for these.
+    /// shifts, lock/print/pause/menu keys). The GUI computes the
+    /// codepoint from the raw winit key; this variant just carries it to the
+    /// encoder. No legacy (non-KKP) encoding exists for these.
     KittyFunctional {
         codepoint: u32,
         mods: KeyModifiers,
@@ -1368,7 +1368,7 @@ impl TerminalInput {
                     TerminalInputPayload::Many(b"")
                 }
             }
-            // ── KKP-only functional keys (Task 114) ──────────────────────
+            // ── KKP-only functional keys ─────────────────────────────────
             //
             // Keypad operators/directional, media, ISO-level shifts, and
             // lock/print/pause/menu keys have no legacy or functional-event
@@ -1441,7 +1441,7 @@ mod tests {
         )
     }
 
-    // ── AltText (Task 147.24) ───────────────────────────────────────────────
+    // ── AltText ─────────────────────────────────────────────────────────────
 
     fn alt_text(text: &str) -> TerminalInput {
         TerminalInput::AltText(text.into())
@@ -3136,7 +3136,7 @@ mod tests {
         assert_eq!(p, TerminalInputPayload::Many(b""));
     }
 
-    // ── 101.3: KKP "modifier keys as keys" (flag 8 only) ─────────────────────
+    // ── KKP "modifier keys as keys" (flag 8 only) ────────────────────────────
 
     #[test]
     fn kkp_modifier_key_left_shift_report_all() {
@@ -3262,7 +3262,7 @@ mod tests {
         );
     }
 
-    // ── 114.6: KittyFunctional (keypad/media/ISO/lock/print/pause/menu) ─────
+    // ── KittyFunctional (keypad/media/ISO/lock/print/pause/menu) ────────────
 
     #[test]
     fn kkp_functional_lock_key_caps_lock_no_modifier() {
@@ -3449,7 +3449,7 @@ mod tests {
         );
     }
 
-    /// Documents (and exercises) the full Task 114.6 codepoint table against
+    /// Documents (and exercises) the full `KittyFunctional` codepoint table against
     /// the upstream kitty functional-key spec values
     /// (`docs/keyboard-protocol.rst`, `.. functional key table`).
     #[test]
@@ -3614,7 +3614,7 @@ mod tests {
     }
 }
 
-/// Task 147.4: every generated CSI / SS3 introducer follows S8C1T.
+/// Every generated CSI / SS3 introducer follows S8C1T.
 ///
 /// The 8-bit column is written out in full, not derived from the 7-bit one,
 /// so a table row fails if an encoder forgets to route its introducer.

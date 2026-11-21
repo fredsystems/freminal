@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 131.C5 regression tests: placing an image at the alternate screen's
+//! Regression tests: placing an image at the alternate screen's
 //! bottom must scroll the content up rather than grow the store.
 //!
 //! `place_image` pushes rows to make room for the image and for the cursor row

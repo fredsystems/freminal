@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Live-preview state for the Settings window (issue #452 phase A).
+//! Live-preview state for the Settings window.
 //!
 //! [`VisualPreview`] is the single source of truth for "what should the
 //! running app look like right now, before the user has clicked Apply".
@@ -23,7 +23,7 @@
 //! directly with nothing to put it back. That bug class cannot recur here,
 //! because there is no per-option revert to forget.
 //!
-//! Phase C adds the font family/size/line-height triplet ([`FontPreview`]),
+//! The font family/size/line-height triplet ([`FontPreview`]),
 //! and with it the one genuine exception to "every preview applies
 //! immediately": these three fields drive `FontManager::rebuild` (family,
 //! line height) or `FontManager::set_font_size` (size), and applying either
@@ -40,11 +40,11 @@
 //! distinction — it is not a per-option revert and does not weaken the
 //! whole-state-snapshot design above.
 //!
-//! Phase D adds the remaining expensive visual options: the background
+//! The remaining expensive visual options are: the background
 //! image path and the shader path (both debounced through their own
-//! [`DebouncedPreview`] instance, reusing phase C's generic holder
+//! [`DebouncedPreview`] instance, reusing the generic debounce holder
 //! unchanged), and the command-block gutter position and tab bar position
-//! (cheap combo boxes, applied immediately like the phase A/B fields). A
+//! (cheap combo boxes, applied immediately like the cheap fields). A
 //! shader path is the one field whose preview can *fail* (a GLSL compile
 //! error) — see [`ShaderErrorRoute`] for how a preview-time failure is kept
 //! off the terminal windows' toast stack without weakening the toast
@@ -86,13 +86,13 @@ pub(super) struct CursorPreview {
 }
 
 /// The font-rebuild-cost subset of [`VisualPreview`]: family, size, and line
-/// height (issue #452 phase C).
+/// height.
 ///
 /// All three change the cell size and route through the debounce holder
-/// (see the module doc) rather than applying immediately like the phase A/B
+/// (see the module doc) rather than applying immediately like the cheap
 /// fields. Grouped into its own type both for that shared debounce handling
 /// and because it maps directly onto `FontConfig`'s three layout-affecting
-/// fields (`ligatures` is phase B and stays a flat field on [`VisualPreview`]
+/// fields (`ligatures` is a cheap field and stays a flat field on [`VisualPreview`]
 /// since it never needs debouncing).
 #[derive(Debug, Clone)]
 pub(super) struct FontPreview {
@@ -175,8 +175,7 @@ impl FontFamilyChange {
 }
 
 /// The new logical background-image path value reported by
-/// [`VisualPreviewDiff::background_image_path`] when it changed (issue #452
-/// phase D).
+/// [`VisualPreviewDiff::background_image_path`] when it changed.
 ///
 /// Same `Option<Option<PathBuf>>`-avoidance rationale as [`FontFamilyChange`]:
 /// `UiConfig::background_image` is already `Option<PathBuf>` (`None` meaning
@@ -199,7 +198,7 @@ impl BackgroundImagePathChange {
 }
 
 /// The new logical shader path value reported by
-/// [`VisualPreviewDiff::shader_path`] when it changed (issue #452 phase D).
+/// [`VisualPreviewDiff::shader_path`] when it changed.
 ///
 /// Same `Option<Option<PathBuf>>`-avoidance rationale as [`FontFamilyChange`]
 /// and [`BackgroundImagePathChange`], for `ShaderConfig::path`. Kept as its
@@ -226,17 +225,17 @@ impl ShaderPathChange {
 /// while the Settings window is open, before the user applies.
 ///
 /// This type is deliberately a **whole-state snapshot**, not a per-option
-/// preview/revert event. Adding a previewable option in a later phase means
+/// preview/revert event. Adding a previewable option means
 /// adding a field here -- nothing else -- so that preview and revert can
 /// never drift apart.
 ///
-/// Phase A (issue #452) covered the theme, background opacity, and chrome
-/// style profile. Phase B adds the remaining "cheap" visual options that
+/// The theme, background opacity, and chrome
+/// style profile are covered, along with the "cheap" visual options that
 /// need no font rebuild, no shader compile, no filesystem I/O and no PTY
 /// resize: cursor shape/blink/trail(+duration) (see [`CursorPreview`]), font
-/// ligatures, background image opacity/mode, and hiding the menu bar. Phase
-/// C adds font family/size/line-height (see [`FontPreview`]), the one
-/// subset that is debounced rather than applied immediately.
+/// ligatures, background image opacity/mode, and hiding the menu bar. Font
+/// family/size/line-height (see [`FontPreview`]) is the one subset that is
+/// debounced rather than applied immediately.
 #[derive(Debug, Clone)]
 pub struct VisualPreview {
     /// The resolved active theme slug (`ThemeConfig::active_slug`), already
@@ -265,32 +264,31 @@ pub struct VisualPreview {
     /// Whether the menu bar is hidden (`UiConfig::hide_menu_bar`).
     pub(super) hide_menu_bar: bool,
 
-    /// Font family/size/line-height. See [`FontPreview`]. Debounced (issue
-    /// #452 phase C) rather than applied immediately -- see the module doc.
+    /// Font family/size/line-height. See [`FontPreview`]. Debounced rather than applied immediately -- see the module doc.
     pub(super) font: FontPreview,
 
     /// Background image path (`UiConfig::background_image`). Debounced
-    /// (issue #452 phase D) like the font fields -- it is a text field with
+    /// like the font fields -- it is a text field with
     /// real filesystem I/O and a GPU texture upload behind it.
     pub(super) background_image_path: Option<PathBuf>,
 
-    /// Shader path (`ShaderConfig::path`). Debounced (issue #452 phase D)
+    /// Shader path (`ShaderConfig::path`). Debounced
     /// like [`Self::background_image_path`] -- a text field, but backed by a
     /// GLSL compile that can additionally fail; see [`ShaderErrorRoute`].
     pub(super) shader_path: Option<PathBuf>,
 
     /// Command-block status gutter position (`CommandBlocksConfig::gutter`).
-    /// Applied immediately (issue #452 phase D) -- a combo box, not a text
+    /// Applied immediately -- a combo box, not a text
     /// field -- via a direct config write that the existing reactive resize
     /// detection in `app_impl.rs` picks up on its own.
     pub(super) gutter: GutterPosition,
 
-    /// Tab bar position (`TabsConfig::position`). Applied immediately (issue
-    /// #452 phase D), chrome layout only, same shape as [`Self::hide_menu_bar`].
+    /// Tab bar position (`TabsConfig::position`). Applied immediately,
+    /// chrome layout only, same shape as [`Self::hide_menu_bar`].
     pub(super) tab_bar_position: TabBarPosition,
 
     /// Whether the per-pane OSC 9;4 progress bar is drawn
-    /// (`ProgressConfig::enabled`, issue #507). Applied immediately: a
+    /// (`ProgressConfig::enabled`). Applied immediately: a
     /// per-window widget toggle `show()` reads each frame, display only.
     pub(super) progress_enabled: bool,
 }
@@ -455,7 +453,7 @@ pub(super) struct VisualPreviewDiff {
 }
 
 /// Distinguishes why a [`SettingsAction::Preview`](super::settings::SettingsAction::Preview)
-/// carries the [`VisualPreview`] it does (issue #452 phase C).
+/// carries the [`VisualPreview`] it does.
 ///
 /// [`VisualPreview`] alone cannot make this distinction -- a reverted
 /// snapshot and an edited one are both just "a new whole-state snapshot to
@@ -476,7 +474,7 @@ pub enum PreviewTrigger {
 }
 
 /// Where a shader compile/init error observed on the render thread should be
-/// surfaced this frame (issue #452 phase D).
+/// surfaced this frame.
 ///
 /// `WindowPostRenderer::last_error` is written inside a `PaintCallback` (no
 /// access to `FreminalGui`) and drained once per frame per terminal window
@@ -515,7 +513,7 @@ pub(super) enum ShaderErrorRoute {
     /// window closing before a further edit or genuine revert corrects it
     /// -- is covered unconditionally by [`shader_error_route_on_settings_close`]
     /// in `FreminalGui::end_settings_session`, independent of whatever value
-    /// this route held beforehand (issue #452 post-review Blocker 2).
+    /// this route held beforehand.
     SettingsStatus,
 }
 
@@ -548,7 +546,7 @@ pub(super) const fn shader_error_route_for(trigger: PreviewTrigger) -> ShaderErr
 /// `PreviewTrigger::Edit` route left [`ShaderErrorRoute::SettingsStatus`]
 /// permanently stuck with the window closed and no visible surface to
 /// correct it, silently dropping a later genuine shader hot-reload compile
-/// error (issue #452 post-review Blocker 2). Calling this from
+/// error. Calling this from
 /// `FreminalGui::end_settings_session` (`settings_dispatch.rs`) --
 /// unconditionally, on every close path: Apply/OK, Cancel, the Settings
 /// window's own close button, closing the owning terminal window, and that
@@ -574,7 +572,7 @@ pub(super) const fn shader_error_route_on_settings_close() -> ShaderErrorRoute {
 /// but a value typed and then typed back away from before settling updates
 /// `applied_preview` on every keystroke while the holder's baseline lags
 /// behind. Comparing against the draft-derived baseline is exactly the bug
-/// this function exists to avoid (issue #452 post-review Blocker 1):
+/// this function exists to avoid:
 /// committed `A`, preview `B` and let it settle (baseline is now `B`),
 /// retype `A` and cancel before the second debounce settles. The draft is
 /// back to `A` (matching committed), but the baseline is still `B`, and the
@@ -593,7 +591,7 @@ pub(super) fn debounced_revert_needs_push<T: PartialEq>(
 }
 
 /// How long an expensive font-preview field (family, size, or line height)
-/// must stay unchanged before it is actually applied (issue #452 phase C).
+/// must stay unchanged before it is actually applied.
 ///
 /// This trades preview latency against reparse/cache-clear cost: too short
 /// and a fast typist entering a font family name still triggers a
@@ -605,7 +603,7 @@ pub(super) fn debounced_revert_needs_push<T: PartialEq>(
 pub(super) const FONT_PREVIEW_DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// How long the background-image-path or shader-path preview fields must
-/// stay unchanged before they are actually applied (issue #452 phase D).
+/// stay unchanged before they are actually applied.
 ///
 /// Same rationale and interval as [`FONT_PREVIEW_DEBOUNCE`] -- both fields
 /// are text fields backed by real filesystem I/O (a GPU texture decode or a
@@ -630,8 +628,7 @@ pub(super) enum DebounceDecision {
     Apply,
 }
 
-/// Pure decision function behind the font-field debounce (issue #452 phase
-/// C).
+/// Pure decision function behind the font-field debounce.
 ///
 /// Takes every input explicitly -- no `FreminalGui`, no settings window, no
 /// hidden clock beyond `Instant` arithmetic -- so it is directly
@@ -659,8 +656,7 @@ pub(super) fn debounce_decision<T: PartialEq>(
     }
 }
 
-/// Generic time-based debounce holder for an expensive preview value (issue
-/// #452 phase C).
+/// Generic time-based debounce holder for an expensive preview value.
 ///
 /// Tracks two distinct things, both needed by the caller: `applied` is the
 /// value most recently and actually pushed to the running app (the baseline
@@ -670,7 +666,7 @@ pub(super) fn debounce_decision<T: PartialEq>(
 /// seen changing, per [`debounce_decision`].
 ///
 /// Generic over `T` (rather than hard-coded to [`FontPreview`]) because
-/// phase D reuses this unchanged for the background-image path and the
+/// the background-image and shader fields reuse this unchanged for the background-image path and the
 /// shader path, both of which are text fields with real filesystem I/O
 /// behind them and the same "don't redo the I/O on every keystroke" need.
 #[derive(Debug, Clone)]
@@ -827,11 +823,11 @@ mod tests {
         assert_eq!(preview.profile, StyleProfile::Retro);
     }
 
-    /// Phase B (issue #452): the cheap visual options -- cursor
+    /// Cheap visual options -- cursor
     /// shape/blink/trail(+duration), ligatures, background image
     /// opacity/mode, and hide-menu-bar -- must all be captured too.
     #[test]
-    fn from_config_captures_phase_b_fields() {
+    fn from_config_captures_cheap_visual_fields() {
         let mut cfg = Config::default();
         cfg.cursor.shape = CursorShapeConfig::Bar;
         cfg.cursor.blink = false;
@@ -855,10 +851,10 @@ mod tests {
         assert!(preview.hide_menu_bar);
     }
 
-    /// Phase C (issue #452): font family/size/line-height must be captured
+    /// Font family/size/line-height must be captured
     /// too.
     #[test]
-    fn from_config_captures_phase_c_font_fields() {
+    fn from_config_captures_font_fields() {
         let mut cfg = Config::default();
         cfg.font.family = Some("JetBrains Mono".to_string());
         cfg.font.size = 16.5;
@@ -870,10 +866,10 @@ mod tests {
         assert!((preview.font.line_height - 1.2).abs() < f32::EPSILON);
     }
 
-    /// Phase D (issue #452): background image path, shader path, gutter
+    /// Background image path, shader path, gutter
     /// position, and tab bar position must all be captured too.
     #[test]
-    fn from_config_captures_phase_d_fields() {
+    fn from_config_captures_background_shader_gutter_and_tab_bar_fields() {
         let mut cfg = Config::default();
         cfg.ui.background_image = Some(PathBuf::from("/tmp/bg.png"));
         cfg.shader.path = Some(PathBuf::from("/tmp/shader.glsl"));
@@ -1014,10 +1010,10 @@ mod tests {
         assert_eq!(diff.progress_enabled, None);
     }
 
-    /// Each phase B field must be reported independently -- changing one
+    /// Each cheap field must be reported independently -- changing one
     /// must not mask or be masked by the others.
     #[test]
-    fn diff_from_reports_each_phase_b_field_independently() {
+    fn diff_from_reports_each_cheap_visual_field_independently() {
         let before = VisualPreview::from_config(&Config::default(), false);
 
         let mut after = before.clone();
@@ -1062,10 +1058,10 @@ mod tests {
         assert_eq!(diff.font_line_height, None);
     }
 
-    /// Phase C fields must each be reported independently too, and must not
-    /// be masked by (or mask) each other or the phase A/B fields.
+    /// Font fields must each be reported independently too, and must not
+    /// be masked by (or mask) each other or the cheap fields.
     #[test]
-    fn diff_from_reports_each_phase_c_font_field_independently() {
+    fn diff_from_reports_each_font_field_independently() {
         let before = VisualPreview::from_config(&Config::default(), false);
 
         let mut after = before.clone();
@@ -1128,10 +1124,10 @@ mod tests {
         assert_eq!(diff.progress_enabled, None);
     }
 
-    /// Phase D fields must each be reported independently too, and must not
-    /// be masked by (or mask) each other or the phase A/B/C fields.
+    /// Background-image, shader, gutter and tab-bar fields must each be reported independently too, and must not
+    /// be masked by (or mask) each other or the other fields.
     #[test]
-    fn diff_from_reports_each_phase_d_field_independently() {
+    fn diff_from_reports_each_background_shader_gutter_and_tab_bar_field_independently() {
         let before = VisualPreview::from_config(&Config::default(), false);
 
         let mut after = before.clone();
@@ -1193,7 +1189,7 @@ mod tests {
         assert_eq!(diff.shader_path, Some(ShaderPathChange::Cleared));
     }
 
-    /// Pins the bug this module's design fixes (issue #452 phase A): a
+    /// Pins the bug this module's design fixes: a
     /// previewed chrome-profile change had no matching revert, because
     /// `PreviewProfile` wrote `FreminalGui::gui_theme` directly and
     /// `RevertProfile` never existed. Simulate the same sequence purely:
@@ -1229,7 +1225,7 @@ mod tests {
     }
 
     /// Same shape as `reverting_to_committed_config_restores_the_original_profile`,
-    /// for a phase B field applied by broadcasting `InputEvent::CursorConfigChange`
+    /// for a cheap field applied by broadcasting `InputEvent::CursorConfigChange`
     /// to the PTY threads: previewing a cursor shape change without applying,
     /// then closing (re-previewing the committed config), must restore the
     /// original shape.
@@ -1258,7 +1254,7 @@ mod tests {
         );
     }
 
-    /// Same shape again, for the unfocused-cursor style (Task 127.7):
+    /// Same shape again, for the unfocused-cursor style:
     /// previewing a changed style is detected, and re-previewing the
     /// committed config reverts it.
     #[test]
@@ -1286,7 +1282,7 @@ mod tests {
         );
     }
 
-    /// Same shape again, for a phase B field applied entirely GUI-side (no
+    /// Same shape again, for a cheap field applied entirely GUI-side (no
     /// PTY round trip): `hide_menu_bar`.
     #[test]
     fn reverting_to_committed_config_restores_the_original_hide_menu_bar_setting() {
@@ -1313,8 +1309,8 @@ mod tests {
         );
     }
 
-    /// Same shape again, for a phase C field: font size. Unlike the phase
-    /// A/B fields this one is debounced before it reaches `FontManager`, but
+    /// Same shape again, for a font field: font size. Unlike the cheap
+    /// fields this one is debounced before it reaches `FontManager`, but
     /// the *diff* reporting itself must still round-trip cleanly -- the
     /// debounce lives entirely in `apply_visual_preview`, not here.
     #[test]
@@ -1342,7 +1338,7 @@ mod tests {
         );
     }
 
-    /// Same shape again, for a phase D field applied entirely GUI-side via
+    /// Same shape again, for a debounced/layout field applied entirely GUI-side via
     /// the existing reactive resize detection: the command-block gutter
     /// position.
     #[test]
@@ -1371,7 +1367,7 @@ mod tests {
         );
     }
 
-    /// Same shape again, for a phase D field that is debounced before it
+    /// Same shape again, for a debounced/layout field that is debounced before it
     /// reaches `WindowPostRenderer`: the shader path.
     #[test]
     fn reverting_to_committed_config_restores_the_original_shader_path() {
@@ -1399,7 +1395,7 @@ mod tests {
         );
     }
 
-    // ── Shader compile-error routing (issue #452 phase D) ─────────────────
+    // ── Shader compile-error routing ─────────────────
 
     #[test]
     fn shader_error_route_for_edit_trigger_is_settings_status() {
@@ -1429,7 +1425,7 @@ mod tests {
         assert_eq!(ShaderErrorRoute::default(), ShaderErrorRoute::Toast);
     }
 
-    // ── Font-field debounce (issue #452 phase C) ──────────────────────────
+    // ── Font-field debounce ──────────────────────────
 
     const INTERVAL: Duration = Duration::from_millis(200);
 
@@ -1559,12 +1555,12 @@ mod tests {
         );
     }
 
-    // ── Debounce holder reuse for path fields (issue #452 phase D) ────────
+    // ── Debounce holder reuse for path fields ────────
 
     /// `DebouncedPreview<T>` must be reused unchanged for `Option<PathBuf>`
     /// (the background image and shader path fields) rather than a second,
     /// bespoke debounce being written for them -- exactly what the type's
-    /// own module doc says phase D does. Exercises the same revert shape as
+    /// own module doc says the background-image and shader fields do. Exercises the same revert shape as
     /// `debounced_preview_apply_immediately_bypasses_debounce_and_clears_pending`,
     /// but with a wholly different, non-`Copy`, non-numeric `T` to prove the
     /// holder is genuinely generic rather than only ever instantiated with
@@ -1606,10 +1602,10 @@ mod tests {
         );
     }
 
-    // ── Close-path revert correctness (issue #452 post-review fixes) ──────
+    // ── Close-path revert correctness ──────
     //
-    // The review that produced these fixes found the settings.rs-level gate
-    // (`committed_preview != preview_before`) untestable in isolation
+    // The settings.rs-level gate
+    // (`committed_preview != preview_before`) is untestable in isolation
     // because it lives inside `show()` / `show_standalone()`, which need a
     // live `egui::Context` to exercise at all -- no existing test in this
     // module or `settings.rs` renders those functions. The two blockers it

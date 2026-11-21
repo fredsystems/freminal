@@ -703,8 +703,8 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // ESC - . / $ — designators for sets freminal does not have (147 PR
-    // review R22): consumed through the final byte, which is not text.
+    // ESC - . / $ — designators for sets freminal does not have:
+    // consumed through the final byte, which is not text.
     // ------------------------------------------------------------------
 
     const IGNORED_DESIGNATORS: [u8; 4] = *b"-./$";

@@ -156,7 +156,7 @@ fn a_close_with_the_breaker_open_reports_closed_without_calling_the_daemon() -> 
     f.assert_daemon_untouched();
 
     // Control: with the breaker closed the daemon is called, and the
-    // successful call itself reports the close (138.C23).
+    // successful call itself reports the close.
     f.close_the_breaker();
     f.state.record_shown(instance(2), None, peer_reply(8));
     close_instance(&f.rig.client, &mut f.state, &f.sink, instance(2));
@@ -209,7 +209,7 @@ fn a_capability_refresh_with_the_breaker_open_makes_no_call() -> TestResult {
     Ok(())
 }
 
-// ── The real timeout path (149.C2) ──────────────────────────────────────────
+// ── The real timeout path ───────────────────────────────────────────────────
 //
 // The tests above feed the breaker a synthetic timeout error. This one lets a
 // daemon really stay silent, against a client whose `method_timeout` is short,

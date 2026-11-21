@@ -16,9 +16,9 @@
 //! - [`GuiTheme`] — a flat bag of geometry values consumed by the GUI's
 //!   chrome styling to produce the actual egui `Visuals`.
 //!
-//! The baseline numbers chosen here are the tuned baselines (locked in
-//! subtask 112.3a); see `Documents/DESIGN_DECISIONS.md`, "UI Chrome Styling
-//! and Bundled Assets (Tasks 111, 112)".
+//! The baseline numbers chosen here are the tuned baselines (locked in);
+//! see `Documents/DESIGN_DECISIONS.md`, "UI Chrome Styling
+//! and Bundled Assets".
 
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Each variant provides a [`defaults`](StyleProfile::defaults) method that
 /// returns a [`GuiTheme`] populated with sensible baseline values for that
-/// visual style.  These are the tuned baselines locked in subtask 112.3a.
+/// visual style.  These are the tuned baselines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StyleProfile {
@@ -57,7 +57,7 @@ impl Default for StyleProfile {
 impl StyleProfile {
     /// Return the baseline [`GuiTheme`] geometry for this profile.
     ///
-    /// The values here are the tuned baselines locked in subtask 112.3a.
+    /// The values here are the tuned baselines.
     ///
     /// # Modern baseline rationale
     ///
@@ -133,7 +133,7 @@ impl StyleProfile {
 ///
 /// The canonical way to obtain a `GuiTheme` is via
 /// [`StyleProfile::defaults`].  Fields may then be overridden per the user's
-/// preferences (that wiring happens in subtask 112.13).
+/// preferences (that wiring happens in the settings code).
 ///
 /// # Note on `PartialEq` but not `Eq`
 ///

@@ -1387,7 +1387,7 @@ mod tests {
         assert_eq!(img.height, 6);
     }
 
-    // --- Task 148.2: bounded allocation (GHSA-w475-m9wf-775r) ---
+    // --- Bounded allocation ---
 
     /// Every image the decoder returns must satisfy the documented caps and
     /// be internally consistent.
@@ -1402,7 +1402,7 @@ mod tests {
 
     #[test]
     fn test_sixel_advisory_input_does_not_allocate_unbounded() {
-        // Inner DCS content from GHSA-w475-m9wf-775r.
+        // Inner DCS content of a published advisory reproducer.
         let inner: &[u8] = b"(q\";\";;56;1\x1fq\"05;;2;26221056;1;";
         if let Some(img) = parse_sixel(inner) {
             assert_within_caps(&img);
@@ -1562,7 +1562,7 @@ mod tests {
         }
     }
 
-    // --- Amortised growth (Task 148.2) ---
+    // --- Amortised growth ---
 
     /// Interleaved one-character-at-a-time growth.  Each `~` grows the
     /// logical width by one column on a canvas that is already 10000 rows
@@ -1772,7 +1772,7 @@ mod tests {
 
     /// Deterministic pseudo-random sixel streams (both backgrounds, raster
     /// attributes, palette redefinition, repeats, `$` and `-`) must decode
-    /// byte-identically to the pre-148.2 decoder.
+    /// byte-identically to the earlier uncapped decoder.
     #[test]
     fn test_sixel_matches_reference_decoder_on_small_inputs() {
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -1832,7 +1832,7 @@ mod tests {
         }
     }
 
-    /// Verbatim copy of the pre-148.2 decoder (uncapped, reallocating on every
+    /// Verbatim copy of the earlier decoder (uncapped, reallocating on every
     /// growth, tight buffer).  Kept in the test module only, for small inputs,
     /// to pin that the amortised canvas is byte-identical with the behaviour
     /// shipped on `main`.

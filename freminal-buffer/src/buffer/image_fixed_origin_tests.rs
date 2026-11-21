@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 147.19 tests: [`ImagePlacementMode::FixedOrigin`] anchors an image at
+//! Tests: [`ImagePlacementMode::FixedOrigin`] anchors an image at
 //! screen row 0, column 0, clips it to the visible screen, and neither scrolls
 //! the buffer nor moves the cursor (sixel with scrolling off, DECSDM `?80 h`).
 

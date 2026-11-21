@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Self-contained OpenGL pass that draws toast "pill" backgrounds (issue #433).
+//! Self-contained OpenGL pass that draws toast "pill" backgrounds.
 //!
 //! [`ToastRenderer`] owns its own shader program, VAO, and double-buffered
 //! VBOs — modeled directly on the image pass in [`super::gpu`] (see
@@ -17,7 +17,7 @@
 //! beyond the crisp pill rect by `SHADOW_MARGIN_PX` on every side so the
 //! fragment shader has room to render the drop shadow. See `toast.frag` for
 //! the SDF-based layering (shadow -> gradient fill + accent bar -> neutral
-//! border ring). Issue #433 redesign removed the outer glow.
+//! border ring). There is deliberately no outer glow.
 //!
 //! The CPU-side vertex builder (`build_toast_verts`) is a pure function,
 //! fully testable without a GL context; GL calls are confined to
@@ -43,8 +43,8 @@ pub(super) const TOAST_VERTEX_FLOATS: usize = 25;
 /// Margin, in physical pixels, by which each toast's drawn quad is expanded
 /// beyond its crisp pill rect on every side. Gives the fragment shader room
 /// to render the downward-offset drop shadow (`SHADOW_OFFSET` +
-/// `SHADOW_BLUR` in `toast.frag`) without clipping. Issue #433 redesign
-/// removed the outer glow, so this only needs to cover the shadow's reach;
+/// `SHADOW_BLUR` in `toast.frag`) without clipping. There is no outer
+/// glow, so this only needs to cover the shadow's reach;
 /// it is kept generous so a future shadow-tuning tweak can't clip.
 const SHADOW_MARGIN_PX: f32 = 24.0;
 
@@ -70,8 +70,8 @@ pub struct ToastQuad {
     /// Bottom gradient color, straight RGBA, 0..=1.
     pub color_bottom: [f32; 4],
     /// Neutral chrome border color, straight RGBA, 0..=1. Set alpha 0 (or
-    /// `border_width` 0) to disable the border. Issue #433 redesign:
-    /// replaces the removed outer glow with a crisp border for separation.
+    /// `border_width` 0) to disable the border. A crisp border,
+    /// rather than an outer glow, provides separation.
     pub border_color: [f32; 4],
     /// Border thickness in physical pixels (drawn as an inner ring inset from
     /// the pill edge). 0 disables the border.
@@ -271,7 +271,7 @@ impl ToastRenderer {
     }
 
     /// Delete every GL object this pass owns, whatever its init state, so a
-    /// partially failed `init` is cleaned up too (Task 125.C16). Idempotent:
+    /// partially failed `init` is cleaned up too. Idempotent:
     /// every handle is `take()`n, so a clean pass issues no GL call.
     pub fn release_gl_objects(&mut self, gl: &Gl<'_>) {
         unsafe {
@@ -359,8 +359,7 @@ fn build_toast_verts(quads: &[ToastQuad]) -> Vec<f32> {
 /// Append one expanded quad (6 vertices) for `q` to `out`.
 fn push_toast_quad(out: &mut Vec<f32>, q: &ToastQuad) {
     // Expand the drawn quad beyond the crisp pill rect so the fragment
-    // shader has room to render the drop shadow (the glow was removed in the
-    // issue #433 redesign).
+    // shader has room to render the drop shadow (there is no outer glow).
     let x0 = q.x - SHADOW_MARGIN_PX;
     let y0 = q.y - SHADOW_MARGIN_PX;
     let x1 = q.x + q.width + SHADOW_MARGIN_PX;

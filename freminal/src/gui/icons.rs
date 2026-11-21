@@ -206,7 +206,7 @@ mod tests {
     use super::*;
     use crate::gui::font_manager::bundled_regular_font_bytes;
 
-    /// The core 112.10/112.12 guarantee: every [`ChromeIcon`] variant resolves
+    /// The core guarantee: every [`ChromeIcon`] variant resolves
     /// to a real glyph in the bundled `CaskaydiaCove` face. If a future font swap
     /// drops one of these codepoints, this test goes red instead of the icon
     /// silently rendering as tofu at runtime.

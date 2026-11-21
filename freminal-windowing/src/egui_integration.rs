@@ -39,7 +39,7 @@ pub struct FrameOutput {
     /// The delay the *app* itself asked for this frame (`App::take_terminal_requested_delay`),
     /// independent of whatever egui decided it wanted.
     ///
-    /// SPIKE (Task 121): the event loop uses this to override `repaint_delay`
+    /// The event loop uses this to override `repaint_delay`
     /// when egui asked for an immediate repaint *solely* because of pointer
     /// events the app already classified as needing no frame. See the
     /// override at the `RedrawRequested` arm in `event_loop.rs`.
@@ -57,17 +57,17 @@ pub struct EguiState {
     /// egui-side `Context::input(|i| i.modifiers)` is not a substitute.
     modifier_tracker: ModifierTracker,
     /// Cached size of the monitor this window is on, injected into every
-    /// frame's `RawInput` because `egui-winit` does not populate it (cleanup
-    /// 148.C4). Refreshed on window creation and on `Moved` / `Resized`
+    /// frame's `RawInput` because `egui-winit` does not populate it.
+    /// Refreshed on window creation and on `Moved` / `Resized`
     /// (debounced) / `ScaleFactorChanged`, never per frame — see [`MonitorSize`].
     monitor_size: MonitorSize,
-    /// Task 121 frame-profiling harness (feature-gated): per-window
+    /// Frame-profiling harness (feature-gated): per-window
     /// accumulated phase timings, flushed as a `tracing::debug!` line every
     /// [`FrameProfile::FLUSH_EVERY`] frames. See the module-level rationale
     /// on [`FrameProfile`] itself.
     #[cfg(feature = "frame-profiling")]
     frame_profile: FrameProfile,
-    /// Task 125.9 (feature-gated): this window's asynchronous GPU timing of
+    /// (Feature-gated) this window's asynchronous GPU timing of
     /// the chrome head/band/tail paint and the total frame interval. Per
     /// window because each window owns its own GL context and therefore its
     /// own query objects. See [`FrameGpuTiming`].
@@ -75,11 +75,11 @@ pub struct EguiState {
     gpu_timing: FrameGpuTiming<glow::Query>,
     /// This window's record of recent frames' own declared damage, used by
     /// [`paint_frame`] to reconstruct the redraw region a stale back
-    /// buffer needs (124.18). See [`DamageHistory`]'s doc.
+    /// buffer needs. See [`DamageHistory`]'s doc.
     damage_history: DamageHistory,
 }
 
-/// Task 121 frame-profiling harness (feature-gated only -- see the
+/// Frame-profiling harness (feature-gated only -- see the
 /// `frame-profiling` Cargo feature on this crate and on `freminal`, which
 /// enables it here).
 ///
@@ -128,8 +128,8 @@ struct FrameProfile {
     run_ui_total: std::time::Duration,
     /// Largest single-frame `run_ui` duration observed.
     run_ui_max: std::time::Duration,
-    /// Cumulative wall-clock time across the WHOLE of `run_frame` (Task 121
-    /// defect-4 fix): from entry to just before this struct's own flush
+    /// Cumulative wall-clock time across the WHOLE of `run_frame`:
+    /// from entry to just before this struct's own flush
     /// check.
     ///
     /// `phase_total` minus the sum of `run_ui_total`, `tessellate_total`,
@@ -192,9 +192,9 @@ struct FrameProfile {
     /// single frame, which this harness does not attempt.
     repaint_cause_counts: std::collections::BTreeMap<String, u64>,
 
-    // ── Task 121 pointer-motion repaint-gate spike (issue: pointer motion
-    // over static terminal content measured at 58fps vs. 1.95fps idle, 95%
-    // of those frames changing zero pixels) ──────────────────────────────
+    // ── Pointer-motion repaint-gate counters (pointer motion over static
+    // terminal content was measured at 58fps vs. 1.95fps idle, 95% of
+    // those frames changing zero pixels) ─────────────────────────────────
     //
     // Cumulative since window creation, like every other plain counter on
     // this struct. Incremented from `event_loop.rs`'s `CursorMoved` arm
@@ -207,20 +207,20 @@ struct FrameProfile {
     /// latch was set, or this was the one-frame edge-detect transition after
     /// a needed -> not-needed change).
     pointer_frames_scheduled: u64,
-    /// `CursorMoved` events suppressed by the Task 121 gate — i.e. events
-    /// that would have scheduled a repaint before this spike (egui-winit
+    /// `CursorMoved` events suppressed by the repaint gate — i.e. events
+    /// that would have scheduled a repaint without it (egui-winit
     /// reports `repaint: true` unconditionally for `CursorMoved`) but did
     /// not need to, per the app's own state.
     pointer_frames_suppressed: u64,
 
-    // ── 124.17/124.2: skip-clear + partial-present path attribution ─────
+    // ── Skip-clear + partial-present path attribution ───────────────────
     //
     // `decide_partial_present` (pure, unit-tested) attributes every frame to
     // exactly one `PartialPresentDecision`, so these six counters are
     // mutually exclusive and sum to `frame_counter`. Cumulative since window
     // creation, like every other plain counter on this struct.
-    /// Frames where the app reported [`crate::FrameDamage::None`] (Task
-    /// 124.2): nothing changed at all, so nothing was presented -- no
+    /// Frames where the app reported [`crate::FrameDamage::None`]:
+    /// nothing changed at all, so nothing was presented -- no
     /// clear, no GL primitive paint, no `pre_present_notify`, no buffer
     /// swap. Deliberately distinct from [`Self::present_partial_not_requested`]
     /// (which DOES present, just fully).
@@ -314,7 +314,7 @@ impl FrameProfile {
         self.repaint_cause_counts.clear();
     }
 
-    /// 124.17: record one queried buffer age into `buffer_age_histogram`,
+    /// Record one queried buffer age into `buffer_age_histogram`,
     /// bucketed by `min(age, 3)` (index 3 means "3 or more"). Called only
     /// from the two [`PartialPresentDecision`] variants that actually
     /// queried the age (`BlockedByBufferAge` and `Taken`) — see the field
@@ -424,7 +424,7 @@ impl InitialWindowFocus {
 /// `WindowEvent::Focused` ever updates it. A window created already focused
 /// would therefore report `ui.input(|i| i.focused) == false` until that event
 /// arrives, drawing a hollow, non-blinking cursor for its first frame(s)
-/// (Task 127.C1). The flag is sticky across `RawInput::take`, so writing it
+/// The flag is sticky across `RawInput::take`, so writing it
 /// once through the public `egui_input_mut` accessor is sufficient.
 ///
 /// Where `has_focus()` is unreliable at creation (e.g. Wayland, before the
@@ -455,7 +455,7 @@ impl EguiState {
         let painter = egui_glow::Painter::new(Arc::clone(&gl_state.glow_context), "", None, false)
             .map_err(|e| Error::GlContextCreation(format!("egui painter creation failed: {e}")))?;
 
-        // Task 125.9: detect timer-query capability once, with this window's
+        // Detect timer-query capability once, with this window's
         // context current (the caller guarantees that for every
         // `EguiState::new`).
         #[cfg(feature = "gpu-profiling")]
@@ -492,7 +492,7 @@ impl EguiState {
     }
 
     /// Re-query the monitor size for this window, unless `cause` is debounced
-    /// away (148.RC6; see [`crate::monitor_size::decide_refresh`]).
+    /// away (see [`crate::monitor_size::decide_refresh`]).
     ///
     /// Called at the events that can change it (`Moved`, `Resized`,
     /// `ScaleFactorChanged`), never per frame. `scale_factor` is the
@@ -511,7 +511,7 @@ impl EguiState {
         }
     }
 
-    /// Task 121 pointer-motion repaint-gate spike: record that a
+    /// Pointer-motion repaint gate: record that a
     /// `CursorMoved` event scheduled a repaint.
     ///
     /// A small accessor rather than a public `frame_profile` field/counter:
@@ -533,7 +533,7 @@ impl EguiState {
             .saturating_add(1);
     }
 
-    /// Task 121 pointer-motion repaint-gate spike: record that a
+    /// Pointer-motion repaint gate: record that a
     /// `CursorMoved` event was suppressed (did not schedule a repaint) by
     /// the gate. See [`Self::record_pointer_frame_scheduled`]'s doc for why
     /// this is an accessor rather than a public field.
@@ -553,14 +553,14 @@ impl EguiState {
     /// skip-clear + partial-present path, tessellating and painting the
     /// head/band/tail split, texture housekeeping) lives in
     /// [`paint_frame`](crate::frame_paint::paint_frame), which is
-    /// deliberately window-free so it can be driven by a test harness
-    /// (124.19b). This function is the thin window-bound shell around it:
+    /// deliberately window-free so it can be driven by a test harness.
+    /// This function is the thin window-bound shell around it:
     /// it reads `window.inner_size()`, hands egui's platform output back to
     /// `egui-winit`, notifies the window before presenting, swaps buffers,
     /// and folds the (feature-gated) frame-profiling data into
     /// `self.frame_profile`.
-    // too_many_lines: 124.19a extracted the head/band/tail paint sequence
-    // into `paint_frame`, but the bulk of what remains here is the single
+    // too_many_lines: the head/band/tail paint sequence lives in
+    // `paint_frame`, but the bulk of what remains here is the single
     // feature-gated `tracing::debug!` flush call (one field per counter,
     // ~30 fields) -- splitting that macro invocation into a helper would
     // not reduce coupling, it would just move the same field list one
@@ -579,7 +579,7 @@ impl EguiState {
     where
         F: FnMut(&egui::Context, &glow::Context) -> crate::FrameSignals,
     {
-        // Task 121 frame-profiling harness (defect-4 fix): wall-clock start
+        // Frame-profiling harness: wall-clock start
         // of the WHOLE frame, captured before anything else in `run_frame`
         // runs. Its `.elapsed()` (taken just before this window's flush
         // check, near the end of this function) is `phase_total` -- see the
@@ -598,7 +598,7 @@ impl EguiState {
             damage_history: &mut self.damage_history,
         };
 
-        // Task 125.9: with `gpu-profiling`, time the painted frame's GPU
+        // With `gpu-profiling`, time the painted frame's GPU
         // phases. The marker is called only on frames that actually paint
         // (never on `FrameDamage::None`), so `begin_frame` -- which polls
         // pending samples -- runs lazily on the first boundary and is
@@ -645,7 +645,7 @@ impl EguiState {
                 last_latency_frames = r.last_latency_frames,
                 dropped_sample_count = r.dropped_sample_count,
                 pending_sample_count = r.pending_sample_count,
-                "Task 125.9 chrome and frame GPU timing flush"
+                "chrome and frame GPU timing flush"
             );
         }
 
@@ -654,9 +654,9 @@ impl EguiState {
 
         #[cfg(feature = "frame-profiling")]
         let swap_start = std::time::Instant::now();
-        // Task 124.2: `FramePresentation::None` means nothing changed this
+        // `FramePresentation::None` means nothing changed this
         // frame -- `paint_frame` already skipped the clear and every GL
-        // primitive paint, and per the plan this window-bound shell must
+        // primitive paint, and this window-bound shell must
         // likewise skip `pre_present_notify` (no point notifying the
         // compositor about a frame with no new content) and the buffer
         // swap entirely, rather than swapping a framebuffer that was never
@@ -694,7 +694,7 @@ impl EguiState {
         // causes an unbounded render loop on platforms where `swap_buffers`
         // returns immediately (macOS with vsync disabled).
 
-        // 124.17/124.2: fold the skip-clear + partial-present decision
+        // Fold the skip-clear + partial-present decision
         // `paint_frame` computed into the six mutually-exclusive counters --
         // moved here (rather than immediately after `paint_frame` returns)
         // so it sits next to the rest of the frame-profiling fold/flush
@@ -736,18 +736,18 @@ impl EguiState {
             PartialPresentDecision::Taken { age, .. } => {
                 self.frame_profile.present_partial_taken =
                     self.frame_profile.present_partial_taken.saturating_add(1);
-                // 124.18: record the REAL queried age (previously always
+                // Record the REAL queried age (previously always
                 // `1`, back when `Taken` was only reachable at `age == 1`)
                 // -- the histogram exists precisely to show the actual
-                // hardware distribution, which 124.17's GPU re-take found
+                // hardware distribution, which GPU measurement found
                 // is overwhelmingly `2`, not `1`.
                 self.frame_profile.record_buffer_age(age);
             }
         }
 
-        // Task 121 frame-profiling harness: flush this window's own
+        // Frame-profiling harness: flush this window's own
         // `tracing::debug!` line every `FrameProfile::FLUSH_EVERY` frames,
-        // tagged with `window_id` (defect-3 fix) so a multi-window session's
+        // tagged with `window_id` so a multi-window session's
         // interleaved lines can be told apart and matched against
         // `freminal`'s own per-window line for the same `window_id`. See the
         // `FrameProfile` doc for why `frame_counter` and `freminal`'s
@@ -830,7 +830,7 @@ impl EguiState {
                     swap_max_us = p.swap_max.as_micros(),
                     swap_mean_us =
                         FrameProfile::mean_duration(p.swap_total, p.frame_counter).as_micros(),
-                    // Repaint-cause aggregation (task 121 defect-5): what,
+                    // Repaint-cause aggregation: what,
                     // exactly, requested an immediate/zero-delay repaint
                     // this flush window -- egui-internal machinery vs. a
                     // freminal call site -- and how many requests total,
@@ -841,7 +841,7 @@ impl EguiState {
                     repaint_cause_total = total_repaint_cause_count(&p.repaint_cause_counts),
                     repaint_cause_top8 =
                         %format_repaint_causes(&top_repaint_causes(&p.repaint_cause_counts, 8)),
-                    // Task 121 pointer-motion repaint-gate spike: how many
+                    // Pointer-motion repaint gate: how many
                     // `CursorMoved` events scheduled vs. were suppressed,
                     // cumulative since window creation. Incremented from
                     // `event_loop.rs` via `record_pointer_frame_scheduled`/
@@ -852,7 +852,7 @@ impl EguiState {
                         p.pointer_frames_scheduled,
                         p.pointer_frames_suppressed
                     ),
-                    // 124.17/124.2: skip-clear + partial-present path
+                    // Skip-clear + partial-present path
                     // attribution, cumulative since window creation.
                     // Mutually exclusive and sum to `frame_counter`.
                     // `buffer_age_histogram`'s total is
@@ -866,7 +866,7 @@ impl EguiState {
                     present_partial_blocked_buffer_age = p.present_partial_blocked_buffer_age,
                     present_partial_taken = p.present_partial_taken,
                     buffer_age_histogram = ?p.buffer_age_histogram,
-                    "windowing frame-profiling stats (task 121 harness): the \
+                    "windowing frame-profiling stats: the \
                      windowing-owned phase_total/run_ui/tessellate/paint/swap \
                      wall-clock split over frame_counter drawn frames for this \
                      window_id (phase_total minus (run_ui + tessellate + paint + \
@@ -874,10 +874,10 @@ impl EguiState {
                      FrameProfile::phase_total_total), the top 8 \
                      ctx.repaint_causes() by occurrence count this flush window \
                      plus their total (repaint_cause_top8/repaint_cause_total), \
-                     the Task 121 pointer-motion-suppression-spike counters \
+                     the pointer-motion-suppression counters \
                      (pointer_frames_scheduled/pointer_frames_suppressed/\
                      pointer_suppressed_duty_cycle_pct, cumulative since window \
-                     creation), and the 124.17/124.2 skip-clear + \
+                     creation), and the skip-clear + \
                      partial-present path attribution (present_frame_damage_none \
                      plus present_partial_*, cumulative, mutually exclusive, \
                      summing to frame_counter; buffer_age_histogram bucketed by \
@@ -958,7 +958,7 @@ impl EguiState {
     /// painter is dropped. `egui_glow::Painter::destroy` is idempotent (guarded
     /// by an internal `destroyed` flag), so calling it more than once is safe.
     pub(crate) fn destroy_painter(&mut self) {
-        // Task 125.9: destroy every outstanding timestamp query while the
+        // Destroy every outstanding timestamp query while the
         // context is still current and the painter (which owns the shared
         // `glow::Context` handle) is still alive. Idempotent: a second call
         // finds nothing left to destroy.
@@ -1164,7 +1164,7 @@ mod frame_profiling_tests {
         );
     }
 
-    // ── 124.17: `FrameProfile::record_buffer_age` ────────────────────────
+    // ── `FrameProfile::record_buffer_age` ────────────────────────────────
 
     #[test]
     fn record_buffer_age_buckets_ages_zero_one_two_exactly() {
@@ -1275,8 +1275,8 @@ mod tests {
         (verts, idxs)
     }
 
-    /// Pins the losslessness of `run_frame`'s head/band/tail split
-    /// (#436.4a): tessellating `full_output.shapes` as three slices
+    /// Pins the losslessness of `run_frame`'s head/band/tail split:
+    /// tessellating `full_output.shapes` as three slices
     /// (`[..start]`, `[start..end]`, `[end..]`) and summing the resulting
     /// primitives' vertex/index counts must equal tessellating the whole
     /// list at once. `egui::Context::tessellate` builds a fresh
@@ -1295,7 +1295,7 @@ mod tests {
         let ctx = egui::Context::default();
         let pixels_per_point = 1.0;
 
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             // Shape 0: "head" (chrome painted before the band).
@@ -1393,13 +1393,13 @@ mod tests {
     /// up `App::take_terminal_band_range`) behaves as `run_frame` assumes:
     /// `head_shapes` and `band_shapes` are empty, and `tail_shapes` is the
     /// ENTIRE shape list — i.e. painting all shapes as a single "tail"
-    /// `paint_primitives` call, byte-identical to the pre-#436.4a
-    /// single-call path.
+    /// `paint_primitives` call, byte-identical to the
+    /// single-call path taken before the band split existed.
     #[test]
     fn default_band_range_puts_everything_in_tail() {
         let ctx = egui::Context::default();
 
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.painter().rect_filled(
@@ -1447,7 +1447,7 @@ mod tests {
             .collect()
     }
 
-    /// #436.5: the terminal band's GL `PaintCallback`s (pre-clear FBO,
+    /// The terminal band's GL `PaintCallback`s (pre-clear FBO,
     /// per-pane draw(s), post-shader composite) must stay CONTIGUOUS and IN
     /// ORDER inside the band slice across the head/band/tail split, so their
     /// offscreen-FBO round-trip is never interrupted by a chrome
@@ -1486,7 +1486,7 @@ mod tests {
         let ctx = egui::Context::default();
         let pixels_per_point = 1.0;
 
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             // HEAD: chrome painted before the band (menu/tab bar stand-in).

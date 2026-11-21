@@ -108,8 +108,7 @@ fn clamped_offset(base: usize, delta: i32, lo: usize, hi: usize) -> usize {
     usize::value_from(clamped).unwrap_or(base)
 }
 
-/// Monotonic identifier for a [`CompressedBlock`] (Task 119 — Scrollback
-/// Compression).
+/// Monotonic identifier for a [`CompressedBlock`] (scrollback compression).
 ///
 /// Minted by `Buffer::compress_scrollback_block` from
 /// `Buffer::next_block_id` and never reused within a `Buffer`'s lifetime
@@ -151,8 +150,8 @@ pub struct BlockRowRef {
 #[derive(Debug)]
 pub struct Buffer {
     /// All rows in this buffer: scrollback + visible region, together with
-    /// the two per-row side tables that must stay index-parallel with them
-    /// (Task 125.13). See [`RowStore`].
+    /// the two per-row side tables that must stay index-parallel with them.
+    /// See [`RowStore`].
     ///
     /// In the primary buffer, this grows until `scrollback_limit` is hit.
     /// In the alternate buffer, this always has exactly `height` rows.
@@ -164,7 +163,7 @@ pub struct Buffer {
     ///   snapshot); `Some(entry)` = clean cached flat representation for that
     ///   row, see [`RowCacheEntry`].
     /// - **Compressed-block references** — `None` means the row is not
-    ///   currently compressed (it may be `Live` or Task-118
+    ///   currently compressed (it may be `Live` or
     ///   [`Row::is_compact`]); `Some` means the row's real content has been
     ///   evicted into the referenced block in `self.blocks` (see
     ///   [`Row::is_evicted`]) and the row itself holds only a diagnostic
@@ -174,7 +173,7 @@ pub struct Buffer {
     /// tables always have the same length.
     pub(in crate::buffer) rows: RowStore,
 
-    /// Task 121 Part C: incremental cache of the last **merge** (Step 2 of
+    /// Incremental cache of the last **merge** (Step 2 of
     /// [`Buffer::visible_as_tchars_and_tags_extended`]) computed over the
     /// visible window. `None` means no merge has been cached yet (or it was
     /// explicitly invalidated — see below); `Some(cache)` lets the next
@@ -242,7 +241,7 @@ pub struct Buffer {
     /// an existing cache entry to a different index, so mechanism (2)
     /// already catches them.
     ///
-    /// **Front eviction needs no explicit invalidation** (Task 125.16):
+    /// **Front eviction needs no explicit invalidation**:
     /// `enforce_scrollback_limit`, `scroll_up`, and `erase_scrollback` all go
     /// through [`Buffer::evict_front_rows`], which removes rows without
     /// renumbering the survivors and advances the store's base. At scrollback
@@ -261,7 +260,7 @@ pub struct Buffer {
     /// full-merge oracle in debug builds (see [`flatten::MergeCache`]).
     pub(in crate::buffer) merge_cache: Option<MergeCache>,
 
-    /// Task 124.10: source of the per-row **content epoch** stamps stored in
+    /// Source of the per-row **content epoch** stamps stored in
     /// [`flatten::MergeCache::row_epochs`].
     ///
     /// Every time a merged window row's *rendered* content is found to differ
@@ -345,8 +344,7 @@ pub struct Buffer {
     /// Always `None` while [`Self::kind`] is `Alternate`.
     pub(in crate::buffer) parked_alternate: Option<ParkedScreen>,
 
-    /// First row number of a first-ever (or post-RIS) alternate screen
-    /// (Task 125.14).
+    /// First row number of a first-ever (or post-RIS) alternate screen.
     ///
     /// The alternate screen's rows are numbered in their own namespace
     /// starting at [`RowNumber::ALTERNATE_BASE`]. Alternate contents persist
@@ -368,7 +366,7 @@ pub struct Buffer {
     /// when the screen is switched away, so each screen has its own slot.
     ///
     /// The saved position is screen-relative (xterm's `CursorSave`), not
-    /// attached to any stored row; see [`cursor::SavedCursor`] (Task 125.C6).
+    /// attached to any stored row; see [`cursor::SavedCursor`].
     pub(in crate::buffer) saved_cursor: Option<cursor::SavedCursor>,
 
     /// Current format tag to apply to inserted text.
@@ -446,14 +444,14 @@ pub struct Buffer {
     /// [`Buffer::prune_evicted_marks`].
     pub(in crate::buffer) command_blocks: CommandBlockLog,
 
-    /// Deep-cold scrollback rows compressed with LZ4 (Task 119 — Scrollback
-    /// Compression), keyed by [`BlockId`], each with the number of live rows
-    /// still referencing it (Task 125.15; see [`BlockSlot`]).
+    /// Deep-cold scrollback rows compressed with LZ4
+    /// (scrollback compression), keyed by [`BlockId`], each with the number of live rows
+    /// still referencing it.
     ///
-    /// Only rows below the visible window that are already Task-118
+    /// Only rows below the visible window that are already
     /// [`Row::is_compact`] are ever compressed, via the explicit,
-    /// test-driven `Buffer::compress_scrollback_block` (this subtask has no
-    /// idle-driven compression *policy* yet — that is Task 119.5). A block
+    /// test-driven `Buffer::compress_scrollback_block` (there is no
+    /// idle-driven compression *policy* at this layer). A block
     /// is removed the moment any of its rows is read
     /// (`Buffer::ensure_decompressed`): a row is never both compressed and
     /// live at the same time (single residency).
@@ -509,7 +507,7 @@ pub struct ParkedScreen {
     pub(in crate::buffer) image_store: ImageStore,
     /// The screen's image cell count.
     pub(in crate::buffer) image_cell_count: usize,
-    /// The screen's compressed scrollback blocks (Task 119). Always empty for
+    /// The screen's compressed scrollback blocks. Always empty for
     /// the alternate screen.
     pub(in crate::buffer) blocks: HashMap<BlockId, BlockSlot>,
     /// The [`Buffer::next_block_id`] counter at the time the screen was parked.
@@ -521,7 +519,7 @@ pub struct ParkedScreen {
 ///
 /// Produced by [`Buffer::heap_bytes`]. This is a diagnostic/measurement API —
 /// intended for benchmark harnesses and manual memory analysis (e.g. the
-/// Task 118 compact-cell-representation "before" baseline) — and is
+/// compact-cell-representation "before" baseline) — and is
 /// deliberately allocation-light rather than optimized for speed; it is not
 /// a hot path.
 #[derive(Debug, Clone, Copy)]
@@ -532,7 +530,7 @@ pub struct BufferHeapBreakdown {
     /// allocation, plus, for every row, [`Row::storage_heap_bytes`] — the
     /// full `Vec<Cell>` capacity cost for a `Live` row, or the smaller
     /// run-length-encoded [`crate::compact_row::CompactRow`] cost for a
-    /// compacted scrollback row (Task 118). This is the field that reflects
+    /// compacted scrollback row. This is the field that reflects
     /// scrollback compaction's memory savings.
     ///
     /// Excludes the heap bytes of `Arc<Url>` string payloads reachable from
@@ -566,8 +564,8 @@ pub struct BufferHeapBreakdown {
     /// correctness issue (the cell/tag data itself is unaffected).
     pub url_bytes: usize,
 
-    /// Heap bytes held by `self.blocks` (Task 119 — Scrollback
-    /// Compression): the sum of every resident [`CompressedBlock`]'s
+    /// Heap bytes held by `self.blocks` (scrollback
+    /// compression): the sum of every resident [`CompressedBlock`]'s
     /// [`CompressedBlock::heap_bytes`] (its LZ4-compressed payload's
     /// allocation capacity). Does not include `HashMap<BlockId,
     /// CompressedBlock>`'s own bucket-array overhead, matching this API's
@@ -609,7 +607,6 @@ pub struct BufferHeapBreakdown {
 ///
 /// Before this, such a glyph wrapped forever: a row pushed per iteration on the
 /// primary screen (OOM), a scroll per iteration on the alternate screen (hang).
-/// Issue #558.
 fn skip_unplaceable_glyphs(text: &[TChar], start: usize, fresh_span: usize) -> usize {
     text.iter()
         .enumerate()
@@ -738,7 +735,7 @@ impl Buffer {
     /// space-saving `CompactRow` form, returning the number of rows actually
     /// compacted. Intended to be called from the PTY thread's IDLE tick
     /// (never on a hot path): compaction is a deferred background memory
-    /// optimization (Task 118), so the caller can spread the work across
+    /// optimization, so the caller can spread the work across
     /// multiple idle ticks by passing a bounded `budget` and re-calling
     /// while the return value is `> 0`.
     ///
@@ -752,8 +749,8 @@ impl Buffer {
     /// that cannot be compacted (e.g. an image row — see [`Row::compact`])
     /// does not consume budget, so a screenful of images never starves
     /// later, genuinely compactable rows of their turn. Rows already evicted
-    /// to a compressed block ([`Row::is_evicted`]) are skipped untouched
-    /// (Task 125.C10). The scan is a simple forward walk over
+    /// to a compressed block ([`Row::is_evicted`]) are skipped untouched.
+    /// The scan is a simple forward walk over
     /// `0..visible_start` that skips rows already reported `is_compact()`;
     /// this is `O(visible_start)` worst case per call, but that cost is paid
     /// on the idle path, not a hot one.
@@ -774,10 +771,10 @@ impl Buffer {
             }
             if row.is_evicted() {
                 // The row's content already lives in a compressed block and
-                // the row is an inert placeholder (Task 119). It is neither
+                // the row is an inert placeholder. It is neither
                 // compactable nor in need of cache release (eviction took
                 // both with it), and touching its storage would trip
-                // `Row::cells_ref`'s eviction assertion (Task 125.C10).
+                // `Row::cells_ref`'s eviction assertion.
                 continue;
             }
             if row.is_compact() {
@@ -835,7 +832,7 @@ impl Buffer {
         for row in &self.rows {
             rows_bytes += row.storage_heap_bytes();
 
-            // Skip URL scanning for compacted or evicted (Task 119) rows
+            // Skip URL scanning for compacted or evicted rows
             // without decompacting/decompressing — see the doc comment on
             // `BufferHeapBreakdown::url_bytes`. An evicted row can never
             // carry a URL cell any more than a compact one can (it was
@@ -897,7 +894,7 @@ impl Buffer {
     /// neovim redrawing a long soft-wrapped line writes one space at column 0,
     /// `CSI 122 C`, then the final character, and relies on autowrap alone to
     /// step to the next row. With the clear, every such row lost every cell
-    /// except the two it explicitly wrote (issue #491).
+    /// except the two it explicitly wrote.
     ///
     /// `image_cell_count` is therefore left alone as well: no cells are
     /// discarded here, so nothing has left the grid to account for. Image
@@ -929,7 +926,7 @@ impl Buffer {
 
         // The value of `start` when the most recent soft-wrap happened. Two
         // wraps with the same `start` between them means the wrap placed
-        // nothing, which is the non-progress that issue #558 spun on. See
+        // nothing, which is the non-progress that the wrap loop spun on. See
         // `wrap_unless_stalled`.
         let mut last_wrap_start: Option<usize> = None;
 
@@ -1003,7 +1000,7 @@ impl Buffer {
                 }
 
                 // Wrap unless nothing remaining is placeable on the landing
-                // row (R7); the wrap changes the row, so the span and the
+                // row; the wrap changes the row, so the span and the
                 // placeable glyphs are recomputed on the next iteration.
                 let Some((next_row, next_col)) = self.take_wrap(
                     text,
@@ -1086,7 +1083,7 @@ impl Buffer {
                     start += leftover_start;
 
                     // Scroll-region-aware wrap: same logic as PRE-WRAP, unless
-                    // nothing remaining is placeable on the landing row (R7).
+                    // nothing remaining is placeable on the landing row.
                     // A stalled wrap carries on from where this row ended.
                     let Some((next_row, next_col)) = self.take_wrap(
                         text,
@@ -1202,12 +1199,12 @@ impl Buffer {
     /// lands on. If every remaining glyph is wider than that row's span, the
     /// next `insert_text` iteration would discard them all -- but only after
     /// `advance_row_for_wrap` had already pushed or scrolled a row, leaving a
-    /// spurious blank line (R7). `insert_text` treats the text as ending
+    /// spurious blank line. `insert_text` treats the text as ending
     /// instead: the cursor stays in pending-wrap at the end of the row,
     /// exactly as if the text had stopped at the last real write.
     ///
-    /// The landing row decides the span, because a DECDWL/DECDHL row halves it
-    /// (148.C8). This mirrors the branch selection of
+    /// The landing row decides the span, because a DECDWL/DECDHL row halves it.
+    /// This mirrors the branch selection of
     /// [`Self::advance_row_for_wrap`] without mutating, and returns the span
     /// as [`Self::row_fresh_span`] would for the row the wrap lands on:
     ///
@@ -1395,8 +1392,8 @@ impl Buffer {
                 // outside the region). The cursor stays on the row, so the
                 // wrapped text overwrites it from the wrap column. Appending a
                 // row here broke the alternate screen's fixed `height`-row
-                // grid (#568) and, on the primary screen, scrolled the whole
-                // screen (region included) into scrollback (148.C3).
+                // grid and, on the primary screen, scrolled the whole
+                // screen (region included) into scrollback.
                 //
                 // xterm: `WrapLine` (charproc.c) calls `xtermIndex`, which for
                 // a cursor below `bot_marg` is `CursorDown` (cursor.c), and
@@ -1446,7 +1443,7 @@ impl Buffer {
     /// Put the buffer on a blank alternate screen with the cursor at home and
     /// a full-screen scroll region.
     ///
-    /// This is the shape `enter_alternate(0)` had before Task 131.5 (every
+    /// This is the shape `enter_alternate(0)` had before the switch primitives were split (every
     /// entry blanked the screen, homed the cursor and reset the margins). The
     /// switch primitives no longer do any of that, so the many tests that
     /// merely need a clean alternate screen to draw on use this fixture; tests
@@ -2530,7 +2527,7 @@ mod backspace_tests {
 
     #[test]
     fn backspace_moves_one_column_over_wide_glyph() {
-        // Regression (Task 111.10): BS (cursor backward) moves exactly ONE
+        // Regression: BS (cursor backward) moves exactly ONE
         // column, even across a double-width glyph's continuation cell.
         // Applications emit two backspaces to cross a wide glyph; if BS skipped
         // the continuation cell it would consume both as one move and drift the
@@ -2723,7 +2720,7 @@ mod backspace_tests {
         assert_eq!(buf.cursor.pos.x, 7);
     }
 
-    /// Regression (issue #557): BS from pending-wrap in a 1-column terminal
+    /// Regression: BS from pending-wrap in a 1-column terminal
     /// used to compute `0 - 1` (debug panic / release wrap to `usize::MAX`).
     /// Matches xterm `CursorBack`: the pending wrap is cleared and the cursor
     /// stays at column 0 whether or not reverse-wrap is enabled.
@@ -2885,7 +2882,7 @@ mod insert_space_tests {
 
         let tags_check = tag_vec(&buf, 0);
 
-        // Inserted blanks take only the background (Task 140.2); the bold
+        // Inserted blanks take only the background; the bold
         // new_tag has a default background, so they are default-formatted.
         assert_eq!(tags_check[1], FormatTag::default());
         assert_eq!(tags_check[2], FormatTag::default());
@@ -3388,7 +3385,7 @@ mod tests_gui_resize {
     // 5. Growing height keeps the live cursor pinned to the bottom
     // ------------------------------------------------------------------
     //
-    // Task 113 (Bug G): growing the primary buffer must NOT append an
+    // Growing the primary buffer must NOT append an
     // unreclaimable blank tail below the live cursor.  When the buffer's rows
     // are all live content (HardBreak) with the cursor on the last row and
     // there is no scrollback to reveal, the grow appends nothing — the buffer
@@ -3426,7 +3423,7 @@ mod tests_gui_resize {
     // 5b. Growing height reveals existing scrollback instead of appending
     // ------------------------------------------------------------------
     //
-    // Task 113 (Bug G): when there IS scrollback above the live bottom, a grow
+    // When there IS scrollback above the live bottom, a grow
     // reveals it upward (the bottom-anchored window grows toward row 0) and
     // appends nothing.  Here the buffer has 20 content rows with the cursor on
     // the last one and a 10-row screen, so rows 0..9 are scrollback.  Growing
@@ -4245,7 +4242,7 @@ mod image_tests {
         }
     }
 
-    /// Task 125 review: a `d=q` clear that leaves a cell-owned (Sixel) image
+    /// A `d=q` clear that leaves a cell-owned (Sixel) image
     /// with no cell must free its pixels; a Kitty image keeps its data.
     #[test]
     fn clear_placement_with_z_frees_a_cell_owned_image_but_keeps_kitty_data() {
@@ -4334,7 +4331,7 @@ mod image_tests {
         assert!(buf.image_store().contains(id));
     }
 
-    /// Task 125 review: `d=a` must free the cell-owned images it left
+    /// `d=a` must free the cell-owned images it left
     /// without a cell, and only those it cleared.
     #[test]
     fn clear_visible_placements_frees_cell_owned_images() {
@@ -4418,7 +4415,7 @@ mod image_tests {
         assert_eq!(buf.cursor.pos.x, 0);
     }
 
-    /// Regression test for Task 100.15: a real (Kitty) image placed at the
+    /// Regression test: a real (Kitty) image placed at the
     /// buffer's tail — the common real-world case, since `Buffer::new`
     /// starts with a single row and grows one at a time as output arrives,
     /// so there is usually NO pre-existing blank row below a freshly
@@ -5516,7 +5513,7 @@ mod image_tests {
         );
     }
 
-    // ── reflow_to_width: image rectangle preservation (Task 100.4.0) ──
+    // ── reflow_to_width: image rectangle preservation ──
     //
     // Regression tests for a pre-existing, protocol-agnostic bug: image cells
     // are `TChar::Space` with `is_head() == false`, so `reflow_to_width`'s
@@ -5905,7 +5902,7 @@ mod extract_text_tests {
         assert_eq!(result, "Ｗx");
     }
 
-    // ── Task 125.17: logical row numbers across eviction ─────────────
+    // ── logical row numbers across eviction ─────────────
 
     /// A 3-row screen with 5 rows of scrollback (8 retained rows at most) that
     /// has evicted exactly the leading `evicted` rows of the scripted lines
@@ -6436,7 +6433,7 @@ mod declrmm_tests {
         assert_eq!(buf.left_right_margins(), (0, 9));
     }
 
-    // --- SU/SD and IND/RI confine to DECLRMM margins (117.2, 117.5) ---
+    // --- SU/SD and IND/RI confine to DECLRMM margins ---
 
     /// Build a 10-wide, 5-tall buffer where every row is filled with a
     /// distinct repeated digit ("0000000000", "1111111111", ... "4444444444"),
@@ -6486,7 +6483,7 @@ mod declrmm_tests {
 
     #[test]
     fn scroll_region_up_n_confines_to_margins_when_declrmm_enabled() {
-        // 117.2: SU must shift only the [2, 7] margin range; columns 0, 1, 8,
+        // SU must shift only the [2, 7] margin range; columns 0, 1, 8,
         // 9 (outside the margins) must be untouched on every row.
         let mut buf = buf_full_grid_5x10();
         buf.set_declrmm(Declrmm::Enabled);
@@ -6535,7 +6532,7 @@ mod declrmm_tests {
 
     #[test]
     fn scroll_region_down_n_confines_to_margins_when_declrmm_enabled() {
-        // 117.2: SD must shift only the [2, 7] margin range; columns 0, 1, 8,
+        // SD must shift only the [2, 7] margin range; columns 0, 1, 8,
         // 9 (outside the margins) must be untouched on every row.
         let mut buf = buf_full_grid_5x10();
         buf.set_declrmm(Declrmm::Enabled);
@@ -6584,7 +6581,7 @@ mod declrmm_tests {
 
     #[test]
     fn handle_ind_confines_to_margins_when_declrmm_enabled() {
-        // 117.2: IND at the bottom of a partial DECSTBM region must confine
+        // IND at the bottom of a partial DECSTBM region must confine
         // the scroll to the DECLRMM margins. A partial region (bottom !=
         // height - 1) is required so `handle_lf` takes the DECSTBM path
         // instead of the full-screen fast path (which never scrolls a
@@ -6637,7 +6634,7 @@ mod declrmm_tests {
 
     #[test]
     fn handle_ri_confines_to_margins_when_declrmm_enabled() {
-        // 117.2: RI at the top of a partial DECSTBM region must confine the
+        // RI at the top of a partial DECSTBM region must confine the
         // scroll to the DECLRMM margins.
         let mut buf = buf_full_grid_5x10();
         buf.set_declrmm(Declrmm::Enabled);
@@ -6744,7 +6741,7 @@ mod declrmm_tests {
 
     #[test]
     fn handle_ind_confines_to_margins_on_alternate_buffer_when_declrmm_enabled() {
-        // 117.5: the alternate-buffer IND path must also confine to margins.
+        // The alternate-buffer IND path must also confine to margins.
         // Unlike the primary buffer, the alternate-buffer bottom-margin
         // branch always checks DECLRMM (no full-screen fast-path bypass),
         // so a full-height scroll region is sufficient here.
@@ -6782,7 +6779,7 @@ mod declrmm_tests {
 
     #[test]
     fn handle_ri_confines_to_margins_on_alternate_buffer_when_declrmm_enabled() {
-        // 117.5: the alternate-buffer RI path must also confine to margins.
+        // The alternate-buffer RI path must also confine to margins.
         let mut buf = alt_buf_full_grid_with_margins();
         buf.set_cursor_pos(Some(4), Some(0)); // top row, inside margins
 
@@ -6904,7 +6901,7 @@ mod line_width_tests {
         assert_eq!(buf.rows[0].line_width, LineWidth::Normal);
     }
 
-    // --- insert_text halves the auto-wrap span on double-width rows (117.1) ---
+    // --- insert_text halves the auto-wrap span on double-width rows ---
 
     use freminal_common::buffer_states::tchar::TChar;
 
@@ -6934,7 +6931,7 @@ mod line_width_tests {
 
     #[test]
     fn insert_text_halves_wrap_span_on_double_width_row() {
-        // 117.1: on a 10-wide DoubleWidth row the usable span halves to 5
+        // On a 10-wide DoubleWidth row the usable span halves to 5
         // columns (0..=4), computed as (wrap_col - wrap_start_col) / 2 =
         // (10 - 0) / 2 = 5. The 6th character must wrap to the next row
         // instead of landing at column 5.
@@ -6961,7 +6958,7 @@ mod line_width_tests {
 
     #[test]
     fn insert_text_halves_wrap_span_on_double_height_top_row() {
-        // 117.1: DoubleHeightTop is also `is_double_width() == true` and
+        // DoubleHeightTop is also `is_double_width() == true` and
         // must halve the wrap span identically to DoubleWidth.
         let mut buf = Buffer::new(10, 3);
         buf.set_cursor_line_width(LineWidth::DoubleHeightTop);
@@ -6982,7 +6979,7 @@ mod line_width_tests {
 
     #[test]
     fn insert_text_halves_wrap_span_on_double_height_bottom_row() {
-        // 117.1: DoubleHeightBottom is also `is_double_width() == true` and
+        // DoubleHeightBottom is also `is_double_width() == true` and
         // must halve the wrap span identically to DoubleWidth.
         let mut buf = Buffer::new(10, 3);
         buf.set_cursor_line_width(LineWidth::DoubleHeightBottom);
@@ -7003,7 +7000,7 @@ mod line_width_tests {
 
     #[test]
     fn insert_text_multi_wrap_recomputes_span_per_row() {
-        // Regression (CodeRabbit / PR #383): a single `insert_text` call that
+        // Regression: a single `insert_text` call that
         // wraps across rows of differing `line_width` must recompute the wrap
         // span for EACH destination row, not reuse the first row's status.
         //
@@ -8960,7 +8957,7 @@ mod resize_and_insert_tests {
         // Build 18 rows of genuine CONTENT (HardBreak) so they are real
         // scrollback, not blank screen-padding.  The cursor sits on the LAST
         // row (the live bottom) so every row above it is scrollback and the
-        // Task 113 grow path has no trailing blank padding to reclaim.
+        // grow path has no trailing blank padding to reclaim.
         buf.rows = (0..18)
             .map(|_| Row::new_with_origin(10, RowOrigin::HardBreak, RowJoin::NewLogicalLine))
             .collect();
@@ -9236,7 +9233,7 @@ mod image_clearing_tests {
         assert!(buf.rows[1].cells()[0].has_image());
     }
 
-    // ── `clear_image_placements_by_placement` (Task 100.18/100.20) ──
+    // ── `clear_image_placements_by_placement` ──
 
     fn make_placement_with_pid(image_id: u64, placement_id: Option<u32>) -> ImagePlacement {
         ImagePlacement {
@@ -10286,20 +10283,20 @@ mod coverage_gap_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TASK 113 — SMOKE TESTS (permanent regression coverage).
+// RESIZE SMOKE TESTS (permanent regression coverage).
 //
-// These tests are the failing reproductions for Task 113's buffer-side bugs
-// (Bug G — the root cause — and Bug R — the reflow amplifier). They were
+// These tests are the failing reproductions for the buffer-side primary-grow
+// bugs (the blank-tail root cause and the reflow amplifier). They were
 // written against the buggy code, drove the fix, and are now kept as permanent
 // regression coverage — do not delete them.
 //
-//   cargo test -p freminal-buffer --lib task_113_smoke
+//   cargo test -p freminal-buffer --lib resize_smoke
 //
-// See Documents/DESIGN_DECISIONS.md "Primary-Buffer Height Grow (Task 113)"
+// See Documents/DESIGN_DECISIONS.md "Primary-Buffer Height Grow"
 // for the full diagnosis.
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
-mod task_113_smoke {
+mod resize_smoke {
     use super::*;
     use freminal_common::buffer_states::tchar::TChar;
 
@@ -10307,14 +10304,14 @@ mod task_113_smoke {
         s.bytes().map(TChar::Ascii).collect()
     }
 
-    // ── Bug G (ROOT CAUSE): grow appends blank rows at the bottom and never
+    // ── Root cause: grow appends blank rows at the bottom and never
     // reclaims them. Repeated grow/shrink cycles (an interactive tiling-WM
     // resize, or repeated font-size changes) accumulate an unbounded tail of
     // blank rows BELOW the live cursor. The visible window then shows only
     // that blank tail while the live prompt/output is stranded at the top of
     // the buffer in unreachable scrollback. `clear` recovers it.
     #[test]
-    fn task_113_repeated_resize_does_not_strand_live_content() {
+    fn repeated_resize_does_not_strand_live_content() {
         let mut b = Buffer::new(40, 24);
         // A few lines of content, cursor at the live bottom.
         for i in 0..5 {
@@ -10355,12 +10352,12 @@ mod task_113_smoke {
         );
     }
 
-    // ── Bug R (amplifier): reflow_to_width rebuilds every row on a width
+    // ── Amplifier: reflow_to_width rebuilds every row on a width
     // change but does NOT remap command_blocks / prompt_rows, whose row
     // fields are buffer-absolute. After a width reflow the block metadata
     // points at the wrong rows, corrupting gutters/folds.
     #[test]
-    fn task_113_reflow_remaps_command_block_rows() {
+    fn reflow_remaps_command_block_rows() {
         let mut buf = Buffer::new(20, 5);
 
         // Prompt + command on row 0, output starting on row 1.
@@ -10442,13 +10439,13 @@ mod task_113_smoke {
         }
     }
 
-    // Multi-block, multi-prompt reflow in BOTH directions (Task 113.2). Two
+    // Multi-block, multi-prompt reflow in BOTH directions. Two
     // command blocks with multi-row outputs are reflowed narrow→wide and then
     // wide→narrow; after each reflow every block's row fields must still point
     // at the rows holding their content, and the two prompt-row markers must
     // remain ordered and in range.
     #[test]
-    fn task_113_reflow_remaps_multiple_blocks_both_directions() {
+    fn reflow_remaps_multiple_blocks_both_directions() {
         let mut buf = Buffer::new(20, 6);
 
         push_block(&mut buf, "fid1", "p1$ cmd-one", 55);
@@ -10494,7 +10491,7 @@ mod task_113_smoke {
 }
 
 // ============================================================================
-// Task 118.3: scrollback row compaction integration tests
+// Scrollback row compaction integration tests
 // ============================================================================
 
 #[cfg(test)]
@@ -10512,7 +10509,7 @@ mod scrollback_compaction_tests {
 
     /// Push `n` numbered lines (each terminated by LF+CR, matching real PTY
     /// output) into `buf`. This is a hot-path fill: `handle_lf` calls
-    /// `enforce_scrollback_limit`, but (Task 118 follow-up) that no longer
+    /// `enforce_scrollback_limit`, but that no longer
     /// compacts anything — rows that scroll out of the visible window are
     /// left `Live`. Tests that need compacted scrollback rows must call
     /// `Buffer::compact_idle_scrollback` explicitly after filling, mirroring
@@ -10533,7 +10530,7 @@ mod scrollback_compaction_tests {
         let visible_start = buf.visible_window_start(0);
         assert!(visible_start > 0, "test needs some scrollback to exist");
 
-        // Task 118 follow-up: compaction is deferred, so an idle-tick call
+        // Compaction is deferred, so an idle-tick call
         // is required before any scrollback row becomes compact.
         let compacted = buf.compact_idle_scrollback(usize::MAX);
         assert!(compacted > 0, "expected idle compaction to compact rows");
@@ -10548,7 +10545,7 @@ mod scrollback_compaction_tests {
         );
     }
 
-    /// Task 118 follow-up (deferred compaction): filling scrollback via the
+    /// Deferred compaction: filling scrollback via the
     /// hot per-line ingest path (`insert_text` + `handle_lf`) must NOT
     /// compact any row on its own. Only an explicit
     /// `Buffer::compact_idle_scrollback` call (standing in for the PTY
@@ -10699,7 +10696,7 @@ mod scrollback_compaction_tests {
         // Confirm compaction actually engaged before the drain below, so
         // this test exercises the real interaction between compaction and
         // scrollback-limit enforcement (not a no-op). Compaction is
-        // deferred (Task 118 follow-up), so drive it explicitly here,
+        // deferred, so drive it explicitly here,
         // standing in for the PTY thread's idle tick.
         let _ = buf.compact_idle_scrollback(usize::MAX);
         let visible_start = buf.visible_window_start(0);
@@ -10792,7 +10789,7 @@ mod scrollback_compaction_tests {
         assert_eq!(compact_flags_before, compact_flags_after);
     }
 
-    /// Task 118.7 regression: growing the height must invalidate the cache for
+    /// Regression: growing the height must invalidate the cache for
     /// the rows in the new (taller) bottom-anchored visible window, and must
     /// NOT invalidate cold scrollback rows above it. The previous code dirtied
     /// `0..old_height` (the oldest scrollback rows) instead of the visible
@@ -10833,7 +10830,7 @@ mod scrollback_compaction_tests {
         );
 
         // Cold scrollback rows at the top must NOT have been invalidated — this
-        // is the 118.7 fix (the old `0..old_height` range wrongly cleared them).
+        // is the fix (the old `0..old_height` range wrongly cleared them).
         assert!(
             buf.rows.cache()[..top_scrollback]
                 .iter()
@@ -10916,7 +10913,7 @@ mod scrollback_compaction_tests {
     }
 }
 
-/// 148.C8: `landing_row_span_for_wrap` (a non-mutating prediction) must agree,
+/// `landing_row_span_for_wrap` (a non-mutating prediction) must agree,
 /// for every branch of `advance_row_for_wrap`, with the span `insert_text`
 /// computes for the row the wrap really lands on.
 #[cfg(test)]
@@ -10997,7 +10994,7 @@ mod wrap_landing_tests {
 
     #[test]
     fn alternate_declrmm_partial_margins_keep_the_cursor_row_width() {
-        // 148.C12: with narrower margins the alternate screen's wrap-scroll is
+        // With narrower margins the alternate screen's wrap-scroll is
         // column-confined (as on the primary), so the cursor's own row, with
         // its own `line_width`, is the landing row.
         let mut buf = alt_buffer();

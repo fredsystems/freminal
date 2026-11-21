@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Bounded, type-checked reading of a shell history file (Task 148.9).
+//! Bounded, type-checked reading of a shell history file.
 //!
 //! The path handed to the history loader can come from the terminal's own
 //! output (`OSC 1338 ; HISTFILE=<path>`), so it is attacker-influenced: a
@@ -24,7 +24,7 @@
 //!   ([`SymlinkPolicy::Refuse`]) for untrusted paths;
 //! - on Windows, only drive-letter absolute paths are opened: a UNC or
 //!   device path would make Windows contact a remote host (leaking an `NTLMv2`
-//!   challenge-response, GHSA-3g79-vfp3-q57g) before any check could run.
+//!   challenge-response) before any check could run.
 //!
 //! Deciding *whether a path is a plausible history file at all* (the
 //! basename allow-list) is the caller's concern and lives in

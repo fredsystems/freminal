@@ -314,7 +314,7 @@ fn bce_default_tag_leaves_rows_sparse() {
 }
 
 //
-// ─── autowrap must not erase the row it wraps onto (issue #491) ──────────────
+// ─── autowrap must not erase the row it wraps onto ──────────────
 //
 
 /// Read a row's cells as a `String`, blanks included.

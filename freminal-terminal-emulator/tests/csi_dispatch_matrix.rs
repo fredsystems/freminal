@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Exhaustive coverage of the strict CSI router (Task 128.3).
+//! Exhaustive coverage of the strict CSI router.
 //!
 //! A CSI sequence is identified by its private-marker prefix, intermediate
 //! byte(s) and final byte *together*. The router routes only the keys listed

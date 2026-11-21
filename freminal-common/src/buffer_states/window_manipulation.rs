@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::osc99_notification::{Notification99Data, Osc99ControlKind};
 
-/// Category of a desktop/in-app notification (Task 76).
+/// Category of a desktop/in-app notification.
 ///
 /// Determines which routing policy in `[notifications]` applies and which
 /// toast styling the GUI uses when surfacing the notification.
@@ -114,7 +114,7 @@ pub enum WindowManipulation {
     /// Forwarded to the GUI so it can trigger a visual bell indicator
     /// and/or mark the originating tab as having an unacknowledged bell.
     Bell,
-    /// Desktop/in-app notification request (OSC 9 / OSC 777, Task 76).
+    /// Desktop/in-app notification request (OSC 9 / OSC 777).
     ///
     /// Forwarded to the GUI so it can route the notification to an in-app
     /// toast and/or the system notification daemon per the `[notifications]`
@@ -133,22 +133,22 @@ pub enum WindowManipulation {
         /// The notification body text.
         body: String,
     },
-    /// Stateful desktop notification request (OSC 99, Task 99).
+    /// Stateful desktop notification request (OSC 99).
     ///
     /// The stateful sibling of `Notification` (OSC 9/777). Carries the full
     /// OSC 99 metadata superset in a [`Box<Notification99Data>`] to avoid
     /// inflating the enum's in-memory size.  The boxed struct's fields are
-    /// primitive "shells" populated by Task 99.4 from the typed `Osc99Command`
-    /// parser (Task 99.1); domain enums for urgency/occasion/action live in
+    /// primitive "shells" populated from the typed `Osc99Command`
+    /// parser; domain enums for urgency/occasion/action live in
     /// that parser, not here.  Transported via the `WindowCommand` channel
-    /// (not the snapshot) and rendered by Task 99.5.
+    /// (not the snapshot) and rendered by the GUI.
     Notification99(Box<Notification99Data>),
-    /// OSC 99 app→terminal control sequence (`p=close` / `p=alive`, Task 99).
+    /// OSC 99 app→terminal control sequence (`p=close` / `p=alive`).
     ///
     /// Routed distinctly from display notifications: it drives close
     /// reconciliation or the alive-id list reply rather than a banner. The
     /// capability query `p=?` is never carried here: it is answered on the PTY
-    /// thread from the host capabilities (Task 130.5) and does not reach the
+    /// thread from the host capabilities and does not reach the
     /// GUI, so it never becomes an `Osc99Control`.
     Osc99Control {
         /// Notification id (`i=`) the control refers to. Mandatory: an

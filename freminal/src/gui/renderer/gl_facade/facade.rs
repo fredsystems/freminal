@@ -12,7 +12,7 @@
 //! actually does. What this module adds is the second, `gl-recording`-only
 //! arm: instead of issuing the call to a real `glow::Context`, it appends a
 //! [`GlCall`] to a [`RecordingState`] log and fabricates a plausible return
-//! value, so the Task 123 measurement harness can run without a GPU,
+//! value, so the measurement harness can run without a GPU,
 //! display server, or driver.
 
 use glow::HasContext;
@@ -34,7 +34,7 @@ use conv2::ConvUtil;
 /// signatures just to carry a type parameter most of them would never
 /// otherwise need. The enum-backed struct instead keeps codegen
 /// monomorphic in the `Real` arm — the arm every production build actually
-/// takes — and turns the 123.4/123.5 migration into a mechanical type
+/// takes — and turns the migration into a mechanical type
 /// substitution (`&glow::Context` becomes `&Gl<'_>`) rather than a
 /// redesign of call sites.
 ///
@@ -42,7 +42,7 @@ use conv2::ConvUtil;
 ///
 /// Every method mirrors its `glow::HasContext` namesake's signature
 /// exactly — same name, same parameters, same return type — so that the
-/// 123.4/123.5 migration is a pure type substitution: an existing
+/// migration is a pure type substitution: an existing
 /// `unsafe { gl.foo(..) }` call site keeps its `unsafe` block verbatim and
 /// only the binding's type changes from `&glow::Context` to `&Gl<'_>`.
 /// Making these methods safe would hide a contract that is genuinely the
@@ -322,7 +322,7 @@ impl Gl<'_> {
         }
     }
 
-    /// Task 125.8: creates a query object (`glGenQueries` via glow's
+    /// Creates a query object (`glGenQueries` via glow's
     /// `create_query`), used for asynchronous GPU timestamp queries
     /// (`glow::TIMESTAMP`). Fabricates a deterministic handle under
     /// `gl-recording`, in the same per-type monotonic-counter style as the
@@ -405,7 +405,7 @@ impl Gl<'_> {
         }
     }
 
-    /// Task 125.8: destroys a query object (`glDeleteQueries`). Called
+    /// Destroys a query object (`glDeleteQueries`). Called
     /// exactly once for every handle a [`freminal_windowing::gpu_profiling::GpuQueryRing`]
     /// ever accepted, once its result has been read or the ring is torn
     /// down -- see that type's `GpuQuerySource::destroy_query` contract.
@@ -550,7 +550,7 @@ impl Gl<'_> {
         }
     }
 
-    /// Task 125.8: reads a string-valued GL parameter
+    /// Reads a string-valued GL parameter
     /// (`glGetString`/`glGetStringi` via glow's `get_parameter_string`).
     /// Used to read `glow::VERSION` and `glow::RENDERER` for GPU timer
     /// capability detection and reporting -- see
@@ -617,7 +617,7 @@ impl Gl<'_> {
         }
     }
 
-    /// Task 125.8: non-blocking availability check
+    /// Non-blocking availability check
     /// (`glGetQueryObjectuiv(query, GL_QUERY_RESULT_AVAILABLE)`). Callers
     /// must never treat this as an invitation to read a result before it
     /// returns non-zero -- see
@@ -643,7 +643,7 @@ impl Gl<'_> {
         }
     }
 
-    /// Task 125.8: reads a 64-bit query result
+    /// Reads a 64-bit query result
     /// (`glGetQueryObjectui64v(query, GL_QUERY_RESULT)`). Callers must only
     /// call this after [`Self::get_query_parameter_u32`] with
     /// `GL_QUERY_RESULT_AVAILABLE` has returned non-zero for the same
@@ -737,7 +737,7 @@ impl Gl<'_> {
         }
     }
 
-    /// Task 125.8: issues a GPU timestamp
+    /// Issues a GPU timestamp
     /// (`glQueryCounter(query, GL_TIMESTAMP)`). Callers use this -- never
     /// `begin_query`/`end_query` with `GL_TIME_ELAPSED` -- so that
     /// upload/draw boundaries can be marked with independent, non-nested
@@ -777,7 +777,7 @@ impl Gl<'_> {
         }
     }
 
-    /// Task 125.8: reads the context's supported-extension set
+    /// Reads the context's supported-extension set
     /// (`glow::HasContext::supported_extensions`, itself parsed once by
     /// `glow` at context creation from `GL_EXTENSIONS`/`glGetStringi`). Used
     /// alongside [`Self::get_parameter_string`] (with `glow::VERSION`) for GPU
@@ -811,7 +811,7 @@ impl Gl<'_> {
     }
 
     // `glow::HasContext::tex_image_2d` takes nine arguments; this facade
-    // method must mirror its signature exactly so the 123.4/123.5 migration
+    // method must mirror its signature exactly so the migration
     // stays a pure type substitution. Reducing the count here would mean
     // inventing a parameter struct that every call site would then have to
     // build, which is a redesign of the call sites this facade exists to
@@ -881,7 +881,7 @@ impl Gl<'_> {
     }
 
     // `glow::HasContext::tex_sub_image_2d` takes nine arguments; this facade
-    // method must mirror its signature exactly so the 123.4/123.5 migration
+    // method must mirror its signature exactly so the migration
     // stays a pure type substitution. Reducing the count here would mean
     // inventing a parameter struct that every call site would then have to
     // build, which is a redesign of the call sites this facade exists to
@@ -1023,8 +1023,8 @@ mod tests {
     /// *complete* with respect to `GL_CALL_SURFACE`, so a surface entry
     /// cannot silently lack a method. It deliberately does not check that
     /// each method records itself under the *correct* name — that needs
-    /// the facade actually driven, and is subtask 123.3's behavioural
-    /// round-trip suite, which calls every method against a recording
+    /// the facade actually driven, and is the behavioural
+    /// round-trip suite in `recording_tests.rs`, which calls every method against a recording
     /// `Gl` and compares the recorded set to `GL_CALL_SURFACE`.
     #[test]
     fn every_surface_method_exists_on_the_facade() {
@@ -1047,10 +1047,10 @@ mod tests {
     /// **Scope of what this establishes, stated precisely.** This test
     /// proves *memory-layout equivalence*. It does not execute a GL call
     /// and it does not inspect generated code, so it is strictly weaker
-    /// than the runtime benchmark 123.6 originally asked for. The layout
+    /// than a runtime benchmark would be. The layout
     /// result plus the single-variant reasoning below is strong evidence
     /// that the dispatch is free. The stronger claim was verified
-    /// separately by 123.6b, which reads the emitted assembly: at a
+    /// separately by `codegen_probe`, which reads the emitted assembly: at a
     /// realistic call site the facade and a direct `glow` call compile to
     /// byte-identical code, folded into the same symbol. See
     /// `gl_facade::codegen_probe`. Still, do not cite *this* test as if it
@@ -1072,13 +1072,11 @@ mod tests {
     /// language's semantics, not something this test checks. Nothing here
     /// reads the disassembly.
     ///
-    /// This stands in for a benchmark rather than superseding one: the plan asked
-    /// for the `Real` arm to be benchmarked against a direct
+    /// This stands in for a benchmark rather than superseding one: the ideal
+    /// check would benchmark the `Real` arm against a direct
     /// `glow::Context` call, but that comparison needs a live GL context —
-    /// a display server and a driver — which is exactly the infrastructure
-    /// Phase 2 builds (123.10's offscreen context, 123.11's pixel
-    /// harness). Benchmarking the `Real` arm is re-scoped as **123.6b**,
-    /// gated on 123.11. The compensating advantage of doing it this way now:
+    /// a display server and a driver — and is not resolvable anyway (see
+    /// `codegen_probe`). The compensating advantage of doing it this way:
     /// unlike a Criterion benchmark, this check runs in the ordinary
     /// `cargo test` matrix on all four CI platforms, and it cannot quietly
     /// stop being checked the way a benchmark not wired into CI can.

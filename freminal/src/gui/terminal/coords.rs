@@ -49,15 +49,15 @@ pub(super) const fn visible_window_start_for(
 /// PTY thread operates on), not an index into the buffer, so it must be offset
 /// by that window's start before it is compared with block rows (which resolve
 /// to retained indices). With scrollback the two differ by
-/// `total_rows - term_height`; comparing them directly selects the wrong block
-/// (Task 125.C12). The live window is used regardless of the GUI's
+/// `total_rows - term_height`; comparing them directly selects the wrong block.
+/// The live window is used regardless of the GUI's
 /// `scroll_offset`, because the PTY cursor never leaves it.
 pub(super) const fn cursor_buffer_row(snap: &TerminalSnapshot) -> usize {
     visible_window_start_for(snap, 0).saturating_add(snap.cursor_pos.y)
 }
 
 /// Buffer-absolute row at which a still-running command block's gutter color
-/// should stop (106.2b): the cursor's current row, i.e. the last line of
+/// should stop: the cursor's current row, i.e. the last line of
 /// output the running command has produced so far.
 ///
 /// A running block has no `end_row`; the gutter / duration-anchor helpers
@@ -69,7 +69,7 @@ pub(super) const fn cursor_buffer_row(snap: &TerminalSnapshot) -> usize {
 ///
 /// The cursor row is relative to the live window (`0..term_height`), so the
 /// buffer-absolute row is resolved through [`cursor_buffer_row`], independent
-/// of the GUI's `scroll_offset` (Task 125.C12).
+/// of the GUI's `scroll_offset`.
 pub(super) const fn running_block_extent(snap: &TerminalSnapshot) -> usize {
     cursor_buffer_row(snap)
 }
@@ -202,7 +202,7 @@ pub(super) fn encode_egui_mouse_pos_as_usize(
 /// Convert an egui pointer position to zero-based, floored PHYSICAL PIXEL
 /// coordinates relative to the terminal content area's top-left `origin`.
 ///
-/// Task 124.3a: `MouseEncoding::SgrPixels` (`?1016`) reports sub-cell pixel
+/// `MouseEncoding::SgrPixels` (`?1016`) reports sub-cell pixel
 /// motion, which `encode_egui_mouse_pos_as_usize`'s cell-floor-division
 /// discards before `mouse.rs` ever sees a position. `pixels_per_point`
 /// converts the logical-point offset used everywhere else in this module
@@ -248,8 +248,7 @@ pub(super) fn encode_egui_mouse_pos_as_pixels(
 /// Convert an egui pointer position to a full
 /// [`FreminalMousePosition`](crate::gui::mouse::FreminalMousePosition) —
 /// both character-cell coordinates and physical-pixel coordinates,
-/// relative to the terminal content area's top-left `origin` (Task
-/// 124.3a). Combines [`encode_egui_mouse_pos_as_usize`] and
+/// relative to the terminal content area's top-left `origin`. Combines [`encode_egui_mouse_pos_as_usize`] and
 /// [`encode_egui_mouse_pos_as_pixels`] rather than duplicating either.
 pub(super) fn encode_egui_mouse_pos(
     pos: Pos2,
@@ -309,7 +308,7 @@ mod visible_window_start_tests {
         assert_eq!(visible_window_start(&snap), 0);
     }
 
-    // ── running_block_extent (106.2b) ────────────────────────────────────
+    // ── running_block_extent ────────────────────────────────────
 
     #[test]
     fn running_extent_is_cursor_row_not_pane_bottom() {
@@ -665,7 +664,7 @@ mod url_at_cell_tests {
 
 #[cfg(test)]
 mod encode_egui_mouse_pos_tests {
-    //! Task 124.3a: `encode_egui_mouse_pos_as_pixels` / `encode_egui_mouse_pos`.
+    //! `encode_egui_mouse_pos_as_pixels` / `encode_egui_mouse_pos`.
 
     use super::*;
 

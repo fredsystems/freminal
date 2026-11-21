@@ -12,7 +12,7 @@
 
 # Still climbing fast (cov +9%, ft +29% in the last 5 min).
 terminal_state 50
-# Still climbing (+30% / +14% / +45%; frec partly throttled by #556).
+# Still climbing (+30% / +14% / +45%; frec partly throttled by oversized allocations).
 config_toml 30
 layout_toml 30
 frec_parse 30

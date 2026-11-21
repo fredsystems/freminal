@@ -7,14 +7,14 @@
 //!
 //! # Why this bench exists
 //!
-//! Originated as Task 124 subtask 124.15, which gated 124.5 -- the decision
-//! (since executed) to delete the #436 chrome cache as structurally unsound:
+//! Originated as the measurement gating the decision (since executed) to
+//! delete the chrome cache as structurally unsound:
 //! `ChromeMode::Replay` skipped constructing chrome widgets, but egui
 //! resolves hit-testing and click validity against the previous frame's
 //! widget set, so unbuilt widgets were uninteractable. With the cache gone,
 //! chrome construction and tessellation happen on every single frame -- this
 //! bench now measures that **actual permanent per-frame cost**, not a
-//! ceiling on a hypothetical caching saving. Neither Task 123 harness can
+//! ceiling on a hypothetical caching saving. Neither GL measurement harness can
 //! answer it: Phase 1 records GL calls from the terminal renderer, which
 //! never sees chrome, and Phase 2 captures pixels from that same renderer.
 //! Chrome is painted by egui, so it needs an egui-level measurement.
@@ -90,7 +90,7 @@ fn run_chrome_frame(
         });
     });
 
-    // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+    // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
     // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md,
     // and `render_loop_bench.rs`'s `bench_chrome_frame_record` for the same
     // convention.

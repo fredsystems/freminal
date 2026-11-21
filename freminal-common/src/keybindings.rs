@@ -698,7 +698,7 @@ pub enum KeyAction {
     /// Paste the system clipboard contents into the terminal.
     Paste,
     /// Paste the system clipboard contents directly, bypassing the smart
-    /// paste guard's confirmation dialog (Task 77).
+    /// paste guard's confirmation dialog.
     PasteUnsafe,
     /// Select all visible terminal content.
     SelectAll,
@@ -739,7 +739,7 @@ pub enum KeyAction {
     /// window through the normal close-guard path (so a running foreground
     /// command in any pane still prompts). This exists because closing
     /// windows individually made only the last-closed window's topology
-    /// survive into the auto-saved session — see issue #509.
+    /// survive into the auto-saved session.
     ///
     /// Default binding: `Ctrl+Shift+Q`.
     QuitAll,
@@ -822,7 +822,7 @@ pub enum KeyAction {
     /// Default binding: `Ctrl+Shift+M`.  Deliberately NOT `Ctrl+R`
     /// (collides with the shell's reverse-i-search), NOT `Ctrl+Shift+R`
     /// (taken by [`Self::ToggleRecording`]), NOT `Ctrl+Shift+P` (reserved
-    /// for the forthcoming command palette in Task 83).
+    /// for the forthcoming command palette).
     ShowCommandHistory,
 
     // -- Pane management ---------------------------------------------------
@@ -1374,7 +1374,7 @@ fn register_misc_bindings(map: &mut BindingMap) {
         KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT),
         KeyAction::Paste,
     );
-    // Paste bypassing the smart paste guard's confirmation dialog (Task 77).
+    // Paste bypassing the smart paste guard's confirmation dialog.
     // Ctrl+Shift+Alt+V is one modifier beyond the normal Paste combo so the
     // "unsafe" variant is deliberate and not fat-fingered.
     map.bind(
@@ -1490,7 +1490,7 @@ fn register_misc_bindings(map: &mut BindingMap) {
     // considered conflicts:
     //   - Ctrl+R       — the shell's reverse-i-search.
     //   - Ctrl+Shift+R — already bound to ToggleRecording above.
-    //   - Ctrl+Shift+P — reserved for the Task 83 command palette.
+    //   - Ctrl+Shift+P — reserved for the command palette.
     map.bind(
         KeyCombo::new(BindingKey::M, BindingModifiers::CTRL_SHIFT),
         KeyAction::ShowCommandHistory,
@@ -1568,7 +1568,7 @@ fn register_window_bindings(map: &mut BindingMap) {
         KeyCombo::new(BindingKey::N, BindingModifiers::CTRL_SHIFT),
         KeyAction::NewWindow,
     );
-    // Close every open window and quit the process (issue #509).
+    // Close every open window and quit the process.
     map.bind(
         KeyCombo::new(BindingKey::Q, BindingModifiers::CTRL_SHIFT),
         KeyAction::QuitAll,

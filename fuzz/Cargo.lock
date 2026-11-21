@@ -778,7 +778,6 @@ dependencies = [
  "bitflags",
  "downcast-rs",
  "filedescriptor",
- "lazy_static",
  "libc",
  "log",
  "nix",

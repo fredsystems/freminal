@@ -750,7 +750,7 @@ fn q1035_dispatches_to_numlock_overrides_keypad() {
     );
 }
 
-// ── ?1036 and ?1039 — Alt sends ESC (Task 147.24) ─────────────────────────
+// ── ?1036 and ?1039 — Alt sends ESC ─────────────────────────
 
 #[test]
 fn q1036_dispatches_to_meta_sends_escape() {

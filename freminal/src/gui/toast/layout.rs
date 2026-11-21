@@ -26,7 +26,7 @@ use crate::gui::renderer::{
 };
 
 // ---------------------------------------------------------------------------
-//  Owned-renderer layout model (issue #433)
+//  Owned-renderer layout model
 // ---------------------------------------------------------------------------
 //
 // The types and function below turn a list of toasts (plus their measured
@@ -439,7 +439,7 @@ fn settled_origins(
 /// The pill/border/text colors for one toast, derived from the active
 /// theme and its current animation opacity.
 ///
-/// Issue #433 visual redesign: the pill fill is a neutral, solid theme
+/// The pill fill is a neutral, solid theme
 /// color (see [`ToastKind::background`]); the notification kind shows only in
 /// the left accent bar and the icon tint. A neutral chrome border replaces
 /// the old outer glow for separation from the terminal behind it.
@@ -466,7 +466,7 @@ struct ToastColors {
 /// Derive [`ToastColors`] for `kind` from the active theme, at the given
 /// (already-clamped-elsewhere) animation `opacity`.
 ///
-/// Issue #433 visual redesign: the fill is the neutral solid theme
+/// The fill is the neutral solid theme
 /// background, the border is the neutral `window_stroke` color, and only the
 /// accent bar + icon carry the kind's semantic color.
 fn toast_colors(kind: ToastKind, visuals: &egui::Visuals, opacity: f32) -> ToastColors {
@@ -629,7 +629,7 @@ fn layout_one_toast(
     let colors = toast_colors(input.kind, visuals, anim.opacity);
     // Clamp the corner radius to half the pill's smaller dimension: a large
     // theme `menu_corner_radius` on a short pill could otherwise exceed the
-    // half-extent and distort the SDF into a lozenge (review finding #6).
+    // half-extent and distort the SDF into a lozenge.
     let corner_radius = metrics
         .corner_radius
         .min(scaled_width.min(scaled_height) / 2.0)
@@ -729,7 +729,7 @@ pub(super) fn layout_toasts(
     // Guard against a pathological `pixels_per_point` of 0 from the windowing
     // layer: `ppp` is used as a divisor when deriving the logical hit rect
     // (`layout_one_toast`), so a zero would yield `Inf`/`NaN` rects that never
-    // match a pointer. Floor it at a tiny epsilon (review finding #5).
+    // match a pointer. Floor it at a tiny epsilon.
     let ppp = pixels_per_point.max(f32::EPSILON);
     let metrics = ToastLayoutMetrics {
         ppp,
@@ -1119,7 +1119,7 @@ mod tests {
     use crate::gui::toast::{ToastAnim, ToastPlacement};
     #[test]
     fn toast_colors_border_from_window_stroke_accent_from_semantic() {
-        // Issue #433 redesign: the border is the neutral window_stroke color;
+        // The border is the neutral window_stroke color;
         // only the accent bar (and icon) carry the kind's semantic color.
         let mut v = egui::Visuals::dark();
         v.error_fg_color = egui::Color32::from_rgb(220, 40, 40);
@@ -1280,7 +1280,7 @@ mod tests {
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].label_text, "Error: short");
         assert!(!inputs[0].label_text.ends_with('…'));
-        // Subtask 121.14: measured immediately after `push`, so the toast is
+        // Measured immediately after `push`, so the toast is
         // still within its entry-animation window (age 0 < `ANIM_IN`).
         assert!(
             any_animating,
@@ -1317,7 +1317,7 @@ mod tests {
             input.detail_text
         );
         assert!(input.detail_text.ends_with('…'));
-        // Subtask 121.14: same reasoning as the short-toast test above.
+        // Same reasoning as the short-toast test above.
         assert!(
             any_animating,
             "a just-pushed toast must report as animating (entry fade in progress)"
@@ -1364,7 +1364,7 @@ mod tests {
         assert!((right0 - expected_right).abs() < 0.01);
     }
 
-    /// Issue #433 redesign: the neutral border width flows end-to-end from
+    /// The neutral border width flows end-to-end from
     /// `visuals.window_stroke.width` (scaled by ppp) into the final
     /// [`ToastQuad.border_width`], and the border color comes from
     /// `window_stroke.color`. This is the plumbing the visual redesign adds;
@@ -1747,7 +1747,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    //  resolve_anchor — per-window anchor resolution (issue #433 slice 2)
+    //  resolve_anchor — per-window anchor resolution
     // -----------------------------------------------------------------
     //
     // `resolve_anchor` takes the origin-window comparison as a pre-computed
@@ -1982,7 +1982,7 @@ mod tests {
 
     #[test]
     fn group_and_layout_merges_coincident_centered_anchors() {
-        // Regression (adversarial review, slice 2): a `PaneCentered` toast
+        // Regression: a `PaneCentered` toast
         // whose pane rect equals the window content rect (the common
         // single-pane case) and a `WindowCentered` toast center on the SAME
         // rect. They must share one group and STACK (distinct y positions),
@@ -2211,7 +2211,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    //  138.C14: overflow, window-aware layout, measurement, light pills
+    //  overflow, window-aware layout, measurement, light pills
     // -----------------------------------------------------------------
 
     /// A toast tall enough that a few of them overflow an ordinary window:

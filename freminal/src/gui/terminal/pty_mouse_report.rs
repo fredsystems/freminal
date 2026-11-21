@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 124.3a: the out-of-frame immediate PTY mouse-report path.
+//! The out-of-frame immediate PTY mouse-report path.
 //!
 //! `FreminalGui::on_pointer_moved` (in `app_impl.rs`) resolves the active
 //! pane's `ViewState`, `TerminalSnapshot`, `input_tx`, and published
@@ -23,7 +23,7 @@
 //!
 //! Repaint scheduling (`App::pointer_motion_needs_repaint`) is a
 //! completely separate axis, untouched by this module — see
-//! `Documents/DESIGN_DECISIONS.md`, "Damage Model (Task 124)" / "Pointer
+//! `Documents/DESIGN_DECISIONS.md`, "Damage Model" / "Pointer
 //! motion and PTY mouse reports are separate axes".
 
 use crossbeam_channel::Sender;
@@ -38,7 +38,7 @@ use crate::gui::view_state::ViewState;
 use super::coords::encode_egui_mouse_pos;
 use super::input::send_mouse_report;
 
-/// Task 124.3a (review correction #6): whether `inputs`' cell dimensions
+/// Whether `inputs`' cell dimensions
 /// and pixels-per-point are safe to feed into [`encode_egui_mouse_pos`].
 ///
 /// Zero, negative, NaN, or infinite cell dimensions would divide the
@@ -59,7 +59,7 @@ fn has_valid_report_geometry(inputs: &PanePointerReportInputs) -> bool {
         && inputs.pixels_per_point > 0.0
 }
 
-/// Task 124.3a: decide whether to send an immediate PTY motion report for
+/// Decide whether to send an immediate PTY motion report for
 /// this pointer position, and send it if so.
 ///
 /// `report_inputs` is `None` when this pane has not yet published a
@@ -67,10 +67,9 @@ fn has_valid_report_geometry(inputs: &PanePointerReportInputs) -> bool {
 /// active pane resolution failed upstream) — conservative: no report.
 /// Every other early-return below is equally conservative and mirrors the
 /// exact gates `write_input_to_terminal`'s old frame-time `PointerMoved`
-/// arm applied before Task 124.3a moved report delivery out of it:
+/// arm applied before report delivery moved out of it:
 /// scrolled-back suppression, every `InputSuppressors` field, the
-/// terminal-rect containment check, `MouseTrack::NoTracking`, and (review
-/// correction #6) invalid published geometry.
+/// terminal-rect containment check, `MouseTrack::NoTracking`, and invalid published geometry.
 ///
 /// `held_button` is the WINDOW-owned physical button state
 /// (`PerWindowState::held_pointer_button`) — see that field's doc for why
@@ -125,7 +124,7 @@ pub(in crate::gui) fn maybe_send_immediate_motion_report(
     let button_held = held_button.is_some();
 
     let report = &mut view_state.immediate_mouse_report;
-    // Task 124.3a (review correction #3): `report.position` is `None`
+    // `report.position` is `None`
     // before the first observed motion in this pane — that must produce an
     // unambiguous "changed" answer even when `position` itself is the
     // cell/pixel origin, so no synthetic `(0, 0)` `PreviousMouseState` is
@@ -302,7 +301,7 @@ mod tests {
         assert_eq!(sent_bytes(&f.input_rx), None);
     }
 
-    // ── Task 124.3a (review correction #6): geometry validation ────────
+    // ── geometry validation ────────────────────────────────────────
 
     #[test]
     fn zero_cell_size_sends_nothing() {
@@ -578,7 +577,7 @@ mod tests {
         );
     }
 
-    // ── Task 124.3a (review correction #3): first motion at the origin ──
+    // ── first motion at the origin ──────────────────────────────────
 
     #[test]
     fn first_motion_landing_at_the_cell_origin_still_reports() {
@@ -622,7 +621,7 @@ mod tests {
         assert_eq!(s, "\x1b[<32;1;1m");
     }
 
-    // ── Task 124.3a (review correction #2): first report after a
+    // ── first report after a
     // pointer-presence-loss reset ─────────────────────────────────────
 
     #[test]
@@ -687,7 +686,7 @@ mod tests {
         );
     }
 
-    // ── Task 147.C1: a mouse report is not a key event ─────────────────
+    // ── A mouse report is not a key event ─────────────────
 
     #[test]
     fn motion_report_is_sent_raw_under_kitty_report_all_keys() {

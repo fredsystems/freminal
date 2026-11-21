@@ -3,9 +3,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Guards the Task 125 `sustained-output-marked` measurement workload.
+//! Guards the `sustained-output-marked` measurement workload.
 //!
-//! That workload (`assets/profiling/task125/workloads.sh`) wraps every output
+//! That workload (`assets/profiling/parity/workloads.sh`) wraps every output
 //! burst in OSC 133 marks so each terminal records prompts and command blocks.
 //! Freminal silently ignores any OSC 133 `A`/`B`/`C`/`D` marker that lacks
 //! `freminal=1;fid=<id>`, so an untagged workload would measure plain
@@ -19,7 +19,7 @@
 
 use freminal_terminal_emulator::interface::TerminalEmulator;
 
-const WORKLOADS_SH: &str = include_str!("../../assets/profiling/task125/workloads.sh");
+const WORKLOADS_SH: &str = include_str!("../../assets/profiling/parity/workloads.sh");
 
 /// Read the single-quoted value of `readonly <name>='...'` from the script.
 fn script_format(name: &str) -> String {
@@ -72,12 +72,12 @@ fn expand_printf(format: &str, id: u64) -> Vec<u8> {
 /// One burst exactly as the PTY delivers it: the marks, then `seq 1 200` with
 /// the line discipline's `\n` -> `\r\n` translation.
 fn burst(id: u64) -> Vec<u8> {
-    let mut bytes = expand_printf(&script_format("TASK125_MARKED_PROMPT_FORMAT"), id);
+    let mut bytes = expand_printf(&script_format("PARITY_MARKED_PROMPT_FORMAT"), id);
     for n in 1..=200 {
         bytes.extend_from_slice(format!("{n}\r\n").as_bytes());
     }
     bytes.extend(expand_printf(
-        &script_format("TASK125_MARKED_FINISH_FORMAT"),
+        &script_format("PARITY_MARKED_FINISH_FORMAT"),
         id,
     ));
     bytes
@@ -86,14 +86,14 @@ fn burst(id: u64) -> Vec<u8> {
 #[test]
 fn expanded_formats_are_the_tagged_osc_133_sequences() {
     assert_eq!(
-        expand_printf(&script_format("TASK125_MARKED_PROMPT_FORMAT"), 7),
-        b"\x1b]133;A;freminal=1;fid=7\x07Task125 prompt>\
+        expand_printf(&script_format("PARITY_MARKED_PROMPT_FORMAT"), 7),
+        b"\x1b]133;A;freminal=1;fid=7\x07Parity prompt>\
           \x1b]133;B;freminal=1;fid=7\x07\
           \x1b]133;C;freminal=1;fid=7\x07"
             .as_slice()
     );
     assert_eq!(
-        expand_printf(&script_format("TASK125_MARKED_FINISH_FORMAT"), 7),
+        expand_printf(&script_format("PARITY_MARKED_FINISH_FORMAT"), 7),
         b"\x1b]133;D;0;freminal=1;fid=7\x07".as_slice()
     );
 }
@@ -132,7 +132,7 @@ fn bare_osc_133_marks_would_record_nothing() {
     // The pre-fix workload bytes. Pinning this documents *why* the tag is
     // required, so nobody "simplifies" the script back to bare marks.
     let (mut emu, _rx) = TerminalEmulator::new_headless(None);
-    emu.handle_incoming_data(b"\x1b]133;A\x07Task125 prompt>\x1b]133;B\x07\x1b]133;C\x07");
+    emu.handle_incoming_data(b"\x1b]133;A\x07Parity prompt>\x1b]133;B\x07\x1b]133;C\x07");
     emu.handle_incoming_data(b"1\r\n2\r\n\x1b]133;D;0\x07");
     let snap = emu.build_snapshot();
     assert!(snap.prompt_rows.is_empty());

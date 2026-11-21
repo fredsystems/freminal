@@ -80,7 +80,7 @@ pub enum KittyCompression {
     Zlib,
 }
 
-/// Delete target specifier (Task 100.7a).
+/// Delete target specifier.
 ///
 /// The kitty spec's `d=` targets come in lowercase/uppercase pairs where
 /// the case does **not** change which placements are targeted — it changes
@@ -196,10 +196,10 @@ pub struct KittyControlData {
     /// `C` — Cursor movement: 0 = move cursor after image (default), 1 = don't move.
     pub no_cursor_movement: bool,
 
-    // Relative-placement keys (Task 100.4).
-    /// Parent image id (`P`) — relative placement (Task 100.4).
+    // Relative-placement keys.
+    /// Parent image id (`P`) — relative placement.
     pub parent_image_id: Option<u32>,
-    /// Parent placement id (`Q`) — relative placement (Task 100.4).
+    /// Parent placement id (`Q`) — relative placement.
     pub parent_placement_id: Option<u32>,
     /// Horizontal cell offset from parent (`H`) — relative placement.
     pub h_offset: Option<i32>,
@@ -398,7 +398,7 @@ fn apply_control_pair(
             ctrl.delete_free_data = value[0].is_ascii_uppercase();
         }
         b'U' => ctrl.unicode_placeholder = parse_u32(value)? != 0,
-        // Relative-placement keys (Task 100.4). P/Q are unsigned; H/V are signed.
+        // Relative-placement keys. P/Q are unsigned; H/V are signed.
         b'P' => ctrl.parent_image_id = Some(parse_u32(value)?),
         b'Q' => ctrl.parent_placement_id = Some(parse_u32(value)?),
         b'H' => ctrl.h_offset = Some(parse_i32(value)?),
@@ -427,7 +427,7 @@ fn parse_control_data(data: &[u8]) -> Result<KittyControlData, KittyParseError> 
             Ok(KeyValueItem::Pair { key, value }) => {
                 // An empty key or an empty value is malformed. The key is the
                 // first byte only (a wider key is accepted as its first byte;
-                // tightening that is Task 135).
+                // tightening it is a known gap).
                 let Some(&key_byte) = key.first().filter(|_| !value.is_empty()) else {
                     let mut pair = Vec::with_capacity(key.len() + 1 + value.len());
                     pair.extend_from_slice(key);
@@ -1037,11 +1037,11 @@ mod tests {
         assert_eq!(cmd.control.image_id, Some(1));
     }
 
-    // --- Pinned behaviour (Task 129.3): must survive the tokenizer migration ---
+    // --- Pinned behaviour: must survive the tokenizer migration ---
 
     #[test]
     fn multi_byte_key_uses_first_byte() {
-        // Known quirk (fixed in Task 135): only the key's first byte is used,
+        // Known quirk: only the key's first byte is used,
         // so `ixyz=7` is read as `i=7`.
         let apc = make_apc("ixyz=7", "");
         let cmd = parse_kitty_graphics(&apc).unwrap();
@@ -1098,7 +1098,7 @@ mod tests {
         assert_eq!(err, KittyParseError::InvalidInteger("1=2".to_owned()));
     }
 
-    // --- Control item cap (Task 129.3) ---
+    // --- Control item cap ---
 
     fn repeated_control(count: usize) -> Vec<u8> {
         vec!["i=1"; count].join(",").into_bytes()

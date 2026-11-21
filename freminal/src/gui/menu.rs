@@ -148,7 +148,7 @@ impl super::FreminalGui {
 
         if show_lock || show_rec {
             // Semantic indicator colors come from the centralized themed
-            // Visuals (set in 112.4): the lock is a "warning"-class indicator
+            // Visuals: the lock is a "warning"-class indicator
             // (palette yellow), the REC dot an "error"-class indicator
             // (palette red).  No hard-coded hues — they follow the active theme.
             let warn_color = ui.visuals().warn_fg_color;
@@ -934,7 +934,7 @@ impl super::FreminalGui {
                         ui.visuals().widgets.inactive.fg_stroke.color
                     };
                     if tab.broadcast_input {
-                        // Broadcast indicator (Task 74): tab is broadcasting
+                        // Broadcast indicator: tab is broadcasting
                         // keyboard input to all its panes.
                         ui.label(ChromeIcon::Broadcast.rich_text_colored(label_color));
                     }

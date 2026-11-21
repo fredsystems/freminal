@@ -3,8 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Regression tests for issue #491: autowrap must not erase the row it wraps
-//! onto.
+//! Regression tests: autowrap must not erase the row it wraps onto.
 //!
 //! Autowrap is defined as cursor movement. A TUI is entitled to repaint a
 //! soft-wrapped line by touching only the cells that changed and using

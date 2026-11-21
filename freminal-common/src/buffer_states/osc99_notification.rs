@@ -71,8 +71,8 @@ pub enum Osc99Sound {
 /// The OSC 99 app->terminal control payload types the GUI acts on.
 ///
 /// They require a terminal response or state change rather than a
-/// notification banner (Task 99). `p=?` is not among them: the PTY thread
-/// answers it itself (Task 130.5).
+/// notification banner. `p=?` is not among them: the PTY thread
+/// answers it itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc99ControlKind {
     /// `p=close`: the application asks to close the notification with this id.

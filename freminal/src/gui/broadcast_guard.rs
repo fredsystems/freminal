@@ -1,4 +1,4 @@
-//! Broadcast-input confirmation dialog (Task 74.5).
+//! Broadcast-input confirmation dialog.
 //!
 //! When the user has set `[tabs] confirm_broadcast = true`, enabling
 //! broadcast input for a tab pops a confirmation modal listing how many
@@ -33,7 +33,7 @@ struct BroadcastConfirmState {
     pane_count: usize,
 }
 
-/// The broadcast-confirm modal dialog (Task 74.5).
+/// The broadcast-confirm modal dialog.
 #[derive(Debug, Default)]
 pub(in crate::gui) struct BroadcastConfirmDialog {
     state: Option<BroadcastConfirmState>,

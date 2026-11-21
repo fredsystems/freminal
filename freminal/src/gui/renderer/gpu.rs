@@ -36,26 +36,25 @@ use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_common::colors::ResolvedColors;
 use freminal_terminal_emulator::InlineImage;
 
-// Task 125.6: real per-buffer upload-byte attribution, feature-gated the
+// Real per-buffer upload-byte attribution, feature-gated the
 // same way `gui::renderer::profiling` itself is -- see `DrawUploadCounts`'s
 // doc for why the draw methods' return type is aliased rather than
 // unconditionally naming `UploadByteCounts`.
 #[cfg(feature = "frame-profiling")]
 use super::profiling::UploadByteCounts;
 
-// Task 125.8: the per-pane asynchronous GPU timing adapter, feature-gated
+// The per-pane asynchronous GPU timing adapter, feature-gated
 // the same way `gui::renderer::gpu_profiling` itself is.
 #[cfg(feature = "gpu-profiling")]
 use super::gpu_profiling::{GpuTimingReport, PaneGpuTimingProfile};
 
 /// The per-callback upload-byte measurement [`TerminalRenderer::draw_with_verts`]
-/// and [`TerminalRenderer::draw_with_cursor_only_update`] return (Task
-/// 125.6).
+/// and [`TerminalRenderer::draw_with_cursor_only_update`] return.
 ///
 /// Aliased to `()` in a default build so neither draw method's signature,
 /// nor any call site, ever names a type from the `frame-profiling`-only
-/// `profiling` module when the feature is disabled -- matching Task
-/// 125.4's "entirely absent from a default build" invariant for
+/// `profiling` module when the feature is disabled -- matching the
+/// "entirely absent from a default build" invariant for
 /// everything `renderer::profiling` defines. The two draw methods share a
 /// single function body regardless of this alias (no cfg'd duplicate
 /// definitions): every statement that produces a byte count too is itself
@@ -69,7 +68,7 @@ type DrawUploadCounts = ();
 
 /// What a pane draws *underneath* its cells, bundled so the two draw
 /// entry points take one value instead of growing a positional parameter
-/// per background concern (Task 132.11).
+/// per background concern.
 ///
 /// `DefaultBackground` cells emit no instance, so a pane's visible default
 /// colour is whatever lies beneath it: the window clear and the egui panel
@@ -79,7 +78,7 @@ type DrawUploadCounts = ();
 /// later layer (background image, cell backgrounds, decorations, glyphs)
 /// draws over.
 ///
-/// DECSCNM (Task 147.27) is the same mechanism: the pane's effective default
+/// DECSCNM is the same mechanism: the pane's effective default
 /// background becomes the resolved foreground, so the fill is that colour and
 /// the sub-cell remainder strip is reversed together with the cells.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -105,10 +104,10 @@ impl PaneBackground {
     ///
     /// The fill is the pane's *effective default background*: the resolved
     /// background in normal video, the resolved foreground under DECSCNM at
-    /// full opacity (Task 147.27). It covers the whole `terminal_rect`, so
+    /// full opacity. It covers the whole `terminal_rect`, so
     /// the sub-cell remainder strip is inverted along with the cells. Below
     /// full opacity DECSCNM has no foreground fill (it would double-composite
-    /// with every translucent cell background, 147 PR review R16): the base
+    /// with every translucent cell background): the base
     /// is the resolved background, as in normal video, and the remainder is
     /// not reversed. It must agree with the cell-background skip rule in
     /// `vertex.rs`, which skips exactly the cells whose effective background
@@ -210,7 +209,7 @@ const UNIT_QUAD: [f32; 12] = [
 ];
 
 /// A GL texture uploaded for one `InlineImage`, plus enough bookkeeping to
-/// detect an animation frame swap (Task 100.2c) without re-uploading on
+/// detect an animation frame swap without re-uploading on
 /// every frame.
 struct ImageTexture {
     /// The GL texture object.
@@ -251,7 +250,7 @@ pub struct TerminalRenderer {
     deco_program: Option<glow::Program>,
     deco_vao: Option<glow::VertexArray>,
     deco_vbo: [Option<glow::Buffer>; 2],
-    /// Dedicated VBO for the OSC 11 pane base-fill quad (Task 132.11).
+    /// Dedicated VBO for the OSC 11 pane base-fill quad.
     ///
     /// Drawn through the decoration program/VAO but **not** through
     /// `deco_vbo`: that double-buffered pair carries per-frame decoration
@@ -324,9 +323,9 @@ pub struct TerminalRenderer {
     /// frame always orphan-then-write into the slot the GPU is *not*
     /// currently reading (see [`Self::draw_with_cursor_only_update`]),
     /// instead of patching live bytes into a buffer a pending draw from the
-    /// previous frame may still be reading (issue #432).
+    /// previous frame may still be reading.
     deco_vbo_index: usize,
-    /// Subtask 124.7: bytes currently allocated in each `deco_vbo` slot by
+    /// Bytes currently allocated in each `deco_vbo` slot by
     /// the last orphaning upload, so a same-or-smaller small payload can
     /// skip the orphan. See [`Self::upload_deco_verts`] for why only the
     /// decoration buffer is gated, and
@@ -337,7 +336,7 @@ pub struct TerminalRenderer {
     /// zero-sized storage genuinely needs.
     deco_vbo_allocated_bytes: [usize; 2],
 
-    /// Task 125.8: this pane's asynchronous GPU upload/draw timing
+    /// This pane's asynchronous GPU upload/draw timing
     /// adapter. Capability is detected once per GL-resource lifetime, in
     /// [`Self::init`] (which runs lazily inside the first paint callback,
     /// so the context is current); the ring is drained and every pending
@@ -492,7 +491,7 @@ impl TerminalRenderer {
         self.init_image_pass(gl)?;
         self.init_bg_image_pass(gl)?;
 
-        // Task 125.8: detect GPU timer capability once, from the real
+        // Detect GPU timer capability once, from the real
         // context this pane will draw through for the rest of its
         // lifetime.
         #[cfg(feature = "gpu-profiling")]
@@ -507,7 +506,7 @@ impl TerminalRenderer {
         let program = compile_program(gl, BG_INST_VERT_SRC, BG_INST_FRAG_SRC, "bg_instanced")?;
         // Every handle is stored the moment it exists: a later failure in
         // this pass (or a later pass) is then cleaned up by
-        // `release_gl_objects` instead of leaking it (Task 125.C16).
+        // `release_gl_objects` instead of leaking it.
         self.bg_inst_program = Some(program);
 
         self.bg_inst_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -595,7 +594,7 @@ impl TerminalRenderer {
         }
 
         // Fresh, zero-sized storage: the next upload into either slot must
-        // orphan to size it, whatever the payload (subtask 124.7).
+        // orphan to size it, whatever the payload.
         self.deco_vbo_allocated_bytes = [0, 0];
 
         Ok(())
@@ -795,7 +794,7 @@ impl TerminalRenderer {
             return;
         }
 
-        // Task 125.8: poll last frame's GPU timing samples and issue this
+        // Poll last frame's GPU timing samples and issue this
         // frame's upload-phase start timestamp, strictly before the first
         // upload GL command below -- see `PaneGpuTimingProfile`'s doc for
         // the mandated call sequence.
@@ -806,14 +805,14 @@ impl TerminalRenderer {
 
         // 1. Sync atlas texture to the GPU.
         //
-        // Task 125.6: `sync_atlas` reports exactly the bytes its own
+        // `sync_atlas` reports exactly the bytes its own
         // `tex_image_2d`/`tex_sub_image_2d` calls transferred, as a
         // `(full_bytes, subrect_bytes)` pair -- never both nonzero for the
         // same call (see `sync_atlas_to_texture`'s doc). Bound to a
         // `let` only under `frame-profiling`; the `not(...)` arm below
         // issues the identical call and discards its (unconditionally
-        // computed, but here-unused) return, exactly as before this
-        // subtask.
+        // computed, but here-unused) return, exactly as before profiling
+        // existed.
         #[cfg(feature = "frame-profiling")]
         let (atlas_full_bytes, atlas_subrect_bytes) = self.sync_atlas(gl, atlas);
         #[cfg(not(feature = "frame-profiling"))]
@@ -833,7 +832,7 @@ impl TerminalRenderer {
         // frame the cursor blinks) can always write into the slot that is
         // NOT the one just drawn from — never patching live bytes into a
         // buffer a pending GPU read may still be using (see
-        // `draw_with_cursor_only_update`, issue #432).
+        // `draw_with_cursor_only_update`).
         let buf_idx = self.vbo_index;
         let deco_buf_idx = self.deco_vbo_index;
         #[cfg(feature = "frame-profiling")]
@@ -853,7 +852,7 @@ impl TerminalRenderer {
         #[cfg(not(feature = "frame-profiling"))]
         self.upload_img_verts(gl, image_verts, buf_idx);
 
-        // Task 125.8: the upload phase ends here -- every upload GL command
+        // The upload phase ends here -- every upload GL command
         // above has been issued and no draw GL command has been issued yet.
         // Issues the upload phase's end timestamp and the draw phase's
         // start timestamp back to back, so "upload excludes draw" and "draw
@@ -866,7 +865,7 @@ impl TerminalRenderer {
         let vp_w = gl_f32_i32(viewport_width);
         let vp_h = gl_f32_i32(viewport_height);
 
-        // 3-0. OSC 11 base fill (Task 132.11): underneath everything,
+        // 3-0. OSC 11 base fill: underneath everything,
         // including the background image. No GL call when there is no
         // override.
         let base_fill_bytes = self.draw_base_fill(gl, vp_w, vp_h, background);
@@ -894,7 +893,7 @@ impl TerminalRenderer {
         self.draw_foreground(gl, fg_instances.len(), vp_w, vp_h, buf_idx);
         self.draw_images(gl, image_verts.len(), image_draw_order, vp_w, vp_h, buf_idx);
 
-        // Task 125.8: the draw phase ends here -- every terminal draw GL
+        // The draw phase ends here -- every terminal draw GL
         // command above has been issued. The framebuffer-restore bind
         // below is bookkeeping, not a terminal draw command, so it is
         // deliberately excluded from the timed span.
@@ -910,7 +909,7 @@ impl TerminalRenderer {
         self.vbo_index = 1 - self.vbo_index;
         self.deco_vbo_index = 1 - self.deco_vbo_index;
 
-        // Task 125.6: exactly the bytes the upload calls above actually
+        // Exactly the bytes the upload calls above actually
         // issued -- never inferred from `bg_instances.len()` or any other
         // buffer already sliced for a different purpose. Elided entirely
         // in a default build (see `DrawUploadCounts`'s doc).
@@ -920,7 +919,7 @@ impl TerminalRenderer {
             foreground_instance_vbo_bytes: fg_bytes,
             decoration_vbo_bytes: deco_bytes,
             image_vertex_vbo_bytes: img_bytes,
-            // Task 132.C4: the two per-draw one-quad uploads.
+            // The two per-draw one-quad uploads.
             background_quad_vbo_bytes: base_fill_bytes.saturating_add(bg_image_bytes),
             image_texture_bytes,
             atlas_full_bytes,
@@ -946,7 +945,7 @@ impl TerminalRenderer {
     /// `glBufferSubData` into the slot that may still be read by a pending
     /// GPU draw from the previous frame. An earlier version of this method
     /// did exactly that unsynchronized in-place patch and it was the
-    /// confirmed root cause of issue #432 (selection-highlight quads
+    /// confirmed root cause of a corruption bug (selection-highlight quads
     /// intermittently corrupted while the cursor blinks, anywhere in the
     /// pane — not only at the cursor's own cell).
     ///
@@ -986,7 +985,7 @@ impl TerminalRenderer {
             return;
         }
 
-        // Task 125.8: see `draw_with_verts` for the mandated call sequence
+        // See `draw_with_verts` for the mandated call sequence
         // and why this call ordering makes the upload/draw phase boundary
         // hold by construction.
         #[cfg(feature = "gpu-profiling")]
@@ -1004,7 +1003,7 @@ impl TerminalRenderer {
         // slot that was last fully written by `draw_with_verts` (which
         // advances `vbo_index` to the *next* slot after writing, so the
         // valid data sits at `1 - vbo_index`). No upload happens for them
-        // on this path, so they contribute zero bytes (Task 125.6) --
+        // on this path, so they contribute zero bytes --
         // `UploadByteCounts::default()`'s zero fields for these three
         // categories are the correct value below, not a placeholder.
         let buf_idx = 1 - self.vbo_index;
@@ -1019,7 +1018,7 @@ impl TerminalRenderer {
         #[cfg(not(feature = "frame-profiling"))]
         self.upload_deco_verts(gl, deco_verts, deco_buf_idx);
 
-        // Task 125.8: upload phase ends here -- see `draw_with_verts`.
+        // Upload phase ends here -- see `draw_with_verts`.
         #[cfg(feature = "gpu-profiling")]
         self.gpu_profile.end_upload_begin_draw(gl, gpu_timing_frame);
 
@@ -1059,7 +1058,7 @@ impl TerminalRenderer {
             buf_idx,
         );
 
-        // Task 125.8: draw phase ends here -- see `draw_with_verts`.
+        // Draw phase ends here -- see `draw_with_verts`.
         #[cfg(feature = "gpu-profiling")]
         self.gpu_profile.end_draw(gl, gpu_timing_frame);
 
@@ -1074,11 +1073,11 @@ impl TerminalRenderer {
         // for the next write without the GPU having had a chance to read it.
         self.deco_vbo_index = 1 - self.deco_vbo_index;
 
-        // Task 125.6: bg/fg/image are genuinely zero here -- this path
+        // bg/fg/image are genuinely zero here -- this path
         // issues no upload for them at all, so `UploadByteCounts::default`'s
         // zero fields for those three categories are correct, not merely
         // unmeasured. The two full-viewport background quads are the
-        // exception (Task 132.C4): they are re-uploaded on every draw,
+        // exception: they are re-uploaded on every draw,
         // cursor-only included, so they are counted here too.
         #[cfg(feature = "frame-profiling")]
         UploadByteCounts {
@@ -1096,7 +1095,7 @@ impl TerminalRenderer {
     /// [`sync_atlas_to_texture`], which the toast text pass shares.
     ///
     /// Returns the exact `(full_bytes, subrect_bytes)` [`sync_atlas_to_texture`]
-    /// transferred, unconditionally (Task 125.6) -- see that function's doc
+    /// transferred, unconditionally -- see that function's doc
     /// for why the pair, not a single total, and why this is safe to
     /// compute in every build (the actual [`UploadByteCounts`] attribution
     /// this return feeds stays `frame-profiling`-gated at the call site).
@@ -1111,7 +1110,7 @@ impl TerminalRenderer {
     }
 
     /// Upload decoration vertex data, orphaning only when the payload is not
-    /// small enough to reuse the slot's existing allocation (subtask 124.7).
+    /// small enough to reuse the slot's existing allocation.
     ///
     /// The decoration buffer is the only one gated, and that is deliberate.
     /// It is the one buffer re-uploaded on **every** cursor-only frame, and
@@ -1126,7 +1125,7 @@ impl TerminalRenderer {
     /// pipeline stall, not a stale or torn read — and the stall is already
     /// mitigated by `deco_vbo`'s independent double-buffer index, which
     /// means the slot being written was last drawn from two frames ago.
-    /// Issue #432's corruption was **CPU-side offset bookkeeping**
+    /// That corruption was **CPU-side offset bookkeeping**
     /// (commit `c76ae8d1`: the cursor tail-quad offset was computed from
     /// `show_cursor` alone while the quad was only appended when the blink
     /// phase also said visible); the orphan arrived in that commit as
@@ -1138,7 +1137,7 @@ impl TerminalRenderer {
     /// never reaches past the bytes just written.
     ///
     /// Returns the exact bytes transferred by whichever upload path ran
-    /// (Task 125.6) -- `0` only when `verts` was empty or this slot's VBO
+    /// -- `0` only when `verts` was empty or this slot's VBO
     /// does not exist, both of which issue no GL call at all. Both the
     /// orphaning and non-orphaning paths perform a real
     /// `buffer_sub_data_u8_slice` transfer of `verts`, so both return the
@@ -1163,7 +1162,7 @@ impl TerminalRenderer {
 
     /// Upload instanced background instance data via orphan-then-write.
     ///
-    /// Returns the exact bytes transferred (Task 125.6), `0` if this
+    /// Returns the exact bytes transferred, `0` if this
     /// slot's VBO does not exist or `instances` was empty.
     fn upload_bg_instances(&self, gl: &Gl<'_>, instances: &[f32], buf_idx: usize) -> u64 {
         let Some(vbo) = self.bg_inst_vbo[buf_idx] else {
@@ -1174,7 +1173,7 @@ impl TerminalRenderer {
 
     /// Upload foreground instance data via orphan-then-write.
     ///
-    /// Returns the exact bytes transferred (Task 125.6), `0` if this
+    /// Returns the exact bytes transferred, `0` if this
     /// slot's VBO does not exist or `instances` was empty.
     fn upload_fg_instances(&self, gl: &Gl<'_>, instances: &[f32], buf_idx: usize) -> u64 {
         let Some(vbo) = self.fg_vbo[buf_idx] else {
@@ -1185,7 +1184,7 @@ impl TerminalRenderer {
 
     /// Upload image vertex data via orphan-then-write.
     ///
-    /// Returns the exact bytes transferred (Task 125.6), `0` if this
+    /// Returns the exact bytes transferred, `0` if this
     /// slot's VBO does not exist or `verts` was empty.
     fn upload_img_verts(&self, gl: &Gl<'_>, verts: &[f32], buf_idx: usize) -> u64 {
         let Some(vbo) = self.img_vbo[buf_idx] else {
@@ -1200,14 +1199,14 @@ impl TerminalRenderer {
     /// - New images (ID not yet in `self.image_textures`) are uploaded.
     /// - Stale images (ID in `self.image_textures` but not in `snap_images`)
     ///   are deleted.
-    /// - Animated images whose GUI-selected frame changed (Task 100.2c) are
+    /// - Animated images whose GUI-selected frame changed are
     ///   detected via `Arc` pointer identity on `img.pixels` and re-uploaded:
     ///   via `tex_sub_image_2d` when the frame's dimensions are unchanged
     ///   (the common case — animation frames share the root frame's size),
     ///   or by deleting and recreating the texture when dimensions differ.
     ///
     /// Returns the total bytes transferred to image textures this call
-    /// (Task 125.6) -- the sum of every [`Self::reupload_image_texture`]
+    /// -- the sum of every [`Self::reupload_image_texture`]
     /// and [`Self::create_image_texture`] invoked, `0` if every image was
     /// already up to date or `snap_images` was empty. Deleting a stale
     /// texture (the `retain` above) transfers no bytes and is never
@@ -1262,9 +1261,9 @@ impl TerminalRenderer {
     }
 
     /// Re-upload a changed frame's pixels into an existing, same-dimensioned
-    /// texture via `tex_sub_image_2d` (animation frame swap — Task 100.2c).
+    /// texture via `tex_sub_image_2d` (animation frame swap).
     ///
-    /// Returns the exact bytes transferred (Task 125.6): `img.pixels.len()`,
+    /// Returns the exact bytes transferred: `img.pixels.len()`,
     /// the slice actually handed to `tex_sub_image_2d`, or `0` if `id` no
     /// longer has an existing texture to re-upload into.
     fn reupload_image_texture(
@@ -1302,7 +1301,7 @@ impl TerminalRenderer {
     /// Delete any stale texture for `id`, then create and upload a fresh GL
     /// texture for `img`, recording its pixel-`Arc` identity and dimensions.
     ///
-    /// Returns the exact bytes transferred (Task 125.6): `img.pixels.len()`,
+    /// Returns the exact bytes transferred: `img.pixels.len()`,
     /// the slice actually handed to `tex_image_2d`, or `0` if texture
     /// creation itself failed (no upload was ever issued).
     fn create_image_texture(
@@ -1385,7 +1384,7 @@ impl TerminalRenderer {
     /// Iterates `image_draw_order` — the authoritative `(z_index, id)` order
     /// computed by [`super::vertex::build_image_verts`] — so that higher
     /// z-index images render on top of lower ones, and so the draw order is
-    /// guaranteed to match the vertex slab order (Task 100.7b).
+    /// guaranteed to match the vertex slab order.
     // All parameters are required GPU context and data. Image rendering requires separate
     // texture binding, program, and geometry inputs that cannot be sensibly grouped.
     #[allow(clippy::too_many_arguments)]
@@ -1432,7 +1431,7 @@ impl TerminalRenderer {
         // `build_image_verts` emits quads in this exact same order, so vertex
         // slab N corresponds to `image_draw_order[N]`. The texture lookup
         // key is `entry.image_id` (the underlying pixel data), not
-        // `entry.instance_id` (Task 100.18) — several placements may share
+        // `entry.instance_id` — several placements may share
         // one uploaded texture.
         let mut quad_idx: i32 = 0;
         for entry in image_draw_order {
@@ -1691,7 +1690,7 @@ impl TerminalRenderer {
     }
 
     /// Draw the OSC 11 pane base fill: one quad covering the whole GL
-    /// viewport in the overridden default-background colour (Task 132.11).
+    /// viewport in the overridden default-background colour.
     ///
     /// Issues **no GL call** when `background.base_fill` is `None`, so the
     /// no-override frame is byte-for-byte what it was before this pass
@@ -1708,8 +1707,7 @@ impl TerminalRenderer {
     /// pane's paint callback, which includes the sub-cell remainder to the
     /// right of and below the cell grid.
     ///
-    /// Returns the exact bytes uploaded to [`Self::base_fill_vbo`] (Task
-    /// 132.C4), `0` when no GL call was made.
+    /// Returns the exact bytes uploaded to [`Self::base_fill_vbo`], `0` when no GL call was made.
     fn draw_base_fill(&self, gl: &Gl<'_>, vp_w: f32, vp_h: f32, background: PaneBackground) -> u64 {
         let Some([r, g, b]) = background.base_fill else {
             return 0;
@@ -1755,8 +1753,7 @@ impl TerminalRenderer {
     ///
     /// Skips if no texture is loaded (`bg_img_texture` is `None`).
     ///
-    /// Returns the exact bytes uploaded to [`Self::bg_img_vbo`] (Task
-    /// 132.C4), `0` when no texture is loaded and nothing was uploaded.
+    /// Returns the exact bytes uploaded to [`Self::bg_img_vbo`], `0` when no texture is loaded and nothing was uploaded.
     fn draw_background_image(
         &self,
         gl: &Gl<'_>,
@@ -1848,7 +1845,7 @@ impl TerminalRenderer {
     ///
     /// Deliberately **not** guarded by the init state: a renderer whose
     /// `init` failed partway owns the objects its passes had already created,
-    /// and those must be deleted too (Task 125.C16). Idempotent -- every
+    /// and those must be deleted too. Idempotent -- every
     /// handle is `take()`n -- so it is safe to run on a clean renderer, where
     /// it issues no GL call. Needs the owning context current.
     pub fn release_gl_objects(&mut self, gl: &Gl<'_>) {
@@ -1932,15 +1929,14 @@ impl TerminalRenderer {
         // image load believe it can reuse it.
         self.bg_img_size = None;
 
-        // Task 125.8: destroy every still-pending GPU timing query handle
+        // Destroy every still-pending GPU timing query handle
         // (including a half-issued in-flight pair) before this pane's GL
         // resources are torn down. Idempotent: `shutdown` takes the handles.
         #[cfg(feature = "gpu-profiling")]
         self.gpu_profile.shutdown(gl);
     }
 
-    /// Take this pane's GPU timing flush report, if one is due (Task
-    /// 125.8).
+    /// Take this pane's GPU timing flush report, if one is due.
     ///
     /// Callers (`gui::terminal::widget`) call this right after invoking
     /// [`Self::draw_with_verts`] or [`Self::draw_with_cursor_only_update`],
@@ -2170,25 +2166,25 @@ unsafe fn compile_shader(
 /// renderer's via [`TerminalRenderer::sync_atlas`], and the toast text
 /// pass's, which owns a separate texture and atlas entirely.
 ///
-/// Subtask 124.C2 collapsed those into this one function. There used to be a
+/// Those two copies were collapsed into this one function. There used to be a
 /// hand-maintained copy in `toast_text_pass`, whose own doc comment
 /// explained that it was "reproduced here (rather than reused) because that
 /// method is private to `TerminalRenderer` and bound to its own
 /// `atlas_texture` field". Parameterising on the texture removes that reason
-/// — and the copy had already drifted: 124.9 fixed the stale-dirty-rect
-/// defect in one copy and not the other. Fixing that bug twice would have
+/// — and the copy had already drifted: the stale-dirty-rect defect was
+/// fixed in one copy and not the other. Fixing that bug twice would have
 /// left in place the thing that caused it.
 ///
 /// Two upload modes:
 ///
 /// - **Full** (`needs_full_reupload`), one `tex_image_2d` over the whole
 ///   atlas. Because that covers every pixel, any rects queued beforehand are
-///   redundant by construction and are dropped here — omitting that was the
-///   124.9 defect, which made the *next* frame re-upload each of those
+///   redundant by construction and are dropped here — omitting that was a
+///   past defect, which made the *next* frame re-upload each of those
 ///   glyphs individually.
 /// - **Delta**, one `tex_sub_image_2d` per queued dirty rect.
 ///
-/// Returns `(full_bytes, subrect_bytes)` (Task 125.6): the exact size of
+/// Returns `(full_bytes, subrect_bytes)`: the exact size of
 /// the slice handed to `tex_image_2d` in the full-upload arm, or the sum
 /// of every `extract_atlas_rect` slice handed to `tex_sub_image_2d` in the
 /// delta arm. Exactly one of the pair is nonzero for any given call --
@@ -2198,7 +2194,7 @@ unsafe fn compile_shader(
 /// already-materialized slice lengths this function needs no extra work
 /// to observe, and this is also the single implementation the toast text
 /// pass shares (see this function's own doc above) -- that caller simply
-/// discards the return, exactly as it discarded `()` before this subtask.
+/// discards the return, exactly as it discarded `()` before the byte count was added.
 pub(super) fn sync_atlas_to_texture(
     gl: &Gl<'_>,
     texture: glow::Texture,
@@ -2227,7 +2223,7 @@ pub(super) fn sync_atlas_to_texture(
             );
         }
 
-        // Redundant by construction: see this function's doc comment (124.9).
+        // Redundant by construction: see this function's doc comment.
         drop(atlas.take_dirty_rects());
         (full_bytes, 0)
     } else {
@@ -2267,7 +2263,7 @@ pub(super) fn sync_atlas_to_texture(
     (full_bytes, subrect_bytes)
 }
 
-/// Subtask 124.7: the payload size at or below which
+/// The payload size at or below which
 /// [`TerminalRenderer::upload_deco_verts`] reuses the slot's existing
 /// allocation instead of orphaning it.
 ///
@@ -2282,7 +2278,7 @@ pub(super) fn sync_atlas_to_texture(
 /// bulk uploads (measured at 99,840 bytes for an 80x24 grid) where orphaning
 /// is unambiguously right. It is **not** a measured optimum: see this
 /// "GPU buffer orphaning" section of `Documents/DESIGN_DECISIONS.md`
-/// ("Damage Model (Task 124)"), which records that the prize is one zero-byte GL call per gated upload plus an
+/// ("Damage Model"), which records that the prize is one zero-byte GL call per gated upload plus an
 /// unmeasured amount of driver allocator churn.
 pub(super) const SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES: usize = 4096;
 
@@ -2291,15 +2287,15 @@ pub(super) const SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES: usize = 4096;
 /// `pub(super)` so sibling passes under `renderer/` (e.g. [`super::toast_pass`])
 /// can reuse the same orphan-then-write upload instead of duplicating it.
 ///
-/// Returns the exact bytes handed to `buffer_sub_data_u8_slice` (Task
-/// 125.6) -- `verts`'s own byte length, `0` if `verts` was empty (no GL
+/// Returns the exact bytes handed to `buffer_sub_data_u8_slice` --
+/// `verts`'s own byte length, `0` if `verts` was empty (no GL
 /// call at all). The preceding `buffer_data_size` orphan call transfers no
 /// payload of its own (it only sizes the store) and is deliberately never
 /// added to this return -- doing so would double-count one real transfer
 /// as two. Computed unconditionally, not `frame-profiling`-gated: this is
 /// the shared upload primitive every VBO category funnels through
 /// (including the toast passes, which discard the return exactly as they
-/// discarded `()` before this subtask), so gating it would require two
+/// discarded `()` before the byte count was added), so gating it would require two
 /// diverging copies of this function's body instead of one.
 pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) -> u64 {
     if verts.is_empty() {
@@ -2319,7 +2315,7 @@ pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) -> u64
     bytes.len().value_as::<u64>().unwrap_or(0)
 }
 
-/// Subtask 124.7: write `verts` into a VBO **without** orphaning it first.
+/// Write `verts` into a VBO **without** orphaning it first.
 ///
 /// The caller is responsible for knowing that the buffer's existing
 /// allocation is at least `size_of_val(verts)` bytes; writing past it is a
@@ -2327,8 +2323,7 @@ pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) -> u64
 /// [`TerminalRenderer::upload_deco_verts`], whose doc comment carries the
 /// full safety argument for why dropping the orphan is sound here.
 ///
-/// Returns the exact bytes handed to `buffer_sub_data_u8_slice` (Task
-/// 125.6), `0` if `verts` was empty. There is no orphan call on this path
+/// Returns the exact bytes handed to `buffer_sub_data_u8_slice`, `0` if `verts` was empty. There is no orphan call on this path
 /// to worry about double-counting -- see [`upload_verts`]'s doc for the
 /// general rule.
 fn upload_verts_into_existing_allocation(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) -> u64 {
@@ -2519,14 +2514,14 @@ pub struct WindowPostRenderer {
     pub pending_shader: Option<Option<String>>,
 
     /// Most recent shader compile / renderer init error, to be drained by
-    /// the main thread and surfaced as a toast (see 71.4).
+    /// the main thread and surfaced as a toast.
     ///
     /// Written inside `PaintCallback` closures (which cannot access
     /// `FreminalGui` directly) and read once per frame on the main thread.
     /// Cleared by the reader after consumption.
     pub last_error: Option<String>,
 
-    /// Retired pane renderers awaiting GL destruction (Task 125.C2).
+    /// Retired pane renderers awaiting GL destruction.
     ///
     /// Every pane of this window holds a clone of this queue (via its
     /// `RenderState`) and pushes its [`TerminalRenderer`] here when it is
@@ -2949,7 +2944,7 @@ impl WindowPostRenderer {
 
     /// Delete this renderer's own GL objects (not the retire queue's),
     /// whatever its init state, so a partially failed `init` is cleaned up
-    /// too (Task 125.C16). Idempotent: every handle is `take()`n. Also
+    /// too. Idempotent: every handle is `take()`n. Also
     /// forgets the cached FBO size, so a later `ensure_fbo` for the same
     /// dimensions recreates the FBO this deleted rather than trusting the
     /// stale cache.
@@ -3002,7 +2997,7 @@ mod tests {
         ResolvedColors::resolve(&CATPPUCCIN_MOCHA, &ColorPalette::default(), &dynamic)
     }
 
-    // ── PaneBackground::base_fill_for (Task 132.11, 147.27) ───────────
+    // ── PaneBackground::base_fill_for ───────────
 
     #[test]
     fn base_fill_is_none_when_the_resolved_background_is_the_themes() {
@@ -3049,7 +3044,7 @@ mod tests {
 
     #[test]
     fn base_fill_under_decscnm_is_the_resolved_foreground() {
-        // Task 147.27: reversed, the pane's default background is the
+        // Reversed, the pane's default background is the
         // foreground, so the fill (and thus the sub-cell remainder) is it.
         let colors = colors_with((255, 0, 51), (30, 30, 46));
         let fill =
@@ -3075,7 +3070,7 @@ mod tests {
 
     #[test]
     fn base_fill_under_decscnm_below_full_opacity_is_the_normal_base() {
-        // 147 PR review R16: a foreground fill under translucent cell
+        // A foreground fill under translucent cell
         // backgrounds would composite twice, so below full opacity the base
         // is the resolved background, as in normal video.
         let colors = colors_with((255, 0, 51), (30, 30, 46));
@@ -3287,8 +3282,8 @@ mod tests {
     }
 }
 
-/// Task 125.6: real per-buffer upload-byte attribution, exercised end to
-/// end against the Task 123 recording GL facade so every assertion below
+/// Real per-buffer upload-byte attribution, exercised end to
+/// end against the recording GL facade so every assertion below
 /// is driven by [`TerminalRenderer::draw_with_verts`] actually issuing
 /// (fabricated, but call-for-call faithful) GL calls -- never a hand
 /// computation that merely mirrors the production formula.
@@ -3428,7 +3423,7 @@ mod upload_byte_attribution_tests {
         assert_eq!(uploads.image_vertex_vbo_bytes, 0);
         assert_eq!(
             uploads.background_quad_vbo_bytes, 0,
-            "no base fill and no background image: no quad upload (Task 132.C4)"
+            "no base fill and no background image: no quad upload"
         );
         assert_eq!(uploads.image_texture_bytes, 0);
         assert_eq!(uploads.atlas_full_bytes, expected_atlas_bytes);
@@ -3533,7 +3528,7 @@ mod upload_byte_attribution_tests {
         );
 
         // A third call with no new glyphs uploads nothing at all -- the
-        // zero-byte reuse case Task 125.6 must also represent correctly.
+        // zero-byte reuse case that must also be represented correctly.
         let third = draw(
             &mut renderer,
             &gl,
@@ -3683,7 +3678,7 @@ mod upload_byte_attribution_tests {
         assert_eq!(uploads.atlas_subrect_bytes, 0);
     }
 
-    // ── Task 132.C4: per-draw full-viewport background quads ─────────
+    // ── Per-draw full-viewport background quads ─────────
 
     /// A pane background with an OSC 11 base fill active.
     const fn base_filled() -> PaneBackground {

@@ -18,15 +18,15 @@
 //! geometry and the neutral geometry used by `freminal::gui::panes`. Call
 //! sites that need to hand a `panes` function an `egui::Rect`, or paint an
 //! `egui::Rect` computed by one, should convert here rather than
-//! re-deriving the field copy inline. See Task 122 ("Orchestration
-//! Extraction"), subtask 122.3.
+//! re-deriving the field copy inline. See `Documents/DESIGN_DECISIONS.md`,
+//! "Orchestration Extraction".
 //!
 //! ## Converting a whole layout vector does not allocate twice
 //!
 //! Three per-frame call sites in `app_impl.rs` convert the `Vec` returned by
 //! `PaneTree::layout` with `.into_iter().map(rect_to_egui).collect()`. That
 //! looks like it allocates a second vector next to the one `layout` just
-//! built, and a 122.3 review flagged it as new per-frame allocation
+//! built, and review flagged it as new per-frame allocation
 //! pressure. **It does not allocate.** `(PaneId, geometry::Rect)` and
 //! `(PaneId, egui::Rect)` are both 24 bytes with 8-byte alignment (a `u64`
 //! plus four `f32`s either way), which is exactly the condition for the

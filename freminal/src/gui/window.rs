@@ -25,7 +25,7 @@ use super::{
 /// Position is typically `None` on Wayland.
 pub(super) type PendingGeometry = (Option<[u32; 2]>, Option<[i32; 2]>);
 
-/// Transient state for the resize overlay (issue #433): a passive,
+/// Transient state for the resize overlay: a passive,
 /// window-centered HUD showing the terminal's new size while the user is
 /// resizing the window or a split, fading out shortly after resizing stops.
 #[derive(Debug, Clone, Copy)]
@@ -38,11 +38,11 @@ pub(super) struct ResizeOverlayState {
 }
 
 /// How long the resize overlay lingers after the last genuine resize event
-/// before disappearing entirely (issue #433).
+/// before disappearing entirely.
 pub(super) const RESIZE_OVERLAY_LINGER: std::time::Duration = std::time::Duration::from_millis(900);
 
 /// How long, at the tail end of [`RESIZE_OVERLAY_LINGER`], the overlay fades
-/// out linearly (issue #433).
+/// out linearly.
 pub(super) const RESIZE_OVERLAY_FADE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Alpha multiplier (1.0 = fully opaque, 0.0 = invisible) for the resize
@@ -50,7 +50,7 @@ pub(super) const RESIZE_OVERLAY_FADE: std::time::Duration = std::time::Duration:
 ///
 /// Fully opaque until the last `fade` window before `linger` elapses, then
 /// fades linearly to 0, and is 0 at/after `linger`. Pure function so the
-/// timing math is unit-testable without an egui frame (issue #433).
+/// timing math is unit-testable without an egui frame.
 pub(super) fn resize_overlay_alpha(
     elapsed: std::time::Duration,
     linger: std::time::Duration,
@@ -68,7 +68,7 @@ pub(super) fn resize_overlay_alpha(
 }
 
 /// Whether the resize overlay is currently mid-fade (or past `linger`) at
-/// `elapsed` since the last genuine resize event (subtask 121.14).
+/// `elapsed` since the last genuine resize event.
 ///
 /// `false` only during the fully-opaque phase (`elapsed < linger - fade`),
 /// where the overlay's painted pixels are not changing frame-to-frame, so a
@@ -101,7 +101,7 @@ pub(super) fn resize_overlay_is_animating(
 }
 
 /// The repaint delay the resize-overlay HUD should request at `elapsed`
-/// since the last genuine resize event (subtask 121.14, Part A step 3).
+/// since the last genuine resize event.
 ///
 /// While still fully opaque (`elapsed < linger - fade`), the overlay's
 /// pixels are not changing, so requesting an unconditional 16ms cadence
@@ -137,7 +137,7 @@ pub(super) fn resize_overlay_repaint_delay(
 /// Whether an observed char-grid size change is a GENUINE OS-window resize,
 /// rather than the spurious `last_sent_size` churn caused by new
 /// window/tab/split/pane-close/zoom transitions (which reset `last_sent_size`
-/// to `(0, 0)`) (issue #433).
+/// to `(0, 0)`).
 ///
 /// `window_resized` must be true only for a real resize between two KNOWN
 /// window sizes (see `window_genuinely_resized` at the call site) — NOT for
@@ -166,7 +166,7 @@ pub(super) const fn resize_is_genuine(size_changed: bool, window_resized: bool) 
 /// (currently: encode as if `Primary`, with a logged error). Mapping them
 /// here — rather than dropping them at this boundary — only PRESERVES that
 /// existing fallback behavior for a physically-held Back/Forward button
-/// under `?1002`, matching what the pre-124.3a frame-time path already did
+/// under `?1002`, matching what the frame-time path already does
 /// with winit's `Back`/`Forward` (via egui's own identical `Extra1`/`Extra2`
 /// mapping).
 pub(super) const fn egui_button_from_windowing(
@@ -181,7 +181,7 @@ pub(super) const fn egui_button_from_windowing(
     }
 }
 
-/// Task 124.3a (corrected by orchestrator review): the decision behind
+/// The decision behind
 /// [`PerWindowState::held_pointer_button`]'s update on every observed
 /// `App::on_pointer_button` event.
 ///
@@ -286,7 +286,7 @@ pub(super) struct PerWindowState {
     pub(super) border_drag: Option<PaneBorderDrag>,
 
     /// The physical pointer button currently held, observed synchronously
-    /// via `App::on_pointer_button` (Task 124.3a). `None` when no button
+    /// via `App::on_pointer_button`. `None` when no button
     /// is held. Feeds `?1002`/`?1003` mouse-tracking motion reports
     /// (`terminal::pty_mouse_report::maybe_send_immediate_motion_report`);
     /// button press/release PTY report emission itself stays in the
@@ -294,8 +294,8 @@ pub(super) struct PerWindowState {
     ///
     /// Window-owned, NOT pane-owned. A press and its matching release are
     /// two physically-linked events on the SAME OS pointer device,
-    /// independent of which pane is active when either happens. The
-    /// original Task 124.3a design stored this per-pane, on
+    /// independent of which pane is active when either happens. An
+    /// earlier design stored this per-pane, on
     /// `ViewState::immediate_mouse_report` — that could leave a pane
     /// "permanently held" whenever a press on pane A was followed by a
     /// click, focus change, or tab switch to pane B before the matching
@@ -309,7 +309,7 @@ pub(super) struct PerWindowState {
     /// report history — only the physical held-button identity moved here.
     pub(super) held_pointer_button: Option<egui::PointerButton>,
 
-    /// Group A (#122.4): cached rects, staged chrome signals, and the
+    /// Published frame state: cached rects, staged chrome signals, and the
     /// resize-overlay HUD — everything written once per completing
     /// `App::update` and read only from `is_chrome_interactive_at` /
     /// `pointer_motion_needs_repaint`, outside any frame. See
@@ -318,7 +318,7 @@ pub(super) struct PerWindowState {
     /// `cached_gutter_inset_logical`, `chrome_head_rects`,
     /// `chrome_border_rects`, `chrome_toast_rects`,
     /// `pending_chrome_signals`, `resize_overlay`). `cached_gutter_inset_logical`
-    /// was itself deleted outright by Task 124.3b's review pass — gutter
+    /// no longer exists — gutter
     /// hit-testing now classifies against the exact per-pane `terminal_rect`
     /// (`PublishedFrameState::pane_pointer_report_inputs`,
     /// `pointer_motion::classify_pointer_position`) rather than an
@@ -340,7 +340,7 @@ pub(super) struct PerWindowState {
     /// (in `gui::terminal::widget`) for the full rationale.
     pub(super) window_post: Arc<Mutex<WindowPostRenderer>>,
 
-    /// Per-window GL renderer state for the toast overlay (issue #433).
+    /// Per-window GL renderer state for the toast overlay.
     /// `Arc<Mutex<…>>` is GUI-thread interior mutability for the
     /// `Send + Sync + 'static` `PaintCallback` capture (mirrors `window_post`),
     /// not cross-thread sync.
@@ -364,7 +364,7 @@ pub(super) struct PerWindowState {
     /// `update()` where an earlier version of this drain used to sit: both
     /// writers (the menu render and the deferred key-action dispatch) run
     /// earlier in the same `update()` pass, so the drain must be downstream
-    /// of both or a request set this frame is missed (issue #512). See
+    /// of both or a request set this frame is missed. See
     /// [`WindowLifecycleRequests`]'s module doc for the full history.
     pub(super) lifecycle_requests: WindowLifecycleRequests,
 
@@ -434,19 +434,19 @@ pub(super) struct PerWindowState {
     /// processing each frame.
     pub(super) pending_menu_actions: Vec<freminal_common::keybindings::KeyAction>,
 
-    /// Smart paste guard confirmation dialog for this window (Task 77).
+    /// Smart paste guard confirmation dialog for this window.
     ///
     /// Opened by `guarded_paste` when the analyzer flags a payload, rendered
     /// every frame while open, and resolved when the user confirms or cancels.
     pub(super) paste_dialog: super::paste_guard::PasteDialog,
 
-    /// Broadcast-input confirmation dialog for this window (Task 74).
+    /// Broadcast-input confirmation dialog for this window.
     ///
     /// Opened by the `ToggleBroadcastInput` dispatch when
     /// `[tabs] confirm_broadcast` is set and broadcast is being turned on.
     pub(super) broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog,
 
-    /// Close-on-running-command confirmation dialog for this window (Task 98).
+    /// Close-on-running-command confirmation dialog for this window.
     ///
     /// Opened by a guarded pane / tab / window close when the affected scope
     /// contains a running foreground command, rendered every frame while open,
@@ -458,8 +458,7 @@ pub(super) struct PerWindowState {
     /// "Force Close" without the user reaching for the mouse or Ctrl+Enter.
     pub(super) pending_force_close: bool,
 
-    /// Raw key events for the egui-blocked key set (Task 114.5/114.7:
-    /// keypad operators/directional, media, print/pause/menu keys), queued
+    /// Raw key events for the egui-blocked key set (keypad operators/directional, media, print/pause/menu keys), queued
     /// by `App::on_raw_key_event` at winit-event time.
     ///
     /// Encoding cannot happen inside `on_raw_key_event` itself — that
@@ -477,18 +476,18 @@ pub(super) struct PerWindowState {
         freminal_windowing::RawKeyMods,
     )>,
 
-    /// Frame-damage report for the most recent `update()` of this window
-    /// (#435), drained by `App::take_frame_damage`.
+    /// Frame-damage report for the most recent `update()` of this window,
+    /// drained by `App::take_frame_damage`.
     ///
     /// Set at the end of each `update()` to one of three variants (see
     /// [`FrameDamage`]'s own doc for the full contract):
     /// [`FrameDamage::Full`] -- the conservative default, and what every
     /// window starts at before its first render -- clears, redraws, and
     /// presents the whole surface; [`FrameDamage::Partial`] with one or
-    /// more bounded damage rects (cursor-only fast-path frames, and Task
-    /// 124.14's bounded pane rebuilds) when every rendered pane's damage
+    /// more bounded damage rects (cursor-only fast-path frames, and
+    /// bounded pane rebuilds) when every rendered pane's damage
     /// is positively proven to fit inside those rects and nothing else in
-    /// the window changed; and [`FrameDamage::None`] (Task 124.2) when
+    /// the window changed; and [`FrameDamage::None`] when
     /// every rendered pane proved it changed NOTHING at all -- not even a
     /// bounded rect -- so the windowing layer skips the clear, every GL
     /// primitive paint, `pre_present_notify`, and the buffer swap
@@ -505,9 +504,8 @@ pub(super) struct PerWindowState {
     /// callback, the per-pane render loop, the post-shader composite
     /// callback, pane border lines, and the broadcast label) within this
     /// frame's `full_output.shapes`, drained by
-    /// `App::take_terminal_band_range` (#436.4a; supersedes the #436.2a
-    /// shape-cloning approach previously exposed via the now-removed
-    /// `take_terminal_band_shapes`).
+    /// `App::take_terminal_band_range` (a range rather than cloned
+    /// shapes).
     ///
     /// Set at the end of each `update()` to `band_shape_start..band_shape_end`
     /// — the range appended to `LayerId::background()`'s `PaintList` since
@@ -531,8 +529,8 @@ pub(super) struct PerWindowState {
     /// global blink cycle's current half. `None` before the first frame.
     pub(super) previous_active_pane_key: Option<(TabId, crate::gui::panes::PaneId)>,
 
-    /// Authoritative published present region for this window (124.18,
-    /// formerly named `present_is_partial` and typed as an `AtomicBool`).
+    /// Authoritative published present region for this window (it replaced
+    /// a boolean `present_is_partial` flag).
     ///
     /// The windowing layer stores into this each frame, **before** the pane
     /// paint callbacks run: [`freminal_windowing::PresentRegion::Region`]
@@ -549,8 +547,8 @@ pub(super) struct PerWindowState {
     /// lock suffices.
     pub(super) present_region: std::sync::Arc<std::sync::Mutex<freminal_windowing::PresentRegion>>,
 
-    /// Chrome-damage decision for the most recent `update()` of this window
-    /// (#436.3), drained by `App::take_chrome_damage`.
+    /// Chrome-damage decision for the most recent `update()` of this window,
+    /// drained by `App::take_chrome_damage`.
     ///
     /// Set at the end of each `update()` from [`super::chrome_damage::decide_chrome_damage`].
     /// Defaults to [`freminal_windowing::ChromeDamage::Changed`] — the
@@ -559,7 +557,7 @@ pub(super) struct PerWindowState {
     /// return (mirrors `pending_frame_damage`'s same risk/precedent).
     pub(super) pending_chrome_damage: freminal_windowing::ChromeDamage,
 
-    /// #436 §3.5 self-dismissal settle rule: `true` when a dismissible
+    /// Self-dismissal settle rule: `true` when a dismissible
     /// element (toast, About, Welcome, paste/broadcast/close-guard dialogs,
     /// save-layout prompt) transitioned presence on the PREVIOUS frame, which
     /// forces THIS frame `ChromeDamage::Changed` too (the "settle frame").
@@ -574,16 +572,16 @@ pub(super) struct PerWindowState {
     ///
     /// Compared against this frame's own after-`.show()` sample to catch a
     /// transition NOT caused by that element's own self-dismissal (e.g. a
-    /// menu action closing a dialog) — the cross-frame half of the §3.5
+    /// menu action closing a dialog) — the cross-frame half of the
     /// settle rule. The intra-frame (before-vs-after within a single frame)
-    /// half, which is what catches the toast self-dismissal hazard
-    /// (adversarial finding 1), uses a frame-local `before`/`after` pair
+    /// half, which is what catches the toast self-dismissal hazard,
+    /// uses a frame-local `before`/`after` pair
     /// instead and does not need to be stored here. Defaults to
     /// all-`false` (nothing dismissible present before the first frame).
     pub(super) prev_dismissible_presence: DismissiblePresence,
 
-    /// Previous frame's tab/pane snapshot for the §3.3 tab-set / tab-title /
-    /// pane-layout / broadcast-state change-detection rows (#436.3). See
+    /// Previous frame's tab/pane snapshot for the tab-set / tab-title /
+    /// pane-layout / broadcast-state change-detection rows. See
     /// [`super::chrome_damage::ChromeTabSnapshot`] and
     /// [`super::chrome_damage::diff_tab_snapshots`]. Defaults to empty,
     /// which naturally reports every row as "changed" on the first
@@ -591,13 +589,13 @@ pub(super) struct PerWindowState {
     /// by the warm-up counter below.
     pub(super) prev_chrome_tab_snapshot: ChromeTabSnapshot,
 
-    /// Previous frame's `window_focused` value (#436.3 §3.3 "Window focus
+    /// Previous frame's `window_focused` value ("Window focus
     /// change" row). Compared each frame to the freshly-read value to
     /// detect focus in/out. `false` before the first frame.
     pub(super) prev_window_focused: bool,
 
     /// Frames rendered since this window was created, saturating at
-    /// [`super::chrome_damage::WARMUP_FRAMES`] (#436.3 §7 warm-up). While
+    /// [`super::chrome_damage::WARMUP_FRAMES`]. While
     /// below that count, `ChromeSignals::warming_up` is `true`,
     /// unconditionally forcing `ChromeDamage::Changed`.
     pub(super) chrome_frames_rendered: u32,
@@ -610,7 +608,7 @@ pub(super) struct PerWindowState {
     /// shortest interval any rendered pane needed — cursor blink, content
     /// update, or shader animation). Consumed by
     /// `event_loop::effective_repaint_delay`'s suppressed-pointer-motion
-    /// substitution (Task 121): when the only thing that happened since the
+    /// substitution: when the only thing that happened since the
     /// previous frame was pointer motion the app classified as needing no
     /// frame, this value stands in for egui's own (zero) requested delay so
     /// the window does not busy-loop. Defaults to `None`.
@@ -619,15 +617,15 @@ pub(super) struct PerWindowState {
     /// Per-frame render attribution counters (diagnostic), flushed to a
     /// `debug` log line every [`FrameStats::FLUSH_EVERY`] drawn frames. Lets
     /// a CPU investigation see, without a profiler, how many frames are
-    /// actually drawn and how they split across the #435 per-frame damage
+    /// actually drawn and how they split across the partial-present per-frame damage
     /// classes (a genuinely-unchanged redraw costs no CPU rebuild; a `Full`
     /// frame rebuilds the visible vertex data).
     pub(super) frame_stats: FrameStats,
 }
 
 impl PerWindowState {
-    /// Destroy every pane renderer retired since the last frame (Task
-    /// 125.C2). Returns how many were destroyed.
+    /// Destroy every pane renderer retired since the last frame.
+    /// Returns how many were destroyed.
     ///
     /// Must be called with this window's GL context current -- i.e. from
     /// `App::update`, where `gl` is that context. A no-op (no GL calls, one
@@ -674,7 +672,7 @@ impl PerWindowState {
 ///
 /// Every counted frame is one `update()` call for a window (i.e. one drawn
 /// frame). `unchanged`/`cursor_only`/`full` classify the ACTIVE pane's
-/// `PaneFrameDamage` that frame (the #435 signal), and
+/// `PaneFrameDamage` that frame (the partial-present signal), and
 /// `blink_wake_suppressed` counts frames where a blink-style cursor was
 /// hidden (DECTCEM / inactive / echo-off) so the old ~500ms blink wake was
 /// correctly NOT scheduled (validates the `cursor_blink_wants_repaint` fix —
@@ -687,21 +685,21 @@ pub(super) struct FrameStats {
     pub(super) full: u64,
     pub(super) blink_wake_suppressed: u64,
 
-    // ── Task 121 frame-profiling harness (feature-gated) ──────────────────
+    // ── Frame-profiling harness (feature-gated) ──────────────────
     //
     // Every field below is `#[cfg(feature = "frame-profiling")]`: a default
     // build must not carry so much as an extra counter increment in the
     // frame path, since timing calls there would perturb the very thing
     // being measured. See `agents.md` / the `freminal-bench-table` skill.
-    /// The #435-only `FrameDamage` decision (before
+    /// The partial-present-only `FrameDamage` decision (before
     /// `compose_with_chrome_damage` can still upgrade it) was
-    /// `FrameDamage::None` (Task 124.2): every rendered pane reported
+    /// `FrameDamage::None`: every rendered pane reported
     /// `PaneFrameDamage::Unchanged`, no pane contributed search-overlay
     /// popup rects, and no bell/toast/force-full override applied.
     ///
-    /// Renamed from the pre-124.2 `zero_change_presented`, which claimed a
-    /// frame counted here was still presented -- true before Task 124.2
-    /// (there was no way to say "nothing changed, present nothing", so
+    /// Replaces the old `zero_change_presented`, which claimed a
+    /// frame counted here was still presented -- true while there was
+    /// no way to say "nothing changed, present nothing", so
     /// `decide_frame_damage` fell through to `FrameDamage::Full`), false
     /// now: such a frame typically resolves to `FrameDamage::None` and is
     /// NOT presented at all (no clear, no primitive paint, no swap). See
@@ -711,7 +709,7 @@ pub(super) struct FrameStats {
     #[cfg(feature = "frame-profiling")]
     pub(super) frame_damage_none_precomposition: u64,
     /// Frames whose FINAL, post-composition `win.pending_frame_damage` was
-    /// `FrameDamage::None` (Task 124.2) -- these are NOT presented at all:
+    /// `FrameDamage::None` -- these are NOT presented at all:
     /// no clear, no GL primitive paint, no `pre_present_notify`, no buffer
     /// swap.
     #[cfg(feature = "frame-profiling")]
@@ -750,7 +748,7 @@ pub(super) struct FrameStats {
     #[cfg(feature = "frame-profiling")]
     pub(super) phase_panes_max: std::time::Duration,
     /// Cumulative wall-clock time spent inside the whole productive body of
-    /// `App::update` this session (Task 121 defect-1 fix): captured from an
+    /// `App::update` this session: captured from an
     /// `update_start = Instant::now()` at the very top of `update`, through
     /// `.elapsed()` taken after `compose_with_chrome_damage` -- i.e. AFTER
     /// `central_body` returns, so it also covers the menu/tab bar
@@ -773,9 +771,8 @@ pub(super) struct FrameStats {
     /// this session (a mean hides the tail).
     #[cfg(feature = "frame-profiling")]
     pub(super) phase_app_update_max: std::time::Duration,
-    /// Task 121 frame-profiling harness follow-up (issue #459/#461
-    /// gate-blocker investigation): cumulative per-frame fired count for
-    /// each of the 15 `chrome_damage::ChromeSignals` §3.3 fields, indexed
+    /// Frame-profiling diagnostic: cumulative per-frame fired count for
+    /// each of the 15 `chrome_damage::ChromeSignals` fields, indexed
     /// the SAME as `ChromeSignals::named_fields()`'s array order (see that
     /// method's doc for the exhaustiveness guarantee this indexing relies
     /// on). Incremented in `app_impl.rs` right after
@@ -783,7 +780,7 @@ pub(super) struct FrameStats {
     #[cfg(feature = "frame-profiling")]
     pub(super) chrome_signal_fired_counts: [u64; 15],
 
-    // ── Task 121 pointer-motion repaint-gate condition counters (diagnostic;
+    // ── Pointer-motion repaint-gate condition counters (diagnostic;
     // feature-gated) ────────────────────────────────────────────────────
     //
     // `Cell<u64>`, not a plain `u64` like every other counter on this
@@ -829,10 +826,9 @@ pub(super) struct FrameStats {
     /// — either endpoint's geometry could not be classified at all.
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_cond_unknown_geometry: std::cell::Cell<u64>,
-    /// `url_forced` fired count (Task 124.3b: `pointer_motion::url_positional_force`
+    /// `url_forced` fired count (`pointer_motion::url_positional_force`
     /// actually forced a repaint for this call — not merely "this pane has
-    /// URLs", which is the pre-124.3b pane-wide meaning this counter
-    /// replaces).
+    /// URLs", which was the old pane-wide meaning of this counter).
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_cond_url_forced: std::cell::Cell<u64>,
     /// `gutter_forced` fired count (`pointer_motion::gutter_positional_force`).
@@ -849,18 +845,17 @@ pub(super) struct FrameStats {
     pub(super) pointer_cond_selection_forced: std::cell::Cell<u64>,
 }
 
-/// Task 121 pointer-motion repaint-gate diagnostic (feature-gated),
-/// rewritten by Task 124.3b (and its review pass): which of the ten
+/// Pointer-motion repaint-gate diagnostic (feature-gated): which of the ten
 /// top-level conditions `pointer_motion_needs_repaint_decision` considers
 /// actually FORCED a repaint for one call.
 ///
 /// Diagnostic-only — never affects behavior — and only ever consumed by
 /// `FrameStats::record_pointer_motion_check`. Every field here means "this
 /// term forced the repaint", not "this observation happened to be true"
-/// (the pre-124.3b `has_urls` counter used to be counted whenever a pane
+/// (the old `has_urls` counter used to be counted whenever a pane
 /// merely CONTAINED a URL, whether or not that mattered for this motion —
 /// see `pointer_motion.rs`'s module doc for the pane-wide-veto-to-positional
-/// rewrite this counter set reflects). The review pass that added
+/// rewrite this counter set reflects). The later addition of
 /// `first_motion`/`focus_change_pending`/`unknown_geometry` closed a gap
 /// where this struct claimed to cover "the conditions considered" but
 /// omitted three of `PointerMotionInputs`'s actual top-level fields —
@@ -939,7 +934,7 @@ impl FrameStats {
         }
     }
 
-    /// Task 121 pointer-motion repaint-gate diagnostic: record one
+    /// Pointer-motion repaint-gate diagnostic: record one
     /// `App::pointer_motion_needs_repaint` call's condition flags into the
     /// per-condition counters plus the total, `saturating_add`. Takes
     /// `&self` (not `&mut self`): every counter it touches is a
@@ -1117,9 +1112,8 @@ mod frame_profiling_tests {
         );
     }
 
-    // ── Task 121 pointer-motion repaint-gate condition counters, rewritten
-    // by Task 124.3b (and its review pass) to count FORCING conditions,
-    // exhaustively over every top-level `PointerMotionInputs` term ────────
+    // ── Pointer-motion repaint-gate condition counters, counting FORCING
+    // conditions, exhaustively over every top-level `PointerMotionInputs` term ────────
 
     /// The ten pointer-motion condition names, in the same order
     /// `record_pointer_motion_check`/the app-side flush build their
@@ -1321,7 +1315,7 @@ mod resize_overlay_tests {
         // Truth table: size_changed, window_resized -> expected.
         assert!(!resize_is_genuine(false, false));
         assert!(!resize_is_genuine(false, true));
-        // The spurious case the adversarial review flagged: char-grid size
+        // The spurious case: char-grid size
         // changed (e.g. new tab/split reset last_sent_size to (0,0), or the
         // first `None -> Some` geometry observation on launch) but the OS
         // window did not genuinely resize between two known sizes.
@@ -1331,7 +1325,7 @@ mod resize_overlay_tests {
         assert!(resize_is_genuine(true, true));
     }
 
-    // ── Subtask 121.14: `resize_overlay_is_animating` ────────────────────
+    // ── `resize_overlay_is_animating` ────────────────────
 
     #[test]
     fn is_animating_false_in_the_opaque_phase() {
@@ -1421,7 +1415,7 @@ mod resize_overlay_tests {
         ));
     }
 
-    // ── Subtask 121.14: `resize_overlay_repaint_delay` ───────────────────
+    // ── `resize_overlay_repaint_delay` ───────────────────
 
     #[test]
     fn repaint_delay_in_the_opaque_phase_wakes_exactly_at_fade_start() {
@@ -1504,7 +1498,7 @@ mod resize_overlay_tests {
         );
     }
 
-    // ── Item 4 (review CONSIDER #4): pin the HUD consistency invariant ────
+    // ── Pin the HUD consistency invariant ────
 
     #[test]
     fn resize_overlay_is_animating_and_repaint_delay_stay_consistent_across_ranges() {
@@ -1515,11 +1509,11 @@ mod resize_overlay_tests {
         // edit to one without the other across anything but the production
         // LINGER/FADE constants (`repaint_delay_boundary_matches_is_animating_boundary`
         // above). This generalizes that check across several linger/fade
-        // combinations, including the edge cases the review explicitly
-        // called out: `fade == 0` and `fade > linger`.
+        // combinations, including the edge cases `fade == 0` and
+        // `fade > linger`.
         //
-        // CORRECTNESS NOTE on the invariant actually pinned here: the task
-        // that produced this test described the invariant as
+        // CORRECTNESS NOTE on the invariant actually pinned here: an
+        // earlier formulation of this test described the invariant as
         // `is_animating(e, l, f) == (repaint_delay(e, l, f) <= 16ms)`. That
         // formulation is subtly wrong and is deliberately NOT what is
         // asserted below. Counterexample: with `linger = 900ms`,
@@ -1587,15 +1581,14 @@ mod resize_overlay_tests {
 
 #[cfg(test)]
 mod held_pointer_button_tests {
-    //! Task 124.3a (orchestrator review correction #1): pure-state tests
+    //! Pure-state tests
     //! for [`next_held_pointer_button`] and [`egui_button_from_windowing`],
     //! proving the window-owned held-button model this module now uses.
     //!
     //! A live `PerWindowState` cannot be constructed headlessly (its
     //! `WindowId` has no public constructor outside the real winit event
     //! loop), so these tests exercise the pure decision function directly
-    //! — exactly the "structure this as pure state tests" fallback the
-    //! task calls for. The headline property under test —
+    //! — exactly the "structure this as pure state tests" approach. The headline property under test —
     //! "press-before-active-pane-change plus release-after-change cannot
     //! leave either pane logically held" — is now provable STRUCTURALLY,
     //! not just behaviorally: [`next_held_pointer_button`] takes no pane
@@ -1636,7 +1629,7 @@ mod held_pointer_button_tests {
             egui_button_from_windowing(PointerButton::Middle),
             egui::PointerButton::Middle
         );
-        // Review correction: Back/Forward map to Extra1/Extra2 -- preserving
+        // Back/Forward map to Extra1/Extra2 -- preserving
         // the existing unsupported-button fallback in `gui::mouse`'s
         // encoders, not claiming either has a native PTY button code.
         assert_eq!(
@@ -1718,7 +1711,7 @@ mod held_pointer_button_tests {
         assert_eq!(next, None);
     }
 
-    // ── Task 124.3a (review correction #2): Shift+secondary escape hatch ─
+    // ── Shift+secondary escape hatch ─
 
     #[test]
     fn shift_held_secondary_press_does_not_arm() {

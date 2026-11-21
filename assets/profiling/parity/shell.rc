@@ -1,5 +1,5 @@
 #!/run/current-system/sw/bin/bash
-# shell.rc — Task 125.2 hermetic interactive shell fixture.
+# shell.rc — hermetic interactive shell fixture.
 #
 # Sourced via `/run/current-system/sw/bin/bash --noprofile --rcfile shell.rc
 # -i` for every one of the three measured terminals (Freminal, WezTerm,
@@ -10,7 +10,7 @@
 # `~/.bashrc` or `~/.bash_profile`.
 #
 # This file is a template consumed by workloads.sh's `render_fixture`. The
-# only substituted token is @TASK125_MARKER@, replaced with a short label
+# only substituted token is @PARITY_MARKER@, replaced with a short label
 # identifying the terminal + run so captured PTY output can be attributed
 # unambiguously in raw logs. Every other line is byte-identical across the
 # three rendered copies.
@@ -34,7 +34,7 @@ unset HISTCONTROL HISTIGNORE
 # A short, static prompt. No git/VCS status, no command timing, no
 # conditional colour logic -- those are themselves variable-cost work this
 # task must not accidentally fold into the terminal-rendering measurement.
-PS1='task125$ '
+PS1='parity$ '
 PS2='> '
 
 # Deterministic locale/formatting; avoids locale-dependent glyph shaping
@@ -49,22 +49,22 @@ export BASH_COMPAT=""
 
 # Identifies this session in raw captures (terminal name + sample index).
 # Never interpreted as a command; purely informational.
-export TASK125_SESSION="@TASK125_MARKER@"
+export PARITY_SESSION="@PARITY_MARKER@"
 
 # Report the kernel-visible PTY window size. Hyprland supplies the same tiled
 # pixel bounds to every terminal, but backend font metrics produce different
 # row/column counts; the driver records those counts rather than forcing an
-# unequal font size (see "Task 125 parity fixtures" in PROFILING.md).
-if [ -n "${TASK125_GRID_REPORT_FILE:-}" ]; then
-    stty size >"${TASK125_GRID_REPORT_FILE}" 2>/dev/null || true
+# unequal font size (see "Terminal parity fixtures" in PROFILING.md).
+if [ -n "${PARITY_GRID_REPORT_FILE:-}" ]; then
+    stty size >"${PARITY_GRID_REPORT_FILE}" 2>/dev/null || true
 fi
 
 # Signal readiness to the driver: workloads that drive input via `wtype`
 # poll for this file before sending any keystrokes, so we never type into a
 # terminal whose shell has not finished initializing yet.
-if [ -n "${TASK125_SHELL_PID_FILE:-}" ]; then
-    printf '%s\n' "$$" >"${TASK125_SHELL_PID_FILE}"
+if [ -n "${PARITY_SHELL_PID_FILE:-}" ]; then
+    printf '%s\n' "$$" >"${PARITY_SHELL_PID_FILE}"
 fi
-if [ -n "${TASK125_READY_FILE:-}" ]; then
-    : >"${TASK125_READY_FILE}"
+if [ -n "${PARITY_READY_FILE:-}" ]; then
+    : >"${PARITY_READY_FILE}"
 fi

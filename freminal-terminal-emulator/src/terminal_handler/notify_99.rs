@@ -525,7 +525,7 @@ impl FinalizedNotification {
     }
 }
 
-// ── Capability query reply (Task 130.5) ──────────────────────────────────────
+// ── Capability query reply ───────────────────────────────────────────────────
 
 /// Build the capability list of the reply to an OSC 99 `p=?` query, for a host
 /// that honours OSC 99 with the given `features`.
@@ -1138,7 +1138,7 @@ impl TerminalHandler {
     /// While supported, control payloads act at once whatever `d=` says, and
     /// never read or change the pending store:
     ///
-    /// - `p=?` is answered here from the host capabilities (Task 130.5) and
+    /// - `p=?` is answered here from the host capabilities and
     ///   never reaches the GUI; an id-less query is answered with `i=0`.
     /// - `p=close` and `p=alive` with an id are forwarded as `Osc99Control`;
     ///   without an id they are no-ops.
@@ -1698,7 +1698,7 @@ mod tests {
         assert_eq!(entry.accumulated_len(), 0);
     }
 
-    // ── 99.9: button-label extraction ────────────────────────────────────────
+    // ── button-label extraction ──────────────────────────────────────────────
 
     #[test]
     fn split_button_labels_splits_on_u2028() {
@@ -1886,7 +1886,7 @@ mod tests {
         assert!(is_dropped(&handler, &id));
     }
 
-    // ── 129.12: stream decoding through the real wire path ───────────────────
+    // ── stream decoding through the real wire path ───────────────────────────
 
     /// Feed one OSC 99 sequence (`metadata`, `payload`) through
     /// `parse_osc_99` and the reassembler, exactly as the handler does.
@@ -2074,7 +2074,7 @@ mod tests {
         assert!(is_dropped(&handler, id));
     }
 
-    /// PR #536 review: the combined cap must also hold for the bytes a pending
+    /// The combined cap must also hold for the bytes a pending
     /// base64 tail adds when the accumulators are finished.
     #[test]
     fn base64_tail_flushed_at_finish_cannot_exceed_the_combined_cap() {
@@ -2114,7 +2114,7 @@ mod tests {
         )
     }
 
-    /// The reviewer's repro: invalid base64 mid-transfer, then a plain
+    /// A reproducer: invalid base64 mid-transfer, then a plain
     /// terminating chunk for the same id, must not yield a notification
     /// built from the tail fragment.
     #[test]
@@ -2222,7 +2222,7 @@ mod tests {
         );
     }
 
-    // ── 138.C7: plain multi-byte text, stale unidentified slot ───────────────
+    // ── plain multi-byte text, stale unidentified slot ───────────────────────
 
     /// A plain (non-base64) character split across two chunks is decoded
     /// after the chunks are joined, not per chunk.
@@ -2291,7 +2291,7 @@ mod tests {
         assert!(handler.pending_osc99.is_empty());
     }
 
-    // ── 138.C7: icon-only priming ─────────────────────────────────────────────
+    // ── icon-only priming ─────────────────────────────────────────────────────
 
     /// The commands `handler` has queued for the GUI.
     fn queued(handler: &TerminalHandler) -> &[WindowManipulation] {
@@ -2348,7 +2348,7 @@ mod tests {
         assert_eq!(queued(&handler), []);
     }
 
-    // ── 138.3: metadata merge ─────────────────────────────────────────────────
+    // ── metadata merge ────────────────────────────────────────────────────────
 
     /// Merge `chunks` in order and return the accumulated metadata.
     fn merged(chunks: &[Osc99Command]) -> MergedOsc99Metadata {
@@ -2498,7 +2498,7 @@ mod tests {
         );
     }
 
-    // ── 138.3: finalisation helpers ───────────────────────────────────────────
+    // ── finalisation helpers ──────────────────────────────────────────────────
 
     #[test]
     fn strip_removes_c0_del_and_c1_but_keeps_lf() {
@@ -2748,7 +2748,7 @@ mod tests {
         assert_eq!(data.sound, Osc99Sound::Named("bell".to_owned()));
     }
 
-    // ── 138.3: pending store ──────────────────────────────────────────────────
+    // ── pending store ─────────────────────────────────────────────────────────
 
     #[test]
     fn store_creates_touches_and_removes_entries() {
@@ -2827,7 +2827,7 @@ mod tests {
         assert_eq!(store.identified_len(), 0);
     }
 
-    // ── 138.C6: bounded, linear-cost reassembly ───────────────────────────────
+    // ── bounded, linear-cost reassembly ───────────────────────────────────────
 
     /// How many entries the pending notification for `id` holds in the list
     /// selected by `len`, or `None` when it holds no live accumulation.
@@ -3223,7 +3223,7 @@ mod tests {
         assert_eq!(handler.pending_osc99.total_cost(), 4096);
     }
 
-    // ── 138.4: osc99_query_reply_body ─────────────────────────────────────────
+    // ── osc99_query_reply_body ────────────────────────────────────────────────
 
     const ALL_SUPPORTED_REPLY: &str = "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning";
 

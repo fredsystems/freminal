@@ -24,29 +24,29 @@ winit.workspace = true
 
 [features]
 default = []
-# Frame-profiling instrumentation (Task 121): adds `Instant`-based phase
+# Frame-profiling instrumentation: adds `Instant`-based phase
 # timers and counters to `EguiState::run_frame` (chrome-mode duty cycle,
 # per-phase wall-clock breakdown for run_ui/tessellate/paint/swap), flushed
 # as its own `tracing::debug!` line every `FrameProfile::FLUSH_EVERY` drawn
 # frames per window. NOT enabled by default -- see the identical rationale
 # on the `freminal` crate's `frame-profiling` feature, which enables this one.
 frame-profiling = []
-# Offscreen pbuffer GL context for the Task 123 Phase 2 pixel/readback
-# harness. NOT enabled by default -- it is test infrastructure, needs Mesa
-# and an X server present, and has no place in a production build. Also
+# Offscreen pbuffer GL context for the pixel/readback harness. NOT enabled by
+# default -- it is test infrastructure, needs Mesa and an X server present, and
+# has no place in a production build. Also
 # `target_os = "linux"`-gated at the module, so enabling it elsewhere is a
 # no-op rather than a compile error.
 gl-offscreen = []
-# Asynchronous GPU timestamp-query timing. Task 125.7 is the foundation: a
+# Asynchronous GPU timestamp-query timing. The foundation is a
 # bounded `GpuQueryRing<Q>` lifecycle state machine plus pure capability
 # detection (desktop OpenGL 3.3+ or `GL_ARB_timer_query`; GLES/unsupported
 # report `Unavailable`), driven entirely through the `GpuQuerySource` trait.
-# Task 125.9 builds on it: each window measures chrome, terminal-band and
+# On top of it, each window measures chrome, terminal-band and
 # total-frame GPU time per painted frame (tracing target
-# `freminal_windowing::task_125::gpu_timing`) through a thin `glow` timestamp
+# `freminal_windowing::gpu_timing`) through a thin `glow` timestamp
 # source whose GL calls are the feature's only `unsafe` code. The `freminal`
 # crate's `gpu-profiling` feature forwards here and adds the per-pane
-# terminal upload/draw timing (Task 125.8). NOT enabled by default -- it is
+# terminal upload/draw timing. NOT enabled by default -- it is
 # measurement infrastructure with no default-build presence, mirroring
 # `frame-profiling`'s rationale. No new dependency.
 gpu-profiling = []

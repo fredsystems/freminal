@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 125.C14 tests: the cell / column / row placement clears delete the
+//! Tests: the cell / column / row placement clears delete the
 //! placements they intersect, and only those.
 //!
 //! A placement is one display of an image (`image_id` + `placement_instance`).

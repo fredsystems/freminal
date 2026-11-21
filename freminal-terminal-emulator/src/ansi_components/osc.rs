@@ -57,7 +57,7 @@ const OSC_CLIPBOARD_HEADER_ALLOWANCE: usize = 256;
 /// This is the padded base64 size of [`MAX_OSC52_WRITE_BYTES`]
 /// (`4 * ceil(n / 3)`) plus `OSC_CLIPBOARD_HEADER_ALLOWANCE`, so the largest
 /// permitted clipboard write is still accumulated, but a hostile multi-megabyte
-/// sequence is discarded without being buffered (Task 148.16, GHSA-v2hw-gcg8-2rfr).
+/// sequence is discarded without being buffered.
 /// A sequence over this cap is dropped whole, like any over-limit OSC. The
 /// arithmetic saturates rather than wraps, so it cannot overflow in a `const`
 /// context.
@@ -73,8 +73,7 @@ pub const MAX_OSC_CLIPBOARD_BYTES: usize = MAX_OSC52_WRITE_BYTES
 /// beyond anything displayable. It bounds the memory a single title (and every
 /// copy of it: tab title, title stack, viewport command) can occupy, instead of
 /// the 1 MiB [`MAX_OSC_BYTES`] allows. A longer title is truncated at a UTF-8
-/// character boundary, not dropped. This is a Freminal policy (Task 148.10,
-/// GHSA-jh4m-7w5g-j4qg).
+/// character boundary, not dropped. This is a Freminal policy.
 pub const MAX_TITLE_BYTES: usize = 4096;
 
 /// Which byte cap applies to the OSC sequence being accumulated.
@@ -614,7 +613,7 @@ fn dispatch_osc_target(
             handle_osc_shell_info(raw_params, output);
             ParserOutcome::Finished
         }
-        // OSC 9 / OSC 777 — desktop notifications (Task 76).  Parsed from the
+        // OSC 9 / OSC 777 — desktop notifications.  Parsed from the
         // raw bytes so notification bodies containing `;` survive intact.
         OscTarget::Notify9 => {
             handle_osc_notify_9(raw_params, output);
@@ -1263,7 +1262,7 @@ mod tests {
         ));
     }
 
-    // ── Raw-body dispatch (Task 129.5) ──────────────────────────────────────
+    // ── Raw-body dispatch ───────────────────────────────────────────────────
 
     /// Feed a full OSC body and return both the output and the outcome of the
     /// final byte.
@@ -1402,10 +1401,9 @@ mod tests {
     #[test]
     fn tokenising_targets_with_non_utf8_byte_still_invalid() {
         // OSC 52 clipboard, which tokenises.
-        // (Titles and OSC 7 no longer tokenise; see the 129.6 tests below.
-        // Neither does OSC 8; see the 129.7 tests below. Neither does OSC 133;
-        // see the 129.8 tests below. Neither do the colour targets; see the
-        // 132.13 tests below. Neither does OSC 22; see the next test.)
+        // (Titles and OSC 7 no longer tokenise; see the title tests below.
+        // Neither does OSC 8, nor OSC 133, nor the colour targets; see their
+        // tests below. Neither does OSC 22; see the next test.)
         assert_invalid(b"52;c;\xe9\x07");
     }
 
@@ -1416,7 +1414,7 @@ mod tests {
         assert_eq!(output, [pointer_op(PointerShapeOp::Set(vec![]))]);
     }
 
-    // ── Colour targets split the raw body (Task 132.13) ─────────────────────
+    // ── Colour targets split the raw body ───────────────────────────────────
 
     #[test]
     fn colour_targets_with_non_utf8_byte_are_skipped_not_invalid() {
@@ -1485,7 +1483,7 @@ mod tests {
         }
     }
 
-    // ── Titles and OSC 7 take the full remainder (Task 129.6) ───────────────
+    // ── Titles and OSC 7 take the full remainder ────────────────────────────
 
     fn feed_text_osc(payload: &[u8]) -> Vec<TerminalOutput> {
         let (output, outcome) = feed_osc_with_outcome(payload);
@@ -1551,7 +1549,7 @@ mod tests {
         }
     }
 
-    // ── OSC 8 parsed from the raw body (Task 129.7) ─────────────────────────
+    // ── OSC 8 parsed from the raw body ──────────────────────────────────────
 
     fn hyperlink(id: Option<&str>, url: &str) -> TerminalOutput {
         TerminalOutput::OscResponse(AnsiOscType::Url(UrlResponse::Url(Url {
@@ -1602,7 +1600,7 @@ mod tests {
         );
     }
 
-    // ── OSC 133 parsed from the raw body (Task 129.8) ───────────────────────
+    // ── OSC 133 parsed from the raw body ────────────────────────────────────
 
     fn ftcs_marker(output: &[TerminalOutput]) -> &FtcsMarker {
         match output {
@@ -1652,7 +1650,7 @@ mod tests {
         }
     }
 
-    // ── Byte caps (Task 129.9) ──────────────────────────────────────────────
+    // ── Byte caps ───────────────────────────────────────────────────────────
 
     /// An OSC body `prefix` padded with `x` to exactly `len` bytes.
     fn body_of_len(prefix: &[u8], len: usize) -> Vec<u8> {
@@ -1686,7 +1684,7 @@ mod tests {
             let TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(title)) = &output[0] else {
                 panic!("expected a title, got {:?}", output[0]);
             };
-            // Dispatched, then truncated to the title cap (Task 148.10).
+            // Dispatched, then truncated to the title cap.
             assert_eq!(title.len(), MAX_TITLE_BYTES);
         }
     }
@@ -2060,7 +2058,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Control bytes inside an OSC (129.C5): ECMA-48 / DEC VT500, as xterm
+    // Control bytes inside an OSC: ECMA-48 / DEC VT500, as xterm
     // ------------------------------------------------------------------
 
     #[test]

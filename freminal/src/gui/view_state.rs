@@ -69,7 +69,7 @@ pub struct CellCoord {
     pub row: usize,
 }
 
-/// A terminal cell addressed by a stable logical [`RowNumber`] (Task 125.17).
+/// A terminal cell addressed by a stable logical [`RowNumber`].
 ///
 /// A row's number never changes while the row lives, so a stored
 /// `LogicalCell` -- a selection endpoint, the last click, the context-menu
@@ -313,7 +313,7 @@ impl SelectionState {
         self.is_selecting = false;
     }
 
-    /// Apply the eviction rules against `snap`'s buffer (Task 125.17).
+    /// Apply the eviction rules against `snap`'s buffer.
     ///
     /// Endpoints are stable row numbers, so eviction never moves a selection
     /// off its text. What eviction *can* do is remove that text:
@@ -406,7 +406,7 @@ impl SelectionState {
 
     /// Deterministically finalize an in-progress drag that is being
     /// terminated WITHOUT a normal mouse-release event reaching the input
-    /// handler (defect 3, Task 116.3).
+    /// handler.
     ///
     /// This mirrors the collapse-or-keep decision a normal
     /// `PointerButton` release makes: a drag that produced a real range
@@ -433,7 +433,7 @@ impl SelectionState {
 
 /// A single search match span within the terminal buffer.
 ///
-/// `row` is a stable logical [`RowNumber`] (Task 125.17), so a match stays
+/// `row` is a stable logical [`RowNumber`], so a match stays
 /// attached to its text while scrollback rows are evicted. `col_start` and
 /// `col_end` are inclusive display-column indices within that row.
 ///
@@ -664,7 +664,7 @@ impl SearchState {
     /// changing how many there are — narrowing "day" to "days" over the same
     /// single hit being the obvious case. The highlight quads then kept
     /// drawing the old, shorter box until something unrelated (a scroll, new
-    /// output, a pane switch) forced a full rebuild (#463).
+    /// output, a pane switch) forced a full rebuild.
     ///
     /// The inputs are the `last_searched_*` fields rather than the live
     /// `query`/`regex_mode`/`case_sensitive`, because those record what
@@ -742,7 +742,7 @@ impl SearchState {
     }
 }
 
-/// GUI-local view state for the Quick Command History palette (Task 72.15).
+/// GUI-local view state for the Quick Command History palette.
 ///
 /// All fields are private-to-GUI -- the PTY thread never reads them.  The
 /// palette is rendered as a modal overlay anchored inside the focused pane,
@@ -786,7 +786,7 @@ impl CommandHistoryState {
 
 /// GUI-local view state for the terminal widget.
 ///
-/// A paste payload awaiting handling by the GUI layer (Task 77).
+/// A paste payload awaiting handling by the GUI layer.
 ///
 /// Stashed by `write_input_to_terminal` when an `Event::Paste` arrives (the
 /// windowing layer reads the clipboard reliably and injects the event) and
@@ -836,7 +836,7 @@ pub struct ViewState {
     pub previous_scroll_amount: f32,
 
     /// GUI-owned, per-pane state for the out-of-frame immediate PTY
-    /// motion-report path (Task 124.3a). Read and written by
+    /// motion-report path. Read and written by
     /// `FreminalGui::on_pointer_moved` (`terminal::pty_mouse_report`),
     /// which runs outside any frame. Carries only the last-reported
     /// POSITION — the held pointer BUTTON is window-owned instead
@@ -847,7 +847,7 @@ pub struct ViewState {
     /// avoids.
     ///
     /// Replaces this field's former `Option<PreviousMouseState>` shape
-    /// (unused before Task 124.3a): `PreviousMouseState`'s
+    /// (which was unused): `PreviousMouseState`'s
     /// `FreminalMousePosition` alone is the frame-local carry
     /// `write_input_to_terminal` threads through `InputCarryState`, a
     /// distinct control path from this out-of-frame one — see
@@ -864,7 +864,7 @@ pub struct ViewState {
     pub selection: SelectionState,
 
     /// Pending paste from an egui `Event::Paste`, awaiting handling by the GUI
-    /// layer (Task 77).
+    /// layer.
     ///
     /// The windowing layer intercepts paste shortcuts, reads the clipboard via
     /// the reliable egui-winit path, and injects `Event::Paste(text)`. The
@@ -1028,7 +1028,7 @@ pub struct ViewState {
     /// All search interaction is GUI-local and never touches the PTY thread.
     pub search_state: SearchState,
 
-    // ── Quick Command History palette (Task 72.15) ──────────────────
+    // ── Quick Command History palette ──────────────────
     /// Quick Command History palette state: open/closed, query, selection.
     ///
     /// All palette interaction is GUI-local. The palette draws from the
@@ -1036,17 +1036,17 @@ pub struct ViewState {
     /// `recent_commands` (live OSC 133 captures) at render time.
     pub command_history: CommandHistoryState,
 
-    // ── Kitty animated image playback (Task 100.2c) ──────────────────
+    // ── Kitty animated image playback ──────────────────
     /// Per-image animation playback clocks (GUI-side, ephemeral), keyed by
     /// image id. Absent for still images / images not yet seen animating.
     image_anim_clocks: HashMap<u64, ImageAnimationClock>,
 
-    // ── Selection commit edge flag (Task 116.2) ───────────────────────
+    // ── Selection commit edge flag ───────────────────────
     /// Per-frame edge flag: set when a mouse-release finalizes a
     /// non-empty selection, consumed (and reset) by the content-changed
     /// auto-clear in `show()` to prevent that auto-clear from wiping a
-    /// just-committed selection on a frame where PTY output also arrived
-    /// (defect 2, Task 116). This is distinct from `selection.is_selecting`,
+    /// just-committed selection on a frame where PTY output also arrived.
+    /// This is distinct from `selection.is_selecting`,
     /// which is already `false` by the time the release branch runs.
     pub selection_committed_this_frame: bool,
 }
@@ -1385,7 +1385,7 @@ impl ViewState {
         self.click_count
     }
 
-    // ── Kitty animated image playback (Task 100.2c) ──────────────────
+    // ── Kitty animated image playback ──────────────────
 
     /// The 1-based frame currently selected for `id`, or `1` if there is no
     /// playback clock for `id` (still image, or not seen animating yet).
@@ -2960,7 +2960,7 @@ mod tests {
         );
     }
 
-    // ── Logical rows across eviction (Task 125.17) ───────────────────────
+    // ── Logical rows across eviction ───────────────────────
 
     /// A snapshot of `total_rows` rows whose oldest retained row is numbered
     /// `row_base`.
@@ -3361,7 +3361,7 @@ mod tests {
         assert_eq!(vs.register_click(alt, t), 1);
     }
 
-    // ── Search corpus staleness (Task 125.17) ────────────────────────────
+    // ── Search corpus staleness ────────────────────────────
 
     #[test]
     fn corpus_is_stale_until_one_has_been_accepted() {
@@ -3418,7 +3418,7 @@ mod tests {
         }));
     }
 
-    // ── Corpus exchange (Task 125 review S1) ─────────────────────────────
+    // ── Corpus exchange ─────────────────────────────
 
     fn extent(row_base: u64, total_rows: usize) -> BufferExtent {
         BufferExtent {
@@ -3608,11 +3608,11 @@ mod tests {
         assert_eq!(st.current_match, 0);
     }
 
-    // ── SelectionState::finalize_interrupted_drag tests (Task 116.3, defect 3a) ──
+    // ── SelectionState::finalize_interrupted_drag tests ──
 
     #[test]
     fn finalize_interrupted_drag_keeps_real_selection() {
-        // Defect 3a: interrupting a drag that has already produced a real
+        // Interrupting a drag that has already produced a real
         // range (anchor != end) must KEEP anchor/end so the selection
         // survives — only `is_selecting` is cleared.
         let mut sel = SelectionState {
@@ -3650,7 +3650,7 @@ mod tests {
 
     #[test]
     fn finalize_interrupted_drag_clears_point_selection() {
-        // Defect 3a: a drag interrupted before it ever moved past its
+        // A drag interrupted before it ever moved past its
         // starting cell (anchor == end) has no real range and must be
         // fully cleared rather than left stranded.
         let mut sel = SelectionState {
@@ -3673,7 +3673,7 @@ mod tests {
 
     #[test]
     fn finalize_interrupted_drag_clears_when_end_none() {
-        // Defect 3a: an anchor with no tracked end (e.g. interrupted before
+        // An anchor with no tracked end (e.g. interrupted before
         // the first `PointerMoved`) is not a real selection and must clear.
         let mut sel = SelectionState {
             anchor: Some(LogicalCell {
@@ -3692,7 +3692,7 @@ mod tests {
 
     #[test]
     fn finalize_interrupted_drag_then_next_press_not_stuck() {
-        // Defect 3a: after keeping a real selection, the state machine
+        // After keeping a real selection, the state machine
         // must not be stranded — a subsequent `clear()` (simulating the
         // "clear existing selection" branch a fresh primary press takes)
         // must fully reset the state so a new anchor/end can be set.
@@ -3753,7 +3753,7 @@ mod tests {
         );
     }
 
-    // ── Kitty animated image playback (Task 100.2c) ──────────────────
+    // ── Kitty animated image playback ──────────────────
 
     use freminal_terminal_emulator::{AnimationControl, ImageFrame, ImageSizeMode};
 
@@ -4003,7 +4003,7 @@ mod tests {
         );
     }
 
-    // ─── SearchState::render_epoch (issue #463) ──────────────────────────────
+    // ─── SearchState::render_epoch ──────────────────────────────
 
     /// Build a search state as it would be right after a search completed.
     fn searched(query: &str, matches: Vec<MatchSpan>) -> SearchState {

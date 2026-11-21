@@ -28,7 +28,7 @@ static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
 ///
 /// Distinct from `NEXT_IMAGE_ID`: an image id identifies the pixel data
 /// (`InlineImage`); a placement instance id identifies one on-screen
-/// PLACEMENT of that image (Task 100.18). Two `a=p` puts of the same image
+/// PLACEMENT of that image. Two `a=p` puts of the same image
 /// id with `p=0`/unspecified are separate, coexisting placements — each
 /// must get its own instance id so the renderer buckets their cells into
 /// two independent quads instead of merging them into one oversized quad.
@@ -50,7 +50,7 @@ pub fn next_image_id() -> u64 {
     NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Generate a unique placement INSTANCE ID (Task 100.18).
+/// Generate a unique placement INSTANCE ID.
 ///
 /// IDs are monotonically increasing and never reused within a process.
 /// Minted once per DISTINCT on-screen placement (not per image, and not per
@@ -95,7 +95,7 @@ pub enum AnimationRunMode {
 /// Declarative animation-playback state carried on an animated image.
 ///
 /// Set by kitty `a=a` control commands on the PTY thread; shipped in the
-/// snapshot; consumed by the GUI's wall-clock frame selector (100.2c). Holds
+/// snapshot; consumed by the GUI's wall-clock frame selector. Holds
 /// only *declared* parameters — NOT the wall-clock playback cursor (that is
 /// GUI-side, ephemeral, and never in the buffer or snapshot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,8 +128,8 @@ impl Default for AnimationControl {
 /// `width_px`x`height_px`, anchored at the top-left of its origin cell.
 /// `ExplicitCells` (kitty `c`/`r`, iTerm2 explicit width/height) means the
 /// image is scaled to fill its declared `display_cols`x`display_rows` grid.
-/// Consumed by the renderer in Task 100.17b; set at handler-construction
-/// time here in 100.17a while the protocol provenance is still known.
+/// Consumed by the renderer; set at handler-construction time while the
+/// protocol provenance is still known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ImageSizeMode {
     #[default]
@@ -162,9 +162,9 @@ pub struct InlineImage {
     pub display_rows: usize,
 
     /// How `display_cols`x`display_rows` should be interpreted when drawing
-    /// this image: at native pixel size, or scaled to fill the cell grid
-    /// (Task 100.17). Set at construction time from protocol provenance;
-    /// consumed by the renderer starting in Task 100.17b.
+    /// this image: at native pixel size, or scaled to fill the cell grid.
+    /// Set at construction time from protocol provenance;
+    /// consumed by the renderer.
     pub size_mode: ImageSizeMode,
 
     /// Additional animation frames (frames 2..N). Empty for a still image.
@@ -353,8 +353,8 @@ pub struct ImagePlacement {
     /// Source-crop rectangle (kitty `a=p` `x/y/w/h`); `None` = full image.
     pub source_crop: Option<SourceCrop>,
 
-    /// Unique identity of the on-screen PLACEMENT this cell belongs to
-    /// (Task 100.18), minted via `next_placement_instance_id()`.
+    /// Unique identity of the on-screen PLACEMENT this cell belongs to,
+    /// minted via `next_placement_instance_id()`.
     ///
     /// Distinct from `image_id` (which identifies the pixel data, and may
     /// be shared by many coexisting placements) and from `placement_id`
@@ -364,7 +364,7 @@ pub struct ImagePlacement {
     /// never merge into one oversized quad.
     pub placement_instance: u64,
 
-    /// Sub-cell pixel offset (kitty `a=p`/`a=T` `X=`/`Y=`, Task 100.19);
+    /// Sub-cell pixel offset (kitty `a=p`/`a=T` `X=`/`Y=`);
     /// `None` = no offset (draw at the cell's exact top-left).
     pub subcell_offset: Option<SubCellOffset>,
 }
@@ -413,7 +413,7 @@ pub struct ImageStore {
     /// ids in this set.
     protocol_retained: HashSet<u64>,
 
-    /// Per-image *stamp horizon* (Task 125.15): the greatest logical
+    /// Per-image *stamp horizon*: the greatest logical
     /// [`RowNumber`] on which a cell of the image has been stamped (or has
     /// since been moved to). Every cell of the image lies on a row at or below
     /// its horizon, so once front eviction has removed every row up to and
@@ -701,8 +701,7 @@ impl ImageStore {
     }
 
     /// Record that a cell of image `image_id` now sits on logical row `row`,
-    /// raising the image's stamp horizon to `row` if it is higher (Task
-    /// 125.15).
+    /// raising the image's stamp horizon to `row` if it is higher.
     ///
     /// The buffer calls this wherever it stamps an image cell or moves image
     /// cells to a higher row. A horizon never decreases here (it is the
@@ -783,7 +782,7 @@ impl ImageStore {
     }
 
     /// Front eviction has advanced the buffer's base row number to `base`:
-    /// release every image whose stamp horizon is below it (Task 125.15).
+    /// release every image whose stamp horizon is below it.
     ///
     /// Such an image has no cell on any retained row. Non-retained
     /// (Sixel/iTerm2) images are removed from the store; protocol-retained
@@ -1274,7 +1273,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // InlineImage animation frame model (Task 100.2a)
+    // InlineImage animation frame model
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1319,7 +1318,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // InlineImage animation frame helpers (Task 100.2b)
+    // InlineImage animation frame helpers
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1436,7 +1435,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Kitty image number (`I=`) index (Task 100.3)
+    // Kitty image number (`I=`) index
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1542,7 +1541,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Storage quotas + LRU eviction (Task 100.5)
+    // Storage quotas + LRU eviction
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1797,7 +1796,7 @@ mod tests {
         );
     }
 
-    // ── Stamp horizons (Task 125.15) ────────────────────────────────────
+    // ── Stamp horizons ────────────────────────────────────
 
     fn row(n: u64) -> RowNumber {
         RowNumber::new(n)

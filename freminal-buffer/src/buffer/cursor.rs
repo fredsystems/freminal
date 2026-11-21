@@ -38,8 +38,8 @@ pub(in crate::buffer) enum SavedWrapState {
 
 /// A DECSC-saved cursor.
 ///
-/// DECSC saves the cursor's *screen* position, not a place in the content
-/// (Task 125.C6): xterm stores `screen->cur_row`, a row relative to the top of
+/// DECSC saves the cursor's *screen* position, not a place in the content:
+/// xterm stores `screen->cur_row`, a row relative to the top of
 /// the screen, and DECRC restores it through `CursorSet`, which clamps it to
 /// the screen. The VT510 manual defines the saved item only as "cursor
 /// position" on a terminal that has no scrollback.

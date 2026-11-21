@@ -397,7 +397,7 @@ impl super::FreminalGui {
             }
             KeyAction::Paste => {
                 // Defer to `dispatch_deferred_action` so the smart paste guard
-                // (Task 77) can analyze the clipboard with access to the live
+                // can analyze the clipboard with access to the live
                 // config and the per-window confirm dialog. Unifies the menu
                 // paste path with the keybinding and egui-event paste paths.
                 all_deferred_actions.push(KeyAction::Paste);
@@ -813,7 +813,7 @@ impl super::FreminalGui {
     }
 
     /// Handle a paste request that has been deferred to the GUI layer so the
-    /// smart paste guard (Task 77) can run with access to the live config and
+    /// smart paste guard can run with access to the live config and
     /// the per-window confirm dialog.
     ///
     /// Reads the system clipboard, normalises line endings, and analyses the
@@ -889,7 +889,7 @@ impl super::FreminalGui {
             // Capture the destination pane *now*, before the confirm dialog
             // opens. With focus-follows-mouse enabled the user moving the
             // cursor onto the dialog's buttons changes the active pane, so we
-            // must remember where the paste was headed (Task 106 bug).
+            // must remember where the paste was headed.
             let tab = win.tabs.active_tab();
             let target = super::paste_guard::PasteTarget {
                 tab_id: tab.id,
@@ -915,10 +915,10 @@ impl super::FreminalGui {
     /// Send `payload` to the specific pane identified by `target`, regardless
     /// of which pane is currently active.
     ///
-    /// Used to resolve a confirmed flagged paste (Task 77 dialog): the target
+    /// Used to resolve a confirmed flagged paste: the target
     /// is captured when the dialog opens so that focus moving to the dialog
     /// buttons (e.g. under focus-follows-mouse) cannot redirect the paste to
-    /// the wrong pane (Task 106 bug). If the target pane no longer exists (it
+    /// the wrong pane. If the target pane no longer exists (it
     /// was closed while the dialog was open) the paste is dropped with a log.
     pub(super) fn send_paste_to_target(
         win: &mut PerWindowState,
@@ -955,7 +955,7 @@ const BRACKETED_PASTE_MARKERS: [&str; 4] = ["\x1b[200~", "\x1b[201~", "\u{9b}200
 ///
 /// Without this, clipboard text containing `ESC [ 201 ~` terminates the
 /// bracket early and the receiving shell executes the remainder as typed
-/// input (issue #561).
+/// input.
 ///
 /// Both the start (`200~`) and end (`201~`) markers are removed, each in its
 /// 7-bit (`ESC [`) and 8-bit (U+009B) introducer form. Removal repeats until
@@ -1194,7 +1194,7 @@ mod tests {
 
     #[test]
     fn notify_active_pane_focused_sends_focus_gained() {
-        // Regression (106.4): closing the active tab must hand focus to the
+        // Regression: closing the active tab must hand focus to the
         // pane that becomes visible, mirroring the close-pane / PTY-death
         // paths. Verify the focus-gained event actually reaches the pane.
         let (mut tab, rx) = tab_with_input_rx(TabId::first(), PaneId::first());
@@ -1211,7 +1211,7 @@ mod tests {
         );
     }
 
-    // ── Bracketed-paste sanitisation (Task 148.20, issue #561) ─────────
+    // ── Bracketed-paste sanitisation ─────────
 
     #[test]
     fn wrap_bracketed_paste_strips_embedded_end_marker() {
@@ -1277,7 +1277,7 @@ mod tests {
         }
     }
 
-    // ── S8C1T framing (Task 147.4) ──────────────────────────────────────
+    // ── S8C1T framing ──────────────────────────────────────
 
     #[test]
     fn wrap_bracketed_paste_framing_follows_s8c1t() {

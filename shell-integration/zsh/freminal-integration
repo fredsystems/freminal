@@ -27,7 +27,7 @@ if [[ -n "${__FREMINAL_SHELL_INTEGRATION_LOADED:-}" ]]; then
 fi
 typeset -g __FREMINAL_SHELL_INTEGRATION_LOADED=1
 
-# ── OSC 1338 HISTFILE report (Task 72.15) ────────────────────────────────────
+# ── OSC 1338 HISTFILE report ────────────────────────────────────
 # Report the shell-evaluated $HISTFILE so freminal can seed the Quick
 # Command History Palette with the file the shell will actually read,
 # rather than the parent-environment value (which may be unset or stale
@@ -57,7 +57,7 @@ else
 	precmd_functions+=(__freminal_emit_histfile_once)
 fi
 
-# ── sudo keeps TERMINFO (Task 151.12; freminal's own wrapper, Task 151.C5) ───
+# ── sudo keeps TERMINFO (freminal's own wrapper) ───
 # sudo's environment reset drops TERMINFO, so programs run under sudo lose
 # freminal's terminfo entry.  When $FREMINAL_SHELL_FEATURES (a comma-separated
 # list) names the item `sudo` and TERMINFO is set, `sudo` becomes a function

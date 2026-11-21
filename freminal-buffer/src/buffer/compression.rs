@@ -3,24 +3,24 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Scrollback block compression (Task 119 — Scrollback Compression).
+//! Scrollback block compression.
 //!
-//! Deep-cold scrollback rows (already Task-118 [`Row::is_compact`](crate::row::Row::is_compact)) can be
+//! Deep-cold scrollback rows (already [`Row::is_compact`](crate::row::Row::is_compact)) can be
 //! moved out of `Buffer::rows` entirely into an LZ4-compressed
 //! [`CompressedBlock`], via the explicit, test-driven
 //! [`Buffer::compress_scrollback_block`]. There is no idle-driven *policy*
-//! deciding when to call it yet — that is Task 119.5. Compressed content is
+//! deciding when to call it yet. Compressed content is
 //! transparently restored at the flatten/read boundary via
 //! [`Buffer::ensure_decompressed`], so no caller outside `crate::buffer`
 //! ever observes a row being compressed.
 //!
 //! ## Single residency
 //!
-//! A row is always in exactly one of three states: `Live`, Task-118
+//! A row is always in exactly one of three states: `Live`,
 //! `Compact` (in `self.rows[i]`, `block_map()[i] == None`), or compressed
 //! (`block_map()[i] == Some(_)`, real content lives only in
 //! `self.blocks`). [`Buffer::ensure_decompressed`] restores a touched block
-//! back to `Compact` (not `Live` — preserving the Task-118 memory win) and
+//! back to `Compact` (not `Live` — preserving the memory win) and
 //! removes it from `self.blocks`, so a block is never both compressed and
 //! live at the same time.
 
@@ -40,17 +40,17 @@ use super::{BlockId, BlockRowRef, Buffer};
 /// Maximum number of contiguous eligible rows grouped into a single
 /// `compress_scrollback_block` call by `Buffer::compress_idle_scrollback`.
 ///
-/// The plan's target range is ~128-256 logical scrollback rows: large
+/// The target range is ~128-256 logical scrollback rows: large
 /// enough to amortize LZ4's fixed per-call overhead, small enough that
 /// scrolling into a block (which decompresses the whole thing) stays well
 /// under one frame budget. `256` is chosen here as the upper end of that
 /// range; whether `128` yields a meaningfully better ratio/latency
-/// trade-off is validated against measured behavior in Task 119.6's
-/// benches, not here.
+/// trade-off is validated against measured behavior in the
+/// compression benches, not here.
 const BLOCK_SIZE: usize = 256;
 
 /// One compressed block together with the number of buffer rows that still
-/// reference it (Task 125.15).
+/// reference it.
 ///
 /// `live_rows` is the count of `Some(BlockRowRef)` entries in the row store's
 /// block map that name this block. [`Buffer::compress_scrollback_block`] sets
@@ -90,14 +90,14 @@ pub(in crate::buffer) fn release_block_rows(
 }
 
 impl Buffer {
-    /// Compress up to `budget` rows of already-Task-118-compact, cold
+    /// Compress up to `budget` rows of already-compact, cold
     /// scrollback into LZ4 blocks, returning the number of rows *newly
     /// compressed*.
     ///
     /// Intended to be called from the PTY thread's idle tick immediately
     /// AFTER `compact_idle_scrollback` has caught up for this same tick
     /// (see the idle-tick arm in `freminal/src/gui/pty.rs`): a row must be
-    /// Task-118-compacted before it is a compression candidate, so calling
+    /// compacted before it is a compression candidate, so calling
     /// this while a compaction backlog is still draining would find
     /// nothing to do — compact first, compress the now-cold result second.
     ///
@@ -182,7 +182,7 @@ impl Buffer {
     }
 
     /// `true` if scrollback row `idx` is eligible to be grouped into a
-    /// `compress_idle_scrollback` run: currently Task-118 [`Row::is_compact`](crate::row::Row::is_compact)
+    /// `compress_idle_scrollback` run: currently [`Row::is_compact`](crate::row::Row::is_compact)
     /// and not already evicted into a compressed block. Used only by the
     /// run scan in `compress_idle_scrollback`.
     fn row_is_compression_candidate(&self, idx: usize) -> bool {
@@ -198,10 +198,10 @@ impl Buffer {
     /// LZ4-compressed block, evicting their real content out of
     /// `self.rows` and into `self.blocks`.
     ///
-    /// This is the explicit, test-driven entry point for Task 119.4 — there
-    /// is no automatic policy yet deciding *when* to call this (Task 119.5).
+    /// This is the explicit, test-driven entry point — there
+    /// is no automatic policy yet deciding *when* to call this.
     ///
-    /// Every row in the range must currently be Task-118 [`Row::is_compact`](crate::row::Row::is_compact)
+    /// Every row in the range must currently be [`Row::is_compact`](crate::row::Row::is_compact)
     /// and not already evicted, and the range must lie entirely below the
     /// visible window (`Buffer::visible_window_start(0)`): the live/visible
     /// region and any not-yet-compacted `Live` scrollback row are never
@@ -271,14 +271,14 @@ impl Buffer {
     /// Ensure every row in `range` has real, readable content: decompress
     /// (once) every distinct compressed block referenced by
     /// the row store's block map over `range`, restoring every row across the **whole
-    /// buffer** that references it back to Task-118 `Compact` storage — not
+    /// buffer** that references it back to `Compact` storage — not
     /// just the rows inside `range`.
     ///
     /// A block is all-or-nothing (its bytes are one LZ4 blob), so
     /// decompressing it restores every row it holds, wherever those rows
     /// currently sit in `self.rows`. Walking the whole buffer for matching
     /// block ids (rather than tracking a per-block row-index list) is the
-    /// Task 119.4 design choice: eviction is rare and buffers are bounded by
+    /// design choice: eviction is rare and buffers are bounded by
     /// `scrollback_limit`, so this is cheap relative to the decompression it
     /// guards.
     ///
@@ -286,11 +286,11 @@ impl Buffer {
     /// (`Row::is_evicted() == false`) and every block referenced from
     /// `range` has been removed from `self.blocks` (single residency).
     ///
-    /// This is the correctness-over-speed decompress-on-read seam Task 119.4
-    /// mandates. Callers include the scrollback flatten path
+    /// This is the correctness-over-speed decompress-on-read seam.
+    /// Callers include the scrollback flatten path
     /// (`Buffer::scrollback_as_tchars_and_tags`) and `Buffer::reflow_to_width`
     /// (called there over the *entire* buffer — deliberately unoptimized;
-    /// Task 120 makes that fast, this subtask only needs it correct).
+    /// correctness is what this seam guarantees).
     pub(in crate::buffer) fn ensure_decompressed(&mut self, range: Range<usize>) {
         let end = range.end.min(self.rows.block_map().len());
         let start = range.start.min(end);
@@ -361,7 +361,7 @@ impl Buffer {
     /// also cannot call `Buffer::ensure_decompressed` (which needs
     /// `&mut self` to restore rows and cache the decompressed block).
     ///
-    /// A non-evicted row (`Live` or Task-118 `Compact`) is served directly
+    /// A non-evicted row (`Live` or `Compact`) is served directly
     /// via `Row::characters()`, which already self-decompacts a `Compact`
     /// row transparently — no clone, no allocation.
     ///
@@ -455,8 +455,8 @@ mod tests {
         }
     }
 
-    /// Build a buffer with `n` numbered scrollback lines, all compacted
-    /// (Task 118), ready for `compress_scrollback_block`.
+    /// Build a buffer with `n` numbered scrollback lines, all compacted,
+    /// ready for `compress_scrollback_block`.
     fn buffer_with_compact_scrollback(n: usize) -> Buffer {
         let mut buf = Buffer::new(20, 3).with_scrollback_limit(200);
         push_numbered_lines(&mut buf, n);
@@ -748,7 +748,7 @@ mod tests {
         let _ = buf.rows[0].cells();
     }
 
-    /// Regression (Task 125.C10): the idle tick calls `compact_idle_scrollback`
+    /// Regression: the idle tick calls `compact_idle_scrollback`
     /// on every pass, and by then earlier passes have already compressed the
     /// oldest rows into blocks. Those rows are inert placeholders; compacting
     /// them tripped `Row::cells_ref`'s eviction `debug_assert` (and, in
@@ -799,7 +799,7 @@ mod tests {
         assert!(buf.rows.block_map().iter().all(Option::is_none));
     }
 
-    /// Regression (119.4 code review, CRITICAL-1): scrolling back into a
+    /// Regression: scrolling back into a
     /// compressed region via the *visible-window* flatten path
     /// (`visible_as_tchars_and_tags_extended` with a nonzero scroll offset)
     /// must decompress the evicted rows first, not trip `cells_ref`'s
@@ -832,7 +832,7 @@ mod tests {
         assert_eq!(tags_before, tags_after);
     }
 
-    /// Regression (119.4 code review, CRITICAL-2): the whole-buffer
+    /// Regression: the whole-buffer
     /// image-clearing sweeps in `images.rs` iterate every row (including
     /// deep scrollback) and read cells; they must skip evicted/compact rows
     /// rather than trip the eviction `debug_assert`. An evicted row provably
@@ -866,7 +866,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // compress_idle_scrollback (Task 119.5)
+    // compress_idle_scrollback
     // -------------------------------------------------------------------
 
     #[test]
@@ -879,7 +879,7 @@ mod tests {
         let (chars_before, tags_before, offsets_before, urls_before) =
             buf.scrollback_as_tchars_and_tags(0);
 
-        // Compact first (Task 118), then compress (Task 119.5) — mirrors
+        // Compact first, then compress — mirrors
         // the idle-tick sequencing in `freminal/src/gui/pty.rs`.
         let compacted = buf.compact_idle_scrollback(usize::MAX);
         assert!(compacted > 0, "test needs rows to compact");
@@ -1003,7 +1003,7 @@ mod tests {
         assert_eq!(buf.compress_idle_scrollback(usize::MAX), 0);
     }
 
-    // ── Live-row counts (Task 125.15) ───────────────────────────────────
+    // ── Live-row counts ───────────────────────────────────
 
     /// Evict `n` rows from the front and keep the cursor on its row, as every
     /// production caller of `evict_front_rows` does for itself.
@@ -1216,7 +1216,7 @@ mod tests {
     /// everything above it.
     ///
     /// A height grow no longer produces that state (it restores the blocks it
-    /// re-exposes, Task 125 review), so the window is widened directly here:
+    /// re-exposes), so the window is widened directly here:
     /// the guard in `erase_scrollback` is defence in depth for any path that
     /// leaves a compressed row inside the window, and must keep working.
     #[test]

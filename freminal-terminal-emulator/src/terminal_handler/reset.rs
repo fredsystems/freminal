@@ -7,9 +7,10 @@
 //!
 //! [`TerminalHandler::reset`] destructures the handler with no `..`, so a new
 //! field cannot be added without being classified here -- either reset per
-//! kind, or bound to `_` with the reason it survives.  The authoritative row
-//! list, with the xterm / kitty / Ghostty / `WezTerm` sources, is the "131 Reset
-//! table" in `Documents/PLAN_VERSION_130_0.md`.
+//! kind, or bound to `_` with the reason it survives.  RIS follows xterm's
+//! `ReallyReset` and kitty's `do_screen_reset`; DECSTR follows xterm's
+//! `CASE_DECSTR` and the VT510 Table 5-9 subset.  Where a terminal departs
+//! from the literal table (e.g. DECAWM), the binding says so.
 //!
 //! `TerminalState` owns a further slice of reset state (DECCKM, DECNKM, the
 //! parser) and resets it itself.

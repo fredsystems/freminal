@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Golden-image storage and comparison (Task 123, subtask 123.12).
+//! Golden-image storage and comparison.
 //!
 //! One concept: comparing a captured [`PixelFrame`] against a stored
 //! reference PNG, and regenerating that reference on demand.
@@ -50,7 +50,7 @@
 //! failure rather than as a failure in itself.
 //!
 //! Cross-machine and cross-Mesa-version equality is explicitly **not**
-//! claimed. 123.13 pins the Mesa version through the flake, so CI compares
+//! claimed. The flake pins the Mesa version, so CI compares
 //! like with like.
 //!
 //! [`PixelFrame::differing_pixels`] takes a bound so that a future

@@ -28,8 +28,8 @@
 //! - Cursor-only move does not bump any row's content epoch.
 //! - A content change survives snapshots the GUI never renders (`row_epochs`
 //!   is level-triggered against the consumer's own baseline, unlike the
-//!   sticky `content_changed` bool it replaced — see Task 124.12 and
-//!   `Documents/DESIGN_DECISIONS.md`, "Damage Model (Task 124)" / "A bool
+//!   sticky `content_changed` bool it replaced — see
+//!   `Documents/DESIGN_DECISIONS.md`, "Damage Model" / "A bool
 //!   cannot cross a many-producers-to-one-consumer boundary").
 
 use std::collections::HashSet;
@@ -660,7 +660,7 @@ fn extra_rows_change_invalidates_cache() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TASK 113 — SMOKE TEST (permanent regression coverage).
+// SMOKE TEST (permanent regression coverage).
 //
 // Bug E (amplifier): `handle_incoming_data` snaps the scroll offset to the live
 // bottom on new output (resets `requested_scroll_offset` to 0) but used to leave
@@ -669,13 +669,13 @@ fn extra_rows_change_invalidates_cache() {
 // a fold is in view, a stale `extra_flatten_rows` left the flatten window extended
 // above the live bottom against a buffer that no longer had a fold there.
 //
-//   cargo test -p freminal-terminal-emulator --test snapshot_build task_113_new_data_resets_extra_rows
+//   cargo test -p freminal-terminal-emulator --test snapshot_build new_data_resets_extra_rows
 //
-// See Documents/DESIGN_DECISIONS.md "Primary-Buffer Height Grow (Task 113)"
+// See Documents/DESIGN_DECISIONS.md "Primary-Buffer Height Grow"
 // for the full diagnosis.
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
-fn task_113_new_data_resets_extra_rows() {
+fn new_data_resets_extra_rows() {
     let (mut emu, _rx) = make_emulator();
     fill_scrollback(&mut emu, 150);
 
@@ -702,14 +702,14 @@ fn task_113_new_data_resets_extra_rows() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TASK 124.11 — `row_epochs` on `TerminalSnapshot`.
+// `row_epochs` on `TerminalSnapshot`.
 //
 // `row_epochs[r]` is the per-row content epoch, parallel to `row_offsets[r]`.
 // It changes exactly when the rendered content at window row `r` changed
 // since the previous flatten of the window, and — unlike `content_changed` —
 // it is level-triggered rather than edge-triggered: it survives the many
 // snapshots the GUI never renders. See `Documents/DESIGN_DECISIONS.md`,
-// "Damage Model (Task 124)" / "A bool cannot cross a many-producers-to-one-
+// "Damage Model" / "A bool cannot cross a many-producers-to-one-
 // consumer boundary" and "Per-row content epoch".
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -825,12 +825,11 @@ fn a_change_survives_the_snapshots_the_gui_never_renders() {
     // This test originally asserted BOTH halves of a contrast: that the
     // now-deleted `content_changed` bool reported the change on the very
     // next snapshot (B) but had gone stale three unrendered snapshots later
-    // (E) — the sticky-bool defect described in the plan's "The defect,
-    // stated once" table and the reason `row_epochs` exists at all. That
-    // half was verified empirically when this test was first written (Task
-    // 124.11) and is preserved in git history and
-    // `Documents/DESIGN_DECISIONS.md` ("Damage Model (Task 124)"); it is no longer restatable
-    // here because Task 124.12 deleted the field it exercised. What remains
+    // (E) — the sticky-bool defect described in `DESIGN_DECISIONS.md` and the reason `row_epochs` exists at all. That
+    // half was verified empirically when this test was first written and is
+    // preserved in git history and `Documents/DESIGN_DECISIONS.md` ("Damage
+    // Model"); it is no longer restatable here because the field it exercised
+    // was deleted. What remains
     // is the surviving half: `row_epochs` must NOT go stale under the exact
     // same conditions that made the bool go stale.
     let (mut emu, _rx) = make_emulator();
@@ -860,7 +859,7 @@ fn a_change_survives_the_snapshots_the_gui_never_renders() {
     );
 }
 
-// ─── progress (OSC 9;4, issue #507) ──────────────────────────────────────────
+// ─── progress (OSC 9;4) ──────────────────────────────────────────
 
 #[test]
 fn progress_is_inactive_by_default() {

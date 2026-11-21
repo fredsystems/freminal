@@ -118,7 +118,7 @@ jobs:
   # not denied). The MSRV contract is "it builds on `rust-version`"; linting
   # with the MSRV clippy as well forced code to satisfy two drifting lint sets
   # at once, and since no local gate runs that clippy, its failures only ever
-  # appeared here (issue #540). Keep the MSRV entry in sync with
+  # appeared here. Keep the MSRV entry in sync with
   # `rust-version` in the workspace `Cargo.toml`.
   check:
     name: Check ${{ matrix.os }} ${{ matrix.toolchain }}
@@ -156,7 +156,7 @@ jobs:
       # macOS-only items are not documented on this leg.
       - if: ${{ matrix.toolchain == 'stable' && matrix.os == 'ubuntu-latest' }}
         run: cargo xtask check-docs
-      # Clippy on `freminal` with only the `gl-pixel` feature (Task 147.26):
+      # Clippy on `freminal` with only the `gl-pixel` feature:
       # items kept alive by `--all-features` are dead in that combination.
       # One Linux leg is enough; the harness is Linux-only and the Windows
       # target is covered locally by `cargo xtask check-windows`.
@@ -187,7 +187,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: "1.100.0"
-      # `xtask test` runs the suite under cargo-nextest (issue #538).
+      # `xtask test` runs the suite under cargo-nextest.
       - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
         with:
           tool: cargo-nextest
@@ -215,7 +215,7 @@ jobs:
           tool: cargo-deny
       - run: cargo deny --locked check
 
-  # Deterministic fuzz gate (issue 553). `cargo xtask fuzz-replay` first runs
+  # Deterministic fuzz gate. `cargo xtask fuzz-replay` first runs
   # `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
   # `cargo test --lib` in the standalone `fuzz/` crate (it is excluded from the
   # root workspace, so none of the jobs above see it), then replays every

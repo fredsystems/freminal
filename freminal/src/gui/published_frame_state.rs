@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! The Group A (#122.4) published-frame-state type: the home for
+//! The published-frame-state type: the home for
 //! [`PerWindowState`](super::window::PerWindowState) fields that exist
 //! purely to cross the frame boundary. See [`PublishedFrameState`]'s doc
 //! for the full publish/read discipline.
@@ -13,8 +13,8 @@ use super::panes::PaneId;
 use super::window::ResizeOverlayState;
 
 /// The exact geometry and input-suppression state the out-of-frame
-/// immediate PTY mouse-report path (Task 124.3a,
-/// `terminal::pty_mouse_report`) needs for one pane.
+/// immediate PTY mouse-report path
+/// (`terminal::pty_mouse_report`) needs for one pane.
 ///
 /// Published once per frame from [`super::terminal::FreminalTerminalWidget::show`]
 /// via `PaneRenderCache::pointer_report_inputs`: computed once, in
@@ -25,9 +25,9 @@ use super::window::ResizeOverlayState;
 /// This is also the sole source of a pane's published terminal-rect
 /// origin: `terminal_rect.min` IS that origin, so
 /// [`PublishedFrameState::pane_terminal_origin`] derives from this type's
-/// `terminal_rect` rather than a second, parallel map (the original
-/// subtask 122.15 design, removed by Task 124.3a's review once this type
-/// existed and made the second copy redundant).
+/// `terminal_rect` rather than a second, parallel map (an earlier
+/// design kept a second copy, which became redundant once this type
+/// existed).
 ///
 /// Unknown/unpublished (`PublishedFrameState::pane_pointer_report_inputs`
 /// returns `None`) means "no immediate report can be sent for this pane" —
@@ -65,7 +65,7 @@ pub(super) struct PanePointerReportInputs {
     /// `scrollbar_hit_rect` helper), egui logical points, `Some` only when
     /// the thumb actually rendered this frame (`ScrollbarOutcome::hit_rect`
     /// — see that field's doc for why a not-rendered scrollbar publishes
-    /// `None` rather than a rect nothing can be hovering). Task 124.3b: the
+    /// `None` rather than a rect nothing can be hovering). The
     /// out-of-frame pointer-motion predicate compares this exact rect
     /// across the previous and current pointer position to decide whether
     /// motion crossed the scrollbar's hover boundary, replacing the old
@@ -108,14 +108,13 @@ impl Default for PanePointerReportInputs {
 /// State written during one [`App::update`](freminal_windowing::App::update)
 /// call and read only from **outside** any frame.
 ///
-/// This is the Group A (#122.4) home for what were seven separate
+/// This is the home for what were seven separate
 /// [`PerWindowState`](super::window::PerWindowState) fields — the cached
 /// menu/tab-bar, split-border and toast-pill rects, the cached central
-/// content rect and gutter inset, the staged §3.3 chrome signals, and the
+/// content rect and gutter inset, the staged chrome signals, and the
 /// resize-overlay HUD state. They had no collective name or enforced
 /// invariant before this type; see `Documents/DESIGN_DECISIONS.md`,
-/// "Orchestration Extraction (Task 122)" for the rationale (subtask 122.1's
-/// audit was the line-by-line inventory this type was built from). It is a
+/// "Orchestration Extraction" for the rationale. It is a
 /// **wrapper, not a redesign**: every field keeps its pre-existing type,
 /// including `chrome_head_rects`'s `Option<Vec<egui::Rect>>` — that
 /// `None`/`Some(vec![])` distinction is semantic (no frame has rendered
@@ -136,9 +135,8 @@ impl Default for PanePointerReportInputs {
 /// `update()`, running between frames rather than inside one.
 ///
 /// Anchors in this doc comment are deliberately **function and branch names,
-/// not line numbers**. Task 122 rewrites large parts of `app_impl.rs` across
-/// several subtasks, and every line number cited here had already drifted by
-/// the time 122.4 landed. Names survive that; numbers do not.
+/// not line numbers**. `app_impl.rs` changes often enough that every line number cited here
+/// had already drifted. Names survive that; numbers do not.
 ///
 /// A value published this way is therefore **one frame stale by
 /// construction, even in the best case**: a read may observe the exact same
@@ -200,17 +198,17 @@ pub(super) struct PublishedFrameState {
     /// The most recently laid-out toast pill hit-rects, appended whenever
     /// the app-level toast-rendering block actually runs `ToastStack::show`.
     chrome_toast_rects: Vec<egui::Rect>,
-    /// The individual #436 §3.3 signals computed during the most recent
+    /// The individual chrome-damage signals computed during the most recent
     /// `update()`, staged here because the final chrome-damage decision
     /// also needs a post-toast-render sample only available after
     /// `central_body` returns.
     pending_chrome_signals: ChromeSignals,
     /// Active resize-overlay HUD state, or `None` when no resize is in
-    /// progress / the overlay has timed out (issue #433).
+    /// progress / the overlay has timed out.
     resize_overlay: Option<ResizeOverlayState>,
     /// Each live pane's [`PanePointerReportInputs`] as of the most recent
     /// frame — the geometry and suppressor snapshot the out-of-frame
-    /// immediate PTY mouse-report path (Task 124.3a) reads, and also the
+    /// immediate PTY mouse-report path reads, and also the
     /// sole source of [`Self::pane_terminal_origin`]'s answer (see that
     /// method's doc). Same rebuilt-every-frame, clear-before-republish
     /// discipline as `chrome_border_rects`: cleared once before the
@@ -285,12 +283,12 @@ impl PublishedFrameState {
         self.chrome_toast_rects.clear();
     }
 
-    /// The staged #436 §3.3 chrome signals from the most recent frame.
+    /// The staged chrome-damage chrome signals from the most recent frame.
     pub(super) const fn pending_chrome_signals(&self) -> ChromeSignals {
         self.pending_chrome_signals
     }
 
-    /// Publish this frame's staged #436 §3.3 chrome signals.
+    /// Publish this frame's staged chrome-damage chrome signals.
     pub(super) const fn publish_pending_chrome_signals(&mut self, signals: ChromeSignals) {
         self.pending_chrome_signals = signals;
     }
@@ -316,9 +314,9 @@ impl PublishedFrameState {
     /// one (not yet rendered, or closed and never replaced this slot).
     ///
     /// Derived from [`Self::pane_pointer_report_inputs`]'s
-    /// `terminal_rect.min` rather than a second, parallel map: subtask
-    /// 122.15 originally built a dedicated `pane_terminal_origins` map for
-    /// this, but Task 124.3a's own `PanePointerReportInputs` publishes the
+    /// `terminal_rect.min` rather than a second, parallel map: a dedicated
+    /// `pane_terminal_origins` map was tried first, but
+    /// `PanePointerReportInputs` publishes the
     /// identical `terminal_rect` (whose `.min` corner IS this origin) every
     /// frame for the same pane, so the second map had no independent
     /// reader and only risked drifting from it. This getter now reads that
@@ -326,9 +324,8 @@ impl PublishedFrameState {
     /// `geometry_interop::point_from_egui` — the crate's sanctioned
     /// egui-to-toolkit-neutral crossing point.
     ///
-    /// Test-only: Task 124.3b landed its cell-granular suppression check by
-    /// reading [`Self::pane_pointer_report_inputs`] directly, so this getter
-    /// never gained a production caller. It is kept, compiled for tests
+    /// Test-only: the cell-granular suppression check reads
+    /// [`Self::pane_pointer_report_inputs`] directly, so this getter never gained a production caller. It is kept, compiled for tests
     /// only, because the round-trip tests below and in `terminal/widget.rs`
     /// use it to pin that the published `terminal_rect.min` is the pane's
     /// terminal origin. If a production reader ever needs the origin alone,
@@ -346,7 +343,7 @@ impl PublishedFrameState {
     /// The [`PanePointerReportInputs`] published for `pane_id` on the most
     /// recent frame that rendered it, or `None` if that pane has never
     /// published one (not yet rendered, or closed and never replaced this
-    /// slot) — the "no immediate report" conservative default (Task 124.3a).
+    /// slot) — the "no immediate report" conservative default.
     pub(super) fn pane_pointer_report_inputs(
         &self,
         pane_id: PaneId,
@@ -355,7 +352,7 @@ impl PublishedFrameState {
     }
 
     /// Whether ANY live pane's most-recently-published `scrollbar_drag`
-    /// suppressor is active (Task 124.3b).
+    /// suppressor is active.
     ///
     /// The out-of-frame pointer-motion repaint predicate cannot rely on
     /// only the currently-resolved pane's own flag: `handle_scrollbar`
@@ -578,7 +575,7 @@ mod tests {
 
     /// Pin 4d: pre-clearing `chrome_toast_rects` with no subsequent write
     /// (the toast stack was empty this frame) leaves it empty rather than
-    /// stale — this is the exact bug #122.4's doc references (a stale
+    /// stale — this is the exact bug the type's doc references (a stale
     /// non-empty stack permanently forcing chrome-interactive over a
     /// now-vacated region).
     #[test]
@@ -626,7 +623,7 @@ mod tests {
         assert_eq!(state.pane_terminal_origin(pane), None);
     }
 
-    // ── Task 124.3a: `PanePointerReportInputs` / its publish discipline ──
+    // ── `PanePointerReportInputs` / its publish discipline ──
 
     /// No suppressor active — the common case in these tests.
     fn report_inputs_clean() -> PanePointerReportInputs {
@@ -667,7 +664,7 @@ mod tests {
         );
     }
 
-    // ── Task 124.3b: `scrollbar_hit_rect` ────────────────────────────────
+    // ── `scrollbar_hit_rect` ────────────────────────────────
 
     #[test]
     fn scrollbar_hit_rect_defaults_to_none() {
@@ -696,8 +693,7 @@ mod tests {
     }
 
     // ── `pane_terminal_origin`, derived from `pane_pointer_report_inputs`
-    // (subtask 122.15, re-derived by Task 124.3a's review to remove the
-    // former parallel `pane_terminal_origins` map) ──────────────────────
+    // (formerly a parallel `pane_terminal_origins` map) ──────────────────────
 
     /// Publishing a pane's `PanePointerReportInputs` makes
     /// `pane_terminal_origin` return exactly `terminal_rect.min` (converted
@@ -820,7 +816,7 @@ mod tests {
         );
     }
 
-    // ── Task 124.3b: `any_pane_scrollbar_dragging` ───────────────────────
+    // ── `any_pane_scrollbar_dragging` ───────────────────────
 
     #[test]
     fn any_pane_scrollbar_dragging_false_when_nothing_published() {

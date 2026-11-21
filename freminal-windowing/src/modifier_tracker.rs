@@ -9,13 +9,13 @@
 //!
 //! `freminal-windowing` intercepts two narrow classes of keyboard event
 //! *before* handing them to `egui-winit` — the Wayland paste work-around and
-//! the Task 114 blocked-key routing (both in [`crate::event_loop`]). Both need
+//! the blocked-key routing (both in [`crate::event_loop`]). Both need
 //! to know which modifiers are held **at the moment the intercepted key
 //! arrives**.
 //!
 //! Up to egui 0.35.0 that state was readable from `egui-winit`'s
 //! `State::egui_input().modifiers`. egui 0.36.0 removed `RawInput::modifiers`
-//! (upstream #8336, "Remove `Modifiers` from `RawInput` and make it a
+//! (egui#8336, "Remove `Modifiers` from `RawInput` and make it a
 //! `egui::Event`") and moved the running state into a **private** field on
 //! `egui_winit::State`, with no accessor. The remaining egui-side reader,
 //! `Context::input(|i| i.modifiers)`, is not a substitute: it only advances
@@ -230,7 +230,7 @@ mod tests {
     /// `WindowEvent::KeyboardInput`, and `winit::KeyEvent` has a private
     /// `platform_specific` field so it cannot be constructed outside winit.
     /// Driving `event_loop::window_event` instead needs an `ActiveEventLoop`,
-    /// a real window and a GL context — the harness gap tracked in issue #440.
+    /// a real window and a GL context — the gap in the GL test harness.
     /// So the guarantee rests on the module doc's argument (modifier state
     /// arrives as its own event, which no interception path claims) plus this
     /// stickiness property, not on an end-to-end test.

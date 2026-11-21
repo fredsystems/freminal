@@ -3,10 +3,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! LZ4-compressed blocks of [`CompactRow`]s (Task 119 — Scrollback
-//! Compression).
+//! LZ4-compressed blocks of [`CompactRow`]s (scrollback compression).
 //!
-//! [`CompactRow`] (Task 118) is the only thing safe to byte-compress —
+//! [`CompactRow`] is the only thing safe to byte-compress —
 //! a raw [`crate::cell::Cell`] holds `Arc`/`Box` pointers that cannot
 //! survive a byte-for-byte round trip. [`CompressedBlock`] serializes a run
 //! of `CompactRow`s (via [`CompactRow::to_bytes`]/[`CompactRow::from_bytes`])
@@ -18,7 +17,7 @@
 //!
 //! This module is a pure data transform with no knowledge of `Buffer`, the
 //! LRU cache, or the idle-driven compression tick — those are wired in by
-//! later Task 119 subtasks (119.4–119.6). A `CompressedBlock` round-trips
+//! `Buffer`. A `CompressedBlock` round-trips
 //! losslessly to the exact `CompactRow`s it was built from (see the
 //! module's test suite), and thence to `Row`/`Cell` via
 //! [`CompactRow::to_row`].
@@ -33,7 +32,7 @@ use crate::compact_row::CompactRow;
 /// rows via [`CompressedBlock::decompress`] (allocates a fresh scratch
 /// buffer) or [`CompressedBlock::decompress_into`] (reuses a
 /// caller-provided scratch buffer — the allocation-churn-avoiding path a
-/// later subtask wires into the read-on-scroll-into-view path).
+/// `Buffer` uses on the read-on-scroll-into-view path).
 #[derive(Debug, Clone)]
 pub struct CompressedBlock {
     /// The LZ4 block-format compressed payload.
@@ -60,8 +59,8 @@ impl CompressedBlock {
     /// then LZ4-compresses that buffer (`lz4_flex::block::compress`).
     #[must_use]
     pub fn from_rows(rows: &[CompactRow]) -> Self {
-        // A block spans a bounded number of logical scrollback rows (Task
-        // 119 design: ~128–256, tuned in 119.5) — nowhere near `u32::MAX`.
+        // A block spans a bounded number of logical scrollback rows
+        // (design target: ~128–256) — nowhere near `u32::MAX`.
         // Degrade to `u32::MAX` rather than panicking if it somehow were
         // not, mirroring the `unwrap_or` convention already established in
         // `compact_row.rs`.
@@ -101,7 +100,7 @@ impl CompressedBlock {
     /// Like [`CompressedBlock::decompress`], but decompresses into
     /// `scratch` (cleared and resized as needed) instead of allocating a
     /// fresh buffer on every call. This is the allocation-churn-avoiding
-    /// path a later subtask wires into `Buffer`'s decompress-on-scroll
+    /// path `Buffer` uses for its decompress-on-scroll
     /// path.
     ///
     /// Returns `None` if the compressed payload is malformed/corrupt —
@@ -162,7 +161,7 @@ impl CompressedBlock {
     /// Compressed size in bytes — the actual heap allocation size
     /// (`len()`, not `capacity()`) of the LZ4-compressed payload. Useful
     /// for reporting the ratio achieved over the pre-compression
-    /// (Task-118 flat compact) size.
+    /// (flat compact) size.
     #[must_use]
     pub const fn compressed_bytes(&self) -> usize {
         self.compressed.len()
@@ -335,7 +334,7 @@ mod tests {
     #[test]
     fn round_trip_block_boundary_many_rows() {
         // A representative block-sized run (256 logical scrollback rows,
-        // per the Task 119 design decision of ~128–256 rows/block),
+        // per the design target of ~128–256 rows/block),
         // asserting every row survives the round trip.
         let rows: Vec<Row> = (0..256)
             .map(|i| ascii_row(80, &format!("scrollback line number {i}")))
@@ -347,7 +346,7 @@ mod tests {
     fn round_trip_high_entropy_block() {
         // Pseudo-random-looking content (varied colors, varied text, no
         // shared structure) — the pessimistic "high-entropy colored"
-        // bracket from the Task 119 feasibility spike. Still must
+        // bracket from the feasibility spike. Still must
         // round-trip exactly even though the compression ratio is worse.
         let mut rows = Vec::new();
         let mut seed: u32 = 0x1234_5678;
@@ -398,8 +397,8 @@ mod tests {
     fn compressed_bytes_smaller_than_sum_of_compact_row_heap_bytes_for_compressible_block() {
         // A representative compressible block: many rows sharing the same
         // uniform (non-default) formatting and repetitive text — the
-        // "shell session (typical)" bracket from the Task 119 feasibility
-        // spike, where compression on top of the Task-118 flat form is
+        // "shell session (typical)" bracket from the feasibility
+        // spike, where compression on top of the flat compact form is
         // expected to help substantially.
         let mut tag = freminal_common::buffer_states::format_tag::FormatTag::default();
         tag.colors.set_color(TerminalColor::Green);

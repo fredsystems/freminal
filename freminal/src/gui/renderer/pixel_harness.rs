@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Pixel capture for the Phase 2 harness (Task 123, subtask 123.12).
+//! Pixel capture for the Phase 2 harness.
 //!
 //! One concept: rendering a [`SyntheticFrame`] into a real GL context and
 //! getting the resulting pixels back. This is the half of the harness that
@@ -206,10 +206,10 @@ pub fn capture(frame: &SyntheticFrame) -> Result<PixelFrame, PixelHarnessError> 
 /// Render `frame` once, then `cursor_only_frames` further **cursor-only**
 /// frames on the same renderer, and capture the last one.
 ///
-/// Added by subtask 124.7. [`capture`] draws exactly one frame into a fresh
+/// [`capture`] draws exactly one frame into a fresh
 /// renderer, which cannot see any defect that only appears once a GPU buffer
-/// is *reused* across frames — and buffer reuse is precisely what 124.7
-/// introduced by letting a small decoration payload skip the orphan when the
+/// is *reused* across frames — and buffer reuse is precisely what the
+/// decoration-buffer gate introduces by letting a small decoration payload skip the orphan when the
 /// slot's existing allocation is already large enough. The first upload into
 /// each `deco_vbo` slot still orphans (it has to, to size the storage), so a
 /// single-frame capture takes only the unchanged path.
@@ -239,7 +239,7 @@ pub fn capture_after_cursor_only_frames(
 /// Render `frame` once, clear the framebuffer to transparent black, draw one
 /// **cursor-only** frame, and capture the result.
 ///
-/// Added for 132.11. [`capture_after_cursor_only_frames`] draws on a
+/// [`capture_after_cursor_only_frames`] draws on a
 /// framebuffer that already holds the full frame's pixels, so it cannot tell
 /// whether the cursor-only arm paints a pane's base fill itself or merely
 /// leaves the previous frame's fill in place. The clear in between removes
@@ -279,7 +279,7 @@ pub fn capture_cursor_only_over_cleared_framebuffer(
 /// bottom-left origin, the same convention as `glScissor` and
 /// [`freminal_windowing::DamageRect`].
 ///
-/// Added for 124.23: proving the fix is exactly comparing the returned
+/// Proving a scissored draw is contained means comparing the returned
 /// `(before, after)` outside `scissor` -- any pixel that differs there is a
 /// pixel the scissored second draw was not supposed to be able to touch.
 ///
@@ -317,10 +317,10 @@ pub fn capture_scissored_overdraw(
 /// full viewport, then capture the result.
 ///
 /// Used only to prove the [`freminal_windowing::PresentRegion::Full`]
-/// no-op property (124.23): a scissor box covering the entire viewport
+/// no-op property: a scissor box covering the entire viewport
 /// clips nothing, so this must be pixel-identical to [`capture`], which
 /// never touches `SCISSOR_TEST` at all -- the exact case the full-draw
-/// paint arm takes today, before and after the 124.23 fix, in the
+/// paint arm takes today, in the
 /// single-pane case.
 ///
 /// # Errors
@@ -349,7 +349,7 @@ pub fn capture_with_full_viewport_scissor(
 /// Draw `left` and `right` as two panes side by side into ONE framebuffer
 /// and capture the whole thing.
 ///
-/// Added for 127.8. This mirrors how the application draws a split tab:
+/// This mirrors how the application draws a split tab:
 /// every pane renders into the shared window framebuffer through its own
 /// GL viewport, set by the caller before the pane's draw (in production
 /// the egui paint callback; here this function). The renderer itself
@@ -469,7 +469,7 @@ mod tests {
     ///    `InvalidSize` is a genuine failure, and treating it as "skip"
     ///    meant a broken renderer would report success. Those now panic.
     /// 2. **Where a context is *promised*, a missing one is a hard
-    ///    failure.** 123.13's job guarantees Mesa and Xvfb, so a missing
+    ///    failure.** The `gl-pixel` job guarantees Mesa and Xvfb, so a missing
     ///    context there is a broken runner and must fail loudly rather than
     ///    produce a false green.
     ///
@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(frame.pixel(2, 2), None);
     }
 
-    /// The stability check 123.12 requires **before** golden comparison is
+    /// The stability check required **before** golden comparison is
     /// trusted at all: the same frame captured twice, on the same machine,
     /// must be bit-identical.
     ///
@@ -650,10 +650,10 @@ mod tests {
         }
 
         // A pixel golden is only meaningful relative to the rasteriser that
-        // produced it -- this module's own header says so. Before 123.C2 the
+        // produced it -- this module's own header says so. Previously the
         // `default` dev shell exported `LIBGL_ALWAYS_SOFTWARE=1`, so every
         // local run was llvmpipe and matched the recorded golden by
-        // accident. 123.C2 correctly confined that to the `gl-pixel` shell,
+        // accident. That export was later confined to the `gl-pixel` shell,
         // which left this test comparing an llvmpipe golden against whatever
         // GPU the developer has -- 9648/80000 pixels differ on a Radeon
         // 7900 XTX. Since the pre-commit hook runs `cargo test
@@ -755,7 +755,7 @@ mod wasted_work_tests {
     /// no-change frame pays produce, provably, not one different pixel.
     ///
     /// That is the empirical case for a third `FrameDamage` state meaning
-    /// "nothing changed, present nothing" — see Task 124.2. Without a
+    /// "nothing changed, present nothing". Without a
     /// pixel harness this could only be argued from the code; with one it
     /// is measured.
     #[test]
@@ -777,7 +777,7 @@ mod wasted_work_tests {
 
     /// The default background is never drawn, and the harness can see it.
     ///
-    /// Task 34 established that the renderer deliberately skips cells with
+    /// The renderer deliberately skips cells with
     /// `DefaultBackground`, leaving those pixels untouched so the window's
     /// background (and any transparency) shows through. That has been an
     /// architectural claim with no direct verification.
@@ -786,8 +786,8 @@ mod wasted_work_tests {
     /// (70%) are left fully transparent**, and only 1,762 are fully opaque.
     /// The skip is real and is doing most of the work of the frame.
     ///
-    /// Worth pinning because it constrains Task 124: any change to damage
-    /// tracking or partial presents has to preserve this. A "cheaper" path
+    /// Worth pinning because any change to damage tracking or partial presents
+    /// has to preserve this. A "cheaper" path
     /// that started clearing to an opaque colour would silently break
     /// background transparency, and no call-count test would notice.
     #[test]
@@ -808,14 +808,14 @@ mod wasted_work_tests {
         );
     }
 
-    /// Subtask 124.7's correctness guard: reusing a decoration-buffer
+    /// Correctness guard: reusing a decoration-buffer
     /// allocation instead of orphaning it must not change a single pixel.
     ///
-    /// 124.7 lets `upload_deco_verts` skip the orphan when the payload is
+    /// `upload_deco_verts` skips the orphan when the payload is
     /// small and the slot is already big enough. The failure mode of getting
-    /// that wrong is **silent visual corruption** — the issue #432 class —
-    /// and no call-count test can see it, which is exactly why this subtask
-    /// waited for Phase 2.
+    /// that wrong is **silent visual corruption** — the class of bug
+    /// that no call-count test can see, which is exactly why it needs a pixel
+    /// harness.
     ///
     /// The comparison is a cursor-only frame reached by reuse against the
     /// same state reached without it. `capture` draws one frame into a fresh
@@ -836,19 +836,19 @@ mod wasted_work_tests {
             orphaned.differing_pixels(&reused, 0),
             Some(0),
             "skipping the decoration buffer's orphan must be invisible; any \
-             difference here is the silent-corruption class 124.7 was \
-             deliberately held back for a pixel harness to rule out"
+             difference here is the silent-corruption class this pixel \
+             test exists to rule out"
         );
     }
 }
 
-/// Subtask 124.23's own tests: the full-draw paint arm now scissors to the
+/// Tests for the full-draw paint arm, which scissors to the
 /// windowing-published `PresentRegion`, exactly as the cursor-only arm
 /// already did. See `widget.rs`'s `draw_scissored_to_present_region` for
 /// the production change.
 ///
-/// Note on what this module deliberately does NOT attempt: the plan's
-/// third, best-effort test -- reproducing a pane's semi-transparent quads
+/// Note on what this module deliberately does NOT attempt: a
+/// best-effort test -- reproducing a pane's semi-transparent quads
 /// blending against stale (rather than cleared) pixels at
 /// `background_opacity < 1.0` -- is not expressible here. This renderer
 /// (`gpu.rs`'s `draw_with_verts` / `draw_with_cursor_only_update`) issues
@@ -857,17 +857,16 @@ mod wasted_work_tests {
 /// what `HeadlessRenderer` drives. There is consequently no "clear
 /// happened" vs "clear was skipped" distinction this harness can even
 /// pose, let alone assert on. Confirming that would require instrumenting
-/// `freminal-windowing`, which is outside this subtask's scope. Separately,
+/// `freminal-windowing`, which is out of scope here. Separately,
 /// `HeadlessRenderer::draw_frame` (`headless.rs`) hardcodes `bg_opacity` to
 /// `1.0` and exposes no way to vary it from `SyntheticFrame` -- the knob
-/// the reproduction needs also lives in a file outside this subtask's
-/// scope (`freminal/src/gui/terminal/widget.rs` and this file only).
+/// the reproduction needs is therefore not available either.
 #[cfg(test)]
 mod present_region_scissor_tests {
     use super::super::headless::{CursorPresence, SyntheticFrame};
     use super::{capture, capture_scissored_overdraw, capture_with_full_viewport_scissor};
 
-    /// The core property 124.23 delivers: a scissored draw writes no
+    /// The core property: a scissored draw writes no
     /// pixels outside the scissor rect, even when the geometry it is asked
     /// to draw would otherwise have changed pixels there.
     ///
@@ -944,7 +943,7 @@ mod present_region_scissor_tests {
         }
     }
 
-    /// Pins the scissor **convention** the 124.23 helper relies on: a box
+    /// Pins the scissor **convention** the full-draw scissor helper relies on: a box
     /// covering the entire viewport, expressed in physical framebuffer
     /// pixels with a bottom-left origin, must clip nothing.
     ///
@@ -983,10 +982,9 @@ mod present_region_scissor_tests {
     }
 }
 
-/// Subtask 124.14's own pixel test: the plan's mandated deliverable that a
-/// `Region` frame and a `Full` frame of the same state produce identical
-/// pixels ("124.14"'s "correctness argument that must be verified, not
-/// assumed").
+/// Pixel test for the `Region` damage correctness argument: a `Region` frame
+/// and a `Full` frame of the same state must produce identical pixels. The
+/// argument has to be verified, not assumed.
 ///
 /// Read the module doc above `present_region_scissor_tests` before reading
 /// this: this harness drives [`HeadlessRenderer`] directly and issues no
@@ -996,7 +994,7 @@ mod present_region_scissor_tests {
 /// renderer that reads that type at all -- it lives in `widget.rs` and
 /// `frame_damage.rs`, entirely above this harness).
 ///
-/// What IS expressible, and what the property in the plan actually reduces
+/// What IS expressible, and what the property actually reduces
 /// to at this layer: [`capture_scissored_overdraw`] already models
 /// "render once (the `Full` frame), then render again on the SAME,
 /// never-cleared framebuffer restricted to a scissor rect (the `Region`
@@ -1032,7 +1030,7 @@ mod region_present_matches_full_present_tests {
     /// undiscovered blending or dithering path -- a `Region` frame would
     /// be observably different from a `Full` one even though nothing in
     /// the underlying state changed, which is exactly the silent
-    /// corruption class 124.14's correctness argument exists to rule out.
+    /// corruption class the `Region` correctness argument exists to rule out.
     ///
     /// The rect is deliberately a genuine interior sub-region (not the
     /// full viewport, which `a_full_viewport_scissor_box_clips_nothing`
@@ -1061,7 +1059,7 @@ mod region_present_matches_full_present_tests {
         // `first` and `second` are the SAME frame: this stands in for "the
         // state did not change between the Full rebuild and the Region
         // rebuild", which is precisely the precondition that makes a
-        // Region frame safe to bound in production (124.14a's correctness
+        // Region frame safe to bound in production (the correctness
         // argument: outside the rects, the previous frame's pixels remain
         // valid because nothing there changed).
         let (full, region_present) = capture_scissored_overdraw(&frame, &frame, region)
@@ -1074,12 +1072,12 @@ mod region_present_matches_full_present_tests {
              pixel-identical to a Full frame of the same state, at every \
              pixel -- any difference here means bounding the presented \
              damage silently changed what got drawn, which is the exact \
-             hazard 124.14's correctness argument exists to rule out"
+             hazard the `Region` correctness argument exists to rule out"
         );
     }
 }
 
-/// Task 127.8: the focused pane's cursor is solid, a non-focused pane's is
+/// The focused pane's cursor is solid, a non-focused pane's is
 /// a hollow block, and both appear in one framebuffer exactly as a split
 /// tab draws them.
 ///
@@ -1306,7 +1304,7 @@ mod unfocused_cursor_tests {
     }
 }
 
-/// Task 132.11: the OSC 11 pane base fill, pixel-verified.
+/// The OSC 11 pane base fill, pixel-verified.
 ///
 /// A call-count test (`headless_workloads::base_fill`) proves the fill is
 /// *issued*; only a readback proves it lands on the right pixels, over the
@@ -1582,7 +1580,7 @@ mod base_fill_pixel_tests {
     }
 }
 
-/// Task 147.27: DECSCNM inverts the whole pane, including the sub-cell
+/// DECSCNM inverts the whole pane, including the sub-cell
 /// remainder strip, and the cell-background skip rule is "skip only when the
 /// effective background equals what lies beneath".
 ///
@@ -1753,7 +1751,7 @@ mod decscnm_pixel_tests {
     }
 }
 
-/// Task 147 review B9 and PR review R16: with `background_opacity < 1` a cell
+/// With `background_opacity < 1` a cell
 /// background must blend with the window behind the pane exactly once.
 ///
 /// * Normal video draws no base fill, so explicit backgrounds are the colour at
@@ -1761,11 +1759,11 @@ mod decscnm_pixel_tests {
 /// * DECSCNM below full opacity draws no foreground base fill either (it would
 ///   sit under every translucent cell and composite with it twice): the cells
 ///   draw their own backgrounds over the panel, and the sub-cell remainder is
-///   not reversed. At full opacity the fill is kept (Task 147.27).
+///   not reversed. At full opacity the fill is kept.
 /// * **Characterisation:** an OSC 11 override still draws its base fill, so an
-///   explicit background over it is composited twice. That is routed to Task 136
-///   (it needs blend/stencil control in `gl_facade` or a per-cell base fill);
-///   its test pins today's values so a fix cannot land silently.
+///   explicit background over it is composited twice. That is a known limitation
+///   (fixing it needs blend/stencil control in `gl_facade` or a per-cell base
+///   fill); its test pins today's values so a fix cannot land silently.
 #[cfg(test)]
 mod translucent_base_fill_pixel_tests {
     use super::super::headless::{CursorPresence, EXPLICIT_BACKGROUND, SyntheticFrame};
@@ -1945,7 +1943,7 @@ mod translucent_base_fill_pixel_tests {
     }
 
     /// At full opacity DECSCNM keeps its foreground base fill, the remainder
-    /// included (Task 147.27).
+    /// included.
     #[test]
     fn an_opaque_decscnm_pane_keeps_the_base_fill_in_the_remainder() {
         let f = SyntheticFrame::new(COLS, ROWS)

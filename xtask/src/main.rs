@@ -482,7 +482,7 @@ fn check() -> Result<()> {
 /// `--all-features` enables `gpu-profiling` and `frame-profiling`, which use
 /// GL facade items that `gl-pixel` alone does not, so a `dead_code` warning
 /// confined to the `gl-pixel`-only combination is invisible to every
-/// `--all-features` gate (Task 147.26). The `gl-pixel` CI job only runs
+/// `--all-features` gate. The `gl-pixel` CI job only runs
 /// tests, so this is where that combination is linted. Scoped to the one
 /// package that defines the feature: a `--workspace` run would unify the
 /// features of the other members back in.
@@ -509,8 +509,8 @@ fn gl_pixel_only_clippy_args(target: Option<&'static str>) -> Vec<&'static str> 
 /// clippy versions under `-D warnings` forces code to satisfy the
 /// intersection of two drifting lint sets (which sometimes conflict, e.g.
 /// MSRV `must_use_candidate` vs current `double_must_use`), and no local gate
-/// runs the MSRV clippy, so those failures only ever surfaced in CI
-/// (issue #540). Clippy with `-D warnings` runs on stable only (`check`).
+/// runs the MSRV clippy, so those failures only ever surfaced in CI.
+/// Clippy with `-D warnings` runs on stable only (`check`).
 ///
 /// The caller selects the toolchain (CI: `dtolnay/rust-toolchain` pinned to
 /// the `rust-version` in the workspace `Cargo.toml`).
@@ -573,7 +573,7 @@ fn check_windows() -> Result<()> {
     ]);
     run_windows_cargo(args)?;
     // The `gl-pixel`-only combination hides items that `--all-features`
-    // keeps alive, on this target as on Linux (Task 147.C1).
+    // keeps alive, on this target as on Linux.
     run_windows_cargo(gl_pixel_only_clippy_args(Some(TARGET)))
 }
 
@@ -773,7 +773,7 @@ fn test_docs() -> Result<()> {
 /// executes each test in its own process scheduled across every core and
 /// every test binary at once. `cargo test` runs the binaries one after
 /// another, so its wall time is the sum of the binaries; nextest's is roughly
-/// the slowest single test (~22s -> ~5s here, issue #538). nextest cannot run
+/// the slowest single test (~22s -> ~5s here). nextest cannot run
 /// doctests, so [`test_docs`] still uses `cargo test --doc`.
 ///
 /// Uses explicit target flags instead of `--all-targets` to exclude

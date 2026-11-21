@@ -55,7 +55,7 @@ impl From<usize> for CursorVisualStyle {
 
 impl CursorVisualStyle {
     /// Build the initial/default cursor style from the user's `[cursor]`
-    /// config (issue #406: `cursor.shape`/`cursor.blink` were previously
+    /// config (`cursor.shape`/`cursor.blink` were previously
     /// only read by the Settings UI form itself, never applied to the
     /// terminal's actual `CursorVisualStyle`).
     ///

@@ -291,7 +291,7 @@ pub fn build_visuals(
     // and selected elements use `selection.stroke` (OnAccent, set above).
     visuals.override_text_color = None;
 
-    // Give every clickable chrome widget a pointing-hand cursor (issue #493).
+    // Give every clickable chrome widget a pointing-hand cursor.
     //
     // egui leaves this `None` by default, on the grounds that native toolkits
     // do not do it. freminal opts in: its chrome is flat and largely
@@ -715,7 +715,7 @@ mod tests {
         );
     }
 
-    // ── Role-sourced colors (112.3e) ─────────────────────────────────────────
+    // ── Role-sourced colors ─────────────────────────────────────────
 
     #[test]
     fn window_stroke_uses_resolved_border_role() {
@@ -785,7 +785,7 @@ mod tests {
         );
     }
 
-    // ── Padding (112.3e) ─────────────────────────────────────────────────────
+    // ── Padding ─────────────────────────────────────────────────────
 
     #[test]
     fn apply_chrome_spacing_bumps_padding() {

@@ -126,14 +126,14 @@ pub struct RowCacheEntry {
     /// The row's DECDWL/DECDHL [`LineWidth`] as of the flatten that built
     /// this entry.
     ///
-    /// Task 124.10. Unlike every other field here this one contributes
+    /// Unlike every other field here this one contributes
     /// *nothing* to the merged `chars`/`tags` output — it is captured purely
     /// so the per-row content epoch comparison at the merge output can see a
     /// double-width/double-height change, which alters what the row renders
     /// as without altering a single character or tag. Without it the epoch
     /// would under-report an `ESC # 6`, and the GUI would need to keep a
     /// separate whole-pane `visible_line_widths` pointer test to catch it
-    /// (which is exactly the second `Arc::ptr_eq` term Task 124.12 deletes).
+    /// (a second `Arc::ptr_eq` comparison on the whole-pane line widths).
     ///
     /// `set_cursor_line_width` marks the row dirty, so this is always
     /// refreshed in the same pass that rebuilds the rest of the entry.
@@ -142,7 +142,7 @@ pub struct RowCacheEntry {
     /// [`crate::cell::Cell::image_placement`], as of the flatten that built
     /// this entry.
     ///
-    /// Task 124.C5. Like `line_width` above, this contributes *nothing* to
+    /// Like `line_width` above, this contributes *nothing* to
     /// the merged `chars`/`tags` output — [`Cell::image_cell`] stamps a
     /// cell's *value* as `TChar::Space` under whatever tag is passed, so an
     /// image placed over cells that already hold literal spaces under an
@@ -151,8 +151,8 @@ pub struct RowCacheEntry {
     /// can see an image-placement change, which alters what the row renders
     /// as without altering a single character or tag. Without it the epoch
     /// would under-report an image placed over (or cleared from)
-    /// already-blank cells — exactly the defect pinned by 124.C5's original
-    /// test.
+    /// already-blank cells — exactly the defect the image-placement
+    /// epoch tests pin.
     ///
     /// Every `set_image_cell_at` / `place_image` / `place_image_at` /
     /// `clear_image_placements_*` site in `images.rs` sets `row.dirty` and
@@ -193,8 +193,7 @@ impl Default for RowCacheEntry {
 /// [`MergeCache`]'s doc comment) precondition for reusing a cached merge's
 /// prefix instead of redoing it from scratch.
 ///
-/// The window is keyed by the **logical number** of its first row (Task
-/// 125.16), not by its physical bounds. A row keeps its [`RowNumber`] for as
+/// The window is keyed by the **logical number** of its first row, not by its physical bounds. A row keeps its [`RowNumber`] for as
 /// long as it is retained, so "same start number and same length" means
 /// "window position `r` holds the same row as last time" no matter how many
 /// rows were evicted from the front in between. Physical bounds could not say
@@ -215,7 +214,7 @@ pub(in crate::buffer) struct MergeWindowFp {
     auto_detect: bool,
 }
 
-/// Task 121 Part C (pass C): incremental cache of the last full merge over a
+/// Incremental cache of the last full merge over a
 /// flatten window (see [`Buffer::merge_cache`]'s field doc for the full
 /// invalidation policy).
 ///
@@ -250,13 +249,14 @@ pub(in crate::buffer) struct MergeWindowFp {
 /// on which.
 ///
 /// Front eviction (`enforce_scrollback_limit`, `scroll_up`,
-/// `erase_scrollback`) is **not** such a site since Task 125.16: it removes
+/// `erase_scrollback`) is **not** such a site: it removes
 /// rows without renumbering the survivors, so it changes the fingerprint
 /// exactly when it changes which rows the window holds.
 ///
 /// Every fast-path use of this cache is ALSO cross-checked against the
-/// full-merge oracle under `debug_assert_eq!` before being returned (`#405`
-/// Part C's load-bearing safety net) -- release-cost-free. This is not the
+/// full-merge oracle under `debug_assert_eq!` before being returned (the
+/// incremental path's load-bearing safety net) -- release-cost-free.
+/// This is not the
 /// mechanism the confined-rotation case above relies on (that's the
 /// explicit `merge_cache = None` in `scroll.rs`); it is a general backstop
 /// that turns any *other*, not-yet-discovered divergence here into an
@@ -300,7 +300,7 @@ pub(in crate::buffer) struct MergeCache {
     row_offsets: Arc<Vec<usize>>,
     /// Indices into `tags` where `tag.url.is_some()`.
     url_tag_indices: Arc<Vec<usize>>,
-    /// Task 124.10: the per-row **content epoch** for this merge, one entry
+    /// The per-row **content epoch** for this merge, one entry
     /// per entry in `row_offsets`.
     ///
     /// `row_epochs[r]` changes exactly when the rendered content at window
@@ -321,7 +321,7 @@ pub(in crate::buffer) struct MergeCache {
     /// The image placements each row in this merge was rendered with, one
     /// entry per entry in `row_offsets`.
     ///
-    /// Task 124.C5's counterpart to `row_line_widths` above: retained
+    /// The image-placement counterpart to `row_line_widths` above: retained
     /// solely as the previous-frame half of the epoch comparison. An image
     /// placement changes what a row renders as without appearing in
     /// `chars`/`tags` at all (`Cell::image_cell` stamps the cell's value as
@@ -332,7 +332,7 @@ pub(in crate::buffer) struct MergeCache {
 }
 
 /// One merge output's per-row rendered content, as the epoch comparison sees
-/// it (Task 124.10).
+/// it.
 ///
 /// Bundles the three things needed to ask "what does window row `r` render
 /// as": the flat character stream, the globally-rebased tags, and the row
@@ -542,7 +542,7 @@ impl Buffer {
     /// When `extra_rows == 0` this is identical to
     /// [`Self::visible_as_tchars_and_tags`].
     ///
-    /// ## Task 121 Part C: incremental merge
+    /// ## Incremental merge
     ///
     /// Unlike [`Self::scrollback_as_tchars_and_tags`] (which always does a
     /// full `Self::merge_row_caches_full`), this is the hot per-frame path,
@@ -599,7 +599,7 @@ impl Buffer {
     /// debug-only oracle cross-check) but returns the four result vectors
     /// wrapped in `Arc` instead of by value.
     ///
-    /// ## Why this method exists (regression fix, Task 121 Part C follow-up)
+    /// ## Why this method exists (regression fix)
     ///
     /// `MergeCache` must retain its own strong reference to the merged
     /// `(chars, tags, row_offsets, url_tag_indices)` across calls — that
@@ -630,7 +630,7 @@ impl Buffer {
         extra_rows: usize,
     ) -> ArcFlattenResult {
         let (visible_start, visible_end) = self.visible_window_bounds(scroll_offset, extra_rows);
-        // Task 119: when the user scrolls back, this window can reach into
+        // When the user scrolls back, this window can reach into
         // compressed scrollback (a nonzero `scroll_offset` lowers
         // `visible_window_start`). Decompress any evicted rows in the window
         // before reading their cells, so `flatten_row` never touches an
@@ -656,7 +656,7 @@ impl Buffer {
         )
     }
 
-    /// Task 124.C6: flatten the **normal** visible window (`extra_rows ==
+    /// Flatten the **normal** visible window (`extra_rows ==
     /// 0`, i.e. exactly the bounds `Self::visible_window_bounds` returns
     /// for `extra_rows = 0`) using the same full per-row-cache merge
     /// machinery as
@@ -712,7 +712,7 @@ impl Buffer {
         scroll_offset: usize,
     ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
         let (visible_start, visible_end) = self.visible_window_bounds(scroll_offset, 0);
-        // Task 119: mirrors the decompress-before-read step in
+        // Mirrors the decompress-before-read step in
         // `visible_as_tchars_and_tags_extended_arc` — a nonzero
         // `scroll_offset` can pull compressed scrollback rows into this
         // window.
@@ -726,7 +726,7 @@ impl Buffer {
         )
     }
 
-    /// Task 124.10: the per-row content epoch for each row in the visible
+    /// The per-row content epoch for each row in the visible
     /// window, one entry per row, top-to-bottom.
     ///
     /// `row_epochs[r]` changes exactly when the rendered content at window
@@ -734,7 +734,7 @@ impl Buffer {
     /// where "rendered content" means the merged characters, the merged
     /// format tags (compared row-relative, so a length change earlier in the
     /// window does not alias), the row's [`LineWidth`], and the row's image
-    /// placements (Task 124.C5 — an image placement can change what a row
+    /// placements (an image placement can change what a row
     /// renders as without appearing in the merged characters or tags at
     /// all). A row that was *written to* with identical bytes does **not**
     /// change its epoch; that distinction is the entire point, because
@@ -828,7 +828,7 @@ impl Buffer {
             .collect()
     }
 
-    /// Task 124.10: stamp each row of a freshly-built merge with a content
+    /// Stamp each row of a freshly-built merge with a content
     /// epoch.
     ///
     /// A row keeps the epoch it had in `previous` when either:
@@ -898,7 +898,7 @@ impl Buffer {
             if prev_epochs.get(row) == Some(epoch) {
                 assert!(
                     prev.row_renders_identically(next, row),
-                    "Task 124.10: {context} carried row {row}'s content epoch forward, \
+                    "{context} carried row {row}'s content epoch forward, \
                      but that row's rendered content changed — the damage signal \
                      would under-report and the GUI would show stale pixels"
                 );
@@ -1001,7 +1001,7 @@ impl Buffer {
                 ),
                 "no-op incremental merge",
             );
-            // Task 124.10: nothing in the window was rebuilt and the window
+            // Nothing in the window was rebuilt and the window
             // itself is unchanged, so every row's rendered content is the
             // content this cache was stamped against. `cached.row_epochs`
             // stays exactly as it is — carrying every stamp forward is the
@@ -1046,7 +1046,7 @@ impl Buffer {
 
             let url_tag_indices = Self::collect_url_tag_indices(&tags);
 
-            // #405 Part C load-bearing safety net: the incremental fast
+            // Load-bearing safety net: the incremental fast
             // path is a hand-maintained shortcut around the full-merge
             // oracle. Any divergence here is a real correctness bug that
             // must be caught before it reaches a production release build
@@ -1106,7 +1106,7 @@ impl Buffer {
         )
     }
 
-    /// Stamp a freshly-built merge with Task 124.10's per-row content epochs,
+    /// Stamp a freshly-built merge with per-row content epochs,
     /// install it as the new [`MergeCache`], and hand the result back as
     /// `Arc`s.
     ///
@@ -1190,7 +1190,7 @@ impl Buffer {
     /// fully-redetected `refined_auto_urls`, then [`Self::merge_row_caches_full`])
     /// and assert it is byte-identical to `actual`.
     ///
-    /// This is the `#405` Part C load-bearing safety net for both the
+    /// This is the load-bearing safety net for both the
     /// no-op and incremental fast paths in
     /// [`Self::rows_as_tchars_and_tags_incremental`]: it re-derives the
     /// *true* oracle rather than reusing whatever (possibly gated)
@@ -1222,7 +1222,7 @@ impl Buffer {
                 oracle.2.as_slice(),
                 oracle.3.as_slice()
             ),
-            "#405 Part C: {context} diverged from the full-merge oracle"
+            "incremental flatten: {context} diverged from the full-merge oracle"
         );
     }
 
@@ -1261,8 +1261,8 @@ impl Buffer {
             return (vec![], vec![], vec![], vec![]);
         }
 
-        // Task 119.4: restore any deep-cold compressed rows in this range
-        // back to real (Task-118 `Compact`) content before flattening. This
+        // Restore any deep-cold compressed rows in this range
+        // back to real (`Compact`) content before flattening. This
         // is the decompress-on-read seam — the visible window (never
         // reached here) never needs it.
         self.ensure_decompressed(0..visible_start);
@@ -1275,7 +1275,7 @@ impl Buffer {
             auto_detect,
         );
 
-        // Task 118.4: a full-scrollback flatten (the Ctrl-F search-buffer
+        // A full-scrollback flatten (the Ctrl-F search-buffer
         // path) is the only caller that reads cold scrollback history in
         // bulk. `rows_as_tchars_and_tags_cached` just built (or reused) a
         // `RowCacheEntry` per row, and reading a compact row's cells along
@@ -1627,7 +1627,7 @@ impl Buffer {
     /// stale), pulled back to the start of that row's logical-line group
     /// when URL refinement could reach across the boundary; see below.
     ///
-    /// ## Task 121 Part C: gating group redetection, and the merge floor
+    /// ## Gating group redetection, and the merge floor
     ///
     /// `previous` is `Some` **only** when the caller is about to reuse rows
     /// from a previous, still-valid, already-merged result (i.e. the
@@ -1649,8 +1649,8 @@ impl Buffer {
     /// That is only correct when the copied prefix is exactly what a from-
     /// scratch merge would produce for those rows, which a URL refinement
     /// (a group's URLs depend on **all** of the group's rows, and on which
-    /// rows are in the group at all) can falsify in two ways. Both were
-    /// the cause of issue #559 (incremental/oracle divergence):
+    /// rows are in the group at all) can falsify in two ways. Both caused
+    /// incremental/oracle divergence:
     ///
     /// 1. **A clean group lying after the first rebuilt row.** It is
     ///    re-merged from its cache entries, which hold only the single-row
@@ -1829,7 +1829,7 @@ impl Buffer {
             let tc = *cell.tchar();
             chars.push(tc);
 
-            // Task 124.C5: `Cell::image_cell` always constructs with
+            // `Cell::image_cell` always constructs with
             // `is_wide_continuation: false`, so an image cell is never
             // skipped by the `continue` above — `char_idx` here is exactly
             // the index this placement occupies in `chars`.
@@ -1942,7 +1942,7 @@ impl Buffer {
 
     /// Resolve a logical row range to retained indices for text extraction.
     ///
-    /// `start_row` / `end_row` are stable [`RowNumber`]s (Task 125.17), so a
+    /// `start_row` / `end_row` are stable [`RowNumber`]s, so a
     /// selection taken before an eviction still names the same text after it.
     ///
     /// - A `start_row` that has been evicted (below [`Self::row_base`]) clamps
@@ -2028,7 +2028,7 @@ impl Buffer {
         let mut result = String::new();
 
         for row_idx in start_row..=end_row {
-            // Task 119.4: `extract_text` takes `&self`, so it cannot call
+            // `extract_text` takes `&self`, so it cannot call
             // `ensure_decompressed` (which needs `&mut self`). A row
             // evicted to a compressed block is resolved via a transient,
             // non-mutating peek instead — see `row_cells_for_read`.
@@ -2104,7 +2104,7 @@ impl Buffer {
         let mut result = String::new();
 
         for row_idx in start_row..=end_row {
-            // Task 119.4: see the matching comment in `extract_text` — this
+            // See the matching comment in `extract_text` — this
             // also takes `&self` and must resolve an evicted row without
             // mutating `Buffer` state.
             let cells = self.row_cells_for_read(row_idx);
@@ -2530,7 +2530,7 @@ mod extended_window_tests {
         );
     }
 
-    /// Task 124.C6: [`Buffer::visible_as_tchars_and_tags_full_merge`] must
+    /// [`Buffer::visible_as_tchars_and_tags_full_merge`] must
     /// (a) produce exactly the same content as the ordinary visible flatten,
     /// and (b) leave a previously-populated **extended-window** `merge_cache`
     /// completely untouched — same fingerprint, same underlying `Arc`
@@ -2603,7 +2603,7 @@ mod extended_window_tests {
     }
 }
 
-/// Task 118.4: cold scrollback rows must not retain the second (row-cache)
+/// Cold scrollback rows must not retain the second (row-cache)
 /// and third (decompaction-memo) copies of their cell data after a
 /// full-scrollback flatten, while output stays byte-identical across
 /// repeated flattens and visible-row caches stay warm.
@@ -2621,7 +2621,7 @@ mod scrollback_eviction_tests {
     /// Push `n` numbered lines (LF+CR terminated, matching real PTY output)
     /// into `buf`. Mirrors the helper in
     /// `crate::buffer::scrollback_compaction_tests`. This is a hot-path
-    /// fill only: compaction is deferred (Task 118 follow-up), so pushing
+    /// fill only: compaction is deferred, so pushing
     /// lines past the visible window does NOT compact anything on its own
     /// — callers that need compacted scrollback must call
     /// `Buffer::compact_idle_scrollback` explicitly afterward.
@@ -2651,7 +2651,7 @@ mod scrollback_eviction_tests {
         let mut buf = buffer_with_compacted_scrollback();
 
         // First flatten: populates row_cache + decompaction memos, then
-        // (per Task 118.4) evicts both for every compact row.
+        // evicts both for every compact row.
         let (chars1, tags1, offsets1, urls1) = buf.scrollback_as_tchars_and_tags(0);
 
         // Second flatten: must rebuild from the still-resident `CompactRow`
@@ -2735,7 +2735,7 @@ mod scrollback_eviction_tests {
         );
 
         // First flatten: builds the RowCacheEntry (running URL detection),
-        // then evicts it (and the decompaction memo) per Task 118.4.
+        // then evicts it (and the decompaction memo).
         let (_chars1, tags1, _offsets1, url_indices1) = buf.scrollback_as_tchars_and_tags(0);
         assert!(
             !url_indices1.is_empty(),
@@ -2807,7 +2807,7 @@ mod scrollback_eviction_tests {
     }
 }
 
-/// Regression coverage for GitHub issue #418: a plain-text URL that
+/// Regression coverage: a plain-text URL that
 /// DECAWM-wraps across two or more physical rows must be auto-detected as
 /// one full, untruncated URL — not as several independent per-row fragments.
 #[cfg(test)]
@@ -2969,8 +2969,7 @@ mod wrapped_url_tests {
         // own ("see http" and "s://example.com" are each missing a
         // recognized complete scheme), so `touches_row_end` alone can never
         // fire here — this is what `row_tail_could_be_wrapped_scheme` (the
-        // partial-scheme-prefix signal) exists for. Regression test for a
-        // CodeRabbit review finding on PR #426.
+        // partial-scheme-prefix signal) exists for.
         let mut buf = Buffer::new(8, 4);
         assert!(buf.auto_detect_urls());
         let url = "https://example.com";
@@ -2992,7 +2991,7 @@ mod wrapped_url_tests {
     }
 }
 
-/// Task 121 Part C (pass A): property-test harness for the "full merge"
+/// Property-test harness for the "full merge"
 /// oracle, [`Buffer::merge_row_caches_full`], extracted from
 /// [`Buffer::rows_as_tchars_and_tags_cached`] in this pass.
 ///
@@ -3089,7 +3088,7 @@ mod incremental_merge_equivalence_tests {
         );
     }
 
-    /// Pins the Part A extraction as behavior-preserving: replaying Step 1
+    /// Pins the full-merge extraction as behavior-preserving: replaying Step 1
     /// (`refresh_row_cache_and_refine_wrapped_urls`) followed by the
     /// extracted Step 2 (`merge_row_caches_full`) directly over the visible
     /// window must produce exactly the same tuple as the public
@@ -3129,8 +3128,8 @@ mod incremental_merge_equivalence_tests {
     /// Minimal deterministic linear congruential generator.
     ///
     /// `rand` is not a dev-dependency of `freminal-buffer` (only `criterion`,
-    /// `proptest`, and `test-log` are — see `Cargo.toml`), and this task
-    /// must not add one for a single hand-rollable test-only PRNG. Constants
+    /// `proptest`, and `test-log` are — see `Cargo.toml`), so a hand-rolled
+    /// generator avoids adding one for a single test-only PRNG. Constants
     /// are the widely used Knuth MMIX LCG parameters.
     struct Lcg(u64);
 
@@ -3265,7 +3264,7 @@ mod incremental_merge_equivalence_tests {
     }
 }
 
-/// Task 121 Part C (pass C): tests for the **incremental** merge path
+/// Tests for the **incremental** merge path
 /// (`Buffer::rows_as_tchars_and_tags_incremental`, driven through the public
 /// `visible_as_tchars_and_tags[_extended]` entry points).
 ///
@@ -3854,7 +3853,7 @@ mod incremental_merge_tests {
     // incremental merge whose prefix reuse can't observe that already-clean
     // row_cache entries moved to different indices. The whole-buffer
     // `scroll_up` and scrollback-capacity eviction cases below are instead
-    // observed by the logical-row-number fingerprint (Task 125.16).
+    // observed by the logical-row-number fingerprint.
     // ────────────────────────────────────────────────────────────────
 
     /// `scroll_slice_up(first, last)` rotates rows `[first, last]` up by
@@ -3900,7 +3899,7 @@ mod incremental_merge_tests {
     /// Whole-buffer `scroll_up` (used e.g. for autowrap-at-bottom-margin and
     /// primary-buffer LF at the live bottom) evicts the top row and pushes a
     /// blank one, netting the same `rows.len()` while every clean cache entry
-    /// moves down one index. It no longer nulls `merge_cache` (Task 125.16):
+    /// moves down one index. It no longer nulls `merge_cache`:
     /// the eviction advances the store's base, so the logical-number
     /// fingerprint changes and forces the full merge. This is the regression
     /// guard for that: it fails if the fingerprint stops observing the slide.
@@ -3919,8 +3918,8 @@ mod incremental_merge_tests {
         );
     }
 
-    /// Task #405 regression guard (re-based on logical row numbers by Task
-    /// 125.16): `Buffer::enforce_scrollback_limit` (`resize_and_alt.rs`).
+    /// Regression guard (keyed on logical row numbers):
+    /// `Buffer::enforce_scrollback_limit` (`resize_and_alt.rs`).
     /// Once scrollback is at capacity, every LF pushes a new row at the
     /// bottom and then evicts `overflow` rows from the front, netting
     /// `rows.len()` unchanged. A fingerprint built from the physical window
@@ -4020,7 +4019,7 @@ mod incremental_merge_tests {
             .collect()
     }
 
-    /// Task 125.16: front eviction at scrollback capacity with **identical
+    /// Front eviction at scrollback capacity with **identical
     /// row content**. Identical rows are the hard case for a logical-number
     /// fingerprint: a window that slid onto different rows with the same
     /// text is indistinguishable from the old one by content, so a result
@@ -4098,7 +4097,7 @@ mod incremental_merge_tests {
         }
     }
 
-    /// Task 125.16: eviction that leaves the window on exactly the same rows
+    /// Eviction that leaves the window on exactly the same rows
     /// (`erase_scrollback` drops only rows above the window) must keep the
     /// fingerprint, so the cached merge is correctly *reused* rather than
     /// rebuilt. The physical window bounds change here (the window collapses
@@ -4187,7 +4186,7 @@ mod incremental_merge_tests {
     }
 }
 
-/// Task 124.10: tests for [`Buffer::visible_row_epochs`], the per-row
+/// Tests for [`Buffer::visible_row_epochs`], the per-row
 /// content epoch.
 ///
 /// The correctness contract here is asymmetric: an **over-report** (a row's
@@ -4407,7 +4406,7 @@ mod row_epoch_tests {
     // 6 — wrapped-URL group redetection bumps a row that was never
     //     itself written to (the case a `RowCacheEntry`-keyed design
     //     would have missed; see Documents/DESIGN_DECISIONS.md, "Damage
-    //     Model (Task 124)" / "Per-row content epoch")
+    //     Model" / "Per-row content epoch")
     // ────────────────────────────────────────────────────────────────
 
     #[test]
@@ -4641,7 +4640,7 @@ mod row_epoch_tests {
     }
 
     // ────────────────────────────────────────────────────────────────
-    // 11 – 16 — Task 124.C5: image placements are part of a row's render
+    // 11 – 16 — image placements are part of a row's render
     //     basis. `Cell::image_cell` stamps a cell's *value* as plain
     //     `TChar::Space`, so an image placement change is invisible to
     //     `chars`/`tags` and must be covered by a dedicated comparison
@@ -4679,11 +4678,11 @@ mod row_epoch_tests {
     /// with `Cell::blank_with_tag(FormatTag::default())`, which would grow
     /// the row's merged `chars` from 5 entries (just `"rowNN"`) to however
     /// many are needed to reach `target_col` — bumping the epoch for an
-    /// unrelated, mundane reason (a length change) rather than the 124.C5
-    /// blind spot under test. Writing the spaces explicitly first, under
+    /// unrelated, mundane reason (a length change) rather than the
+    /// image-placement blind spot under test. Writing the spaces explicitly first, under
     /// the same default tag `set_image_cell_at` would otherwise pad with,
     /// means the image placement below changes only the `image` field of a
-    /// cell that already exists — the one thing 124.C5 is actually about.
+    /// cell that already exists — the one thing the image-placement comparison is about.
     fn buffer_with_materialized_gap(target_row: usize, target_col: usize) -> Buffer {
         let mut buf = build_plain_buffer(20, 6);
         buf.set_cursor_pos(Some(5), Some(target_row));
@@ -4714,10 +4713,10 @@ mod row_epoch_tests {
     /// `tags` are byte-identical before and after the placement — an image
     /// placement changes what a row renders as without appearing in either
     /// of those two vectors at all. `RowCacheEntry::images` /
-    /// `RowRenderBasis::images` (Task 124.C5) exist precisely to give the
+    /// `RowRenderBasis::images` exist precisely to give the
     /// epoch comparison a way to see this.
     ///
-    /// This was 124.C5's pinned defect: until the `images` comparison term
+    /// This was a pinned defect: until the `images` comparison term
     /// was added, this row's epoch was carried forward while its rendered
     /// pixels changed — an image would silently cover cells the GUI
     /// believed were unchanged and would not repaint. See the paired
@@ -4790,8 +4789,7 @@ mod row_epoch_tests {
         assert_ne!(
             before_epochs[TARGET_ROW], after_epochs[TARGET_ROW],
             "placing an image over cells that already render as identical \
-             spaces under an identical tag must bump the row's epoch \
-             (Task 124.C5)"
+             spaces under an identical tag must bump the row's epoch"
         );
     }
 
@@ -4908,7 +4906,7 @@ mod row_epoch_tests {
         );
     }
 
-    /// The sub-case the plan explicitly records as not caught by any other
+    /// The sub-case not caught by any other
     /// signal: an image whose `image_id` is already known (placed
     /// elsewhere first, so a hypothetical comparison keyed on "did the set
     /// of known image ids change" would see no difference) placed onto a
@@ -5013,7 +5011,7 @@ mod row_epoch_tests {
     }
 }
 
-/// Regression tests for issue #559: the incremental flatten fast path must
+/// Regression tests: the incremental flatten fast path must
 /// reproduce the full-merge oracle when a wrapped-URL group's refinement is
 /// invalidated, or depends on, a row that was rebuilt.
 ///

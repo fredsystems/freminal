@@ -135,7 +135,7 @@ fn bench_insert_chunks(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: resizing (24.2 — uses iter_batched to separate setup from measurement)
+// Benchmark: resizing
 // ---------------------------------------------------------------
 fn bench_resize(c: &mut Criterion) {
     let data = load_tchars_for_large_bench();
@@ -170,7 +170,7 @@ fn bench_resize(c: &mut Criterion) {
         );
     });
 
-    // Height grow — the Task 113.1 path. Exercises the primary-buffer grow
+    // Height grow — the primary-buffer grow path. Exercises the primary-buffer grow
     // branch, which now reclaims trailing blank screen-padding below the live
     // cursor instead of appending an unreclaimable blank tail.
     group.bench_with_input(BenchmarkId::new("grow_height", 200), &data, |b, data| {
@@ -211,25 +211,24 @@ fn bench_softwrap_heavy(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmarks: line-feed eviction at the real default scrollback capacity
-// (Task 125.12).
+// Benchmarks: line-feed eviction at the real default scrollback capacity.
 //
-// Task 125.10 found that once scrollback is full, every line feed runs
+// Once scrollback is full, every line feed runs
 // `Buffer::enforce_scrollback_limit`, which front-drains `rows`, `row_cache`
 // and `row_block_map` (a memmove of ~10 000 entries per line feed) and then
 // scans the whole block map / every live cell. These benches measure that
 // steady-state eviction path at the DEFAULT 10 000-row limit (see
-// `Buffer::new` in `buffer/lifecycle.rs`), so the Task 125 `RowStore`
-// remediation (125.13-125.16) can be compared before/after under the named
-// Criterion baseline `before_125_rowstore`.
+// `Buffer::new` in `buffer/lifecycle.rs`), so the `RowStore`
+// storage change could be compared before/after under a named
+// Criterion baseline.
 //
 // They use only public `Buffer` methods (`insert_text`, `handle_cr`,
 // `handle_lf`, the prompt / command-block marks, `place_image`, and the idle
 // compaction / compression entry points) and never touch `rows`, `row_cache`
 // or `row_block_map`, so they compile unchanged across the RowStore refactor.
 //
-// Geometry is the 124x31 grid used by the Task 125.10 matched-protocol
-// capture. The timed unit is `EVICTION_LF_BURST` (200) lines, each a short
+// Geometry is the 124x31 grid used by the matched-protocol
+// capture against other terminals. The timed unit is `EVICTION_LF_BURST` (200) lines, each a short
 // text insert followed by CR + LF (a real PTY's `\r\n` after ONLCR) — the
 // size of one `seq 1 200` style burst. Every LF in the burst evicts exactly
 // one row because the buffer already sits at `height + limit` rows.
@@ -245,10 +244,10 @@ fn bench_softwrap_heavy(c: &mut Criterion) {
 // wall-clock time spent in (untimed) setup.
 // ---------------------------------------------------------------
 
-/// Width of the matched-protocol Freminal grid (Task 125.10).
+/// Width of the matched-protocol Freminal grid.
 const EVICTION_WIDTH: usize = 124;
 
-/// Height of the matched-protocol Freminal grid (Task 125.10).
+/// Height of the matched-protocol Freminal grid.
 const EVICTION_HEIGHT: usize = 31;
 
 /// Compiled-in default scrollback limit — mirrors `Buffer::new`
@@ -267,7 +266,7 @@ const EVICTION_PROMPT_INTERVAL: usize = 20;
 enum EvictionScenario {
     /// Plain rows only.
     Plain,
-    /// Whole scrollback compacted (Task 118) and compressed (Task 119).
+    /// Whole scrollback compacted and compressed.
     Compressed,
     /// OSC 133-style prompt marks and command blocks every
     /// `EVICTION_PROMPT_INTERVAL` lines.
@@ -466,7 +465,7 @@ fn bench_lf_eviction_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-// Long-run eviction (Task 125 review S2). The at-capacity benches above time ONE
+// Long-run eviction. The at-capacity benches above time ONE
 // 200-line burst on a freshly built buffer, so the moving head never gets as
 // far as the compaction threshold (`max(live / 2, 64)` dead slots, ~5 000
 // evictions at the default limit) and `RowStore::compact` is never inside a
@@ -709,13 +708,13 @@ fn bench_cursor_ops(c: &mut Criterion) {
 fn bench_lf_heavy(c: &mut Criterion) {
     // Push 4 100 LFs through `handle_lf` on a default `Buffer::new(80, 24)`.
     //
-    // The compiled-in default scrollback limit is now 10 000 rows (Task 118
-    // raised it from 4 000), so 4 100 LFs no longer reach capacity: this
+    // The compiled-in default scrollback limit is now 10 000 rows (it was
+    // raised from 4 000), so 4 100 LFs no longer reach capacity: this
     // bench measures buffer growth (`push_row` below the limit), NOT the
     // `enforce_scrollback_limit` front-drain. The ID and workload are kept
     // unchanged so historical baselines stay comparable. Eviction at the real
     // default capacity is covered by `bench_lf_eviction_at_capacity` and
-    // `bench_lf_eviction_scaling` (Task 125.12).
+    // `bench_lf_eviction_scaling`.
     const LF_COUNT: usize = 4_100;
 
     let letters = lowercase_tchars();
@@ -742,11 +741,11 @@ fn bench_lf_heavy(c: &mut Criterion) {
 
 // ---------------------------------------------------------------
 // Benchmark: steady-state LF at scrollback capacity — `merge_cache`
-// rotation invalidation cost (Task #405).
+// rotation invalidation cost.
 //
 // At scrollback capacity every line feed evicts a row, so the visible
 // window's first logical row number advances and the merge-cache
-// fingerprint (keyed by that number since Task 125.16) misses (see
+// fingerprint (keyed by that number) misses (see
 // `Buffer::merge_cache`'s field doc and the
 // `incremental_merge_matches_oracle_after_scrollback_capacity_rotation`
 // regression test in `flatten.rs`). The very next
@@ -834,7 +833,7 @@ fn bench_lf_flatten_at_capacity(c: &mut Criterion) {
 
 // ---------------------------------------------------------------
 // Benchmark: batched LF then flatten at scrollback capacity — amortized
-// re-merge cost under realistic PTY-read batching (issue #457 follow-up).
+// re-merge cost under realistic PTY-read batching.
 //
 // `bench_lf_flatten_at_capacity` above measures the worst case: exactly one
 // LF (which always rotates scrollback and nulls `merge_cache` once already
@@ -847,12 +846,12 @@ fn bench_lf_flatten_at_capacity(c: &mut Criterion) {
 // case instead: for a buffer already at scrollback capacity, perform `K`
 // LFs back-to-back, then exactly ONE flatten, as a single timed iteration —
 // for `K` in `[1, 8, 32, 128, 512]`. If PTY-read batching already mitigates
-// the re-merge cost identified by issue #457 in realistic usage, the
+// the re-merge cost identified above in realistic usage, the
 // per-LF amortized cost (total time / K) should fall sharply as `K` grows,
 // since the single full re-merge's cost is spread across all K lines
 // instead of being paid once per line as in the worst-case benchmark above.
 //
-// Only height=100 is measured (per-task scope): it is the more realistic,
+// Only height=100 is measured (a deliberate limit): it is the more realistic,
 // interesting window size, and crossing every K with both heights adds
 // little beyond what `bench_lf_flatten_at_capacity` already shows about the
 // height dependency.
@@ -932,7 +931,7 @@ fn bench_erase_display(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: scrollback rendering at various offsets (24.1)
+// Benchmark: scrollback rendering at various offsets
 // ---------------------------------------------------------------
 fn bench_scrollback_render(c: &mut Criterion) {
     // Pre-populate a buffer with ~5000 rows of scrollback.
@@ -967,13 +966,13 @@ fn bench_scrollback_render(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: alternate screen switch (24.1)
+// Benchmark: alternate screen switch
 // ---------------------------------------------------------------
 fn bench_alternate_screen_switch(c: &mut Criterion) {
     // Measure the cost of entering and leaving the alternate screen on a
     // populated buffer, in the shape `?1049h` / `?1049l` drive: DECSC, cleared
     // switch on the way in; switch, DECRC on the way out. The IDs are the
-    // pre-131.5 ones so the before/after comparison lines up. Every routine
+    // pre-existing ones so the before/after comparison lines up. Every routine
     // returns the buffer so criterion drops it outside the timed region: the
     // measurement is the switch, not the deallocation of two screens.
     let primary_data = gen_ascii_tchars(80 * 100); // 100 lines in primary
@@ -1042,7 +1041,7 @@ fn bench_alternate_screen_switch(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: erase entire display — ED Ps=2 (24.1)
+// Benchmark: erase entire display — ED Ps=2
 // ---------------------------------------------------------------
 fn bench_erase_display_full(c: &mut Criterion) {
     // Fill a 200×50 buffer then erase entire display.
@@ -1176,8 +1175,8 @@ fn bench_move_cursor_relative(c: &mut Criterion) {
 // ---------------------------------------------------------------
 // Benchmark: flatten a buffer whose visible rows each contain a plain URL.
 //
-// Measures the cost of the single-pass URL detection + tag splicing added
-// in Task 71.7b.  Each iteration builds a fresh buffer so the flatten cache
+// Measures the cost of the single-pass URL detection + tag splicing.
+// Each iteration builds a fresh buffer so the flatten cache
 // starts cold; this captures the full work of byte-mirror construction,
 // regex scanning, and tag splicing across the full visible window.
 // ---------------------------------------------------------------
@@ -1245,12 +1244,12 @@ fn bench_flatten_url_heavy(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: URL auto-detection when it wraps across rows (Task 418)
+// Benchmark: URL auto-detection when it wraps across rows
 //
 // Unlike `bench_flatten_url_heavy` (one complete URL per row, hard-broken by
 // a real newline), this benchmark fills every row edge-to-edge with URL
 // content that DECAWM soft-wraps across many rows, so the group-level
-// redetect path added for GitHub issue #418 (URLs wrapping across rows must
+// redetect path (URLs wrapping across rows must
 // be detected in full) is actually exercised on every flatten.
 // ---------------------------------------------------------------
 fn bench_flatten_wrapped_url_heavy(c: &mut Criterion) {
@@ -1286,7 +1285,7 @@ fn bench_flatten_wrapped_url_heavy(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: command-block record/finish cycle (72.2)
+// Benchmark: command-block record/finish cycle
 //
 // Measures the cost of recording 10,000 start/finish command-block cycles.
 // Captures the new VecDeque<CommandBlock> machinery added in 72.2.
@@ -1308,7 +1307,7 @@ fn bench_command_block_record(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: ImageStore::insert per-insert quota-scan cost (100.5)
+// Benchmark: ImageStore::insert per-insert quota-scan cost
 //
 // Every insert() now scans all stored images to sum base/anim pool byte
 // totals via enforce_quota(). This measures that scan cost at a realistic
@@ -1353,15 +1352,15 @@ fn bench_image_store_insert_at_quota(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: CompressedBlock compress/decompress round trip (Task 119.6)
+// Benchmark: CompressedBlock compress/decompress round trip
 //
 // Builds a representative 256-row, ~120-col block of colored content (the
-// "shell session" style bracket from the Task 119 feasibility spike — many
+// "shell session" style bracket from the feasibility spike — many
 // rows sharing structure with a handful of color changes) and separately
 // measures CompressedBlock::from_rows (compress) and decompress_into
 // (decompress). Used to justify the IDLE_COMPRESSION_BUDGET tuning in
 // freminal/src/gui/pty.rs: per-block decompress cost must stay well under
-// one 16.6ms frame (plan target: ~34µs/256-line block at LZ4 speed).
+// one 16.6ms frame (target: ~34µs/256-line block at LZ4 speed).
 // ---------------------------------------------------------------
 fn build_representative_compact_block(rows: usize, width: usize) -> Vec<CompactRow> {
     let colors = [
@@ -1418,10 +1417,10 @@ fn bench_compressed_block_round_trip(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: scrolling into a compressed scrollback region (Task 119.6)
+// Benchmark: scrolling into a compressed scrollback region
 //
-// Builds a buffer whose entire scrollback has been Task-118-compacted and
-// Task-119-compressed (mirroring the idle-tick's settled state), then
+// Builds a buffer whose entire scrollback has been compacted and
+// compressed (mirroring the idle-tick's settled state), then
 // measures the real decompress-on-scroll cost paid by a flatten that
 // touches the compressed region. Each iteration rebuilds the compressed
 // buffer from scratch (`iter_batched` + `BatchSize::LargeInput`) because
@@ -1478,8 +1477,7 @@ fn bench_scroll_into_compressed_region(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmark: absolute per-idle-tick cost of the budgeted background work
-// (Task 119 follow-up tuning).
+// Benchmark: absolute per-idle-tick cost of the budgeted background work.
 //
 // These measure the CPU cost of ONE real idle tick's worth of work, in
 // isolation, at the SAME per-tick budgets production uses in
@@ -1585,7 +1583,7 @@ fn bench_idle_compression_tick(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Benchmarks: full-depth width-change reflow (Task 120.1).
+// Benchmarks: full-depth width-change reflow.
 //
 // `buffer_resize` and `softwrap_heavy` reflow small buffers and do not show
 // the cost a real pane pays: a width change reflows the WHOLE scrollback
@@ -1598,9 +1596,9 @@ fn bench_idle_compression_tick(c: &mut Criterion) {
 //
 // Storage states (via the public idle-tick entry points, run to completion):
 // - `live`: rows exactly as written (the state right after output);
-// - `compacted`: `compact_idle_scrollback(usize::MAX)` (Task 118);
-// - `compressed`: compacted, then `compress_idle_scrollback(usize::MAX)`
-//   (Task 119), so reflow must first decompress every LZ4 block.
+// - `compacted`: `compact_idle_scrollback(usize::MAX)`;
+// - `compressed`: compacted, then `compress_idle_scrollback(usize::MAX)`,
+// so reflow must first decompress every LZ4 block.
 //
 // Width changes from the 100-column fill width: `widen` (100 -> 160),
 // `narrow` (100 -> 60) and `one_col` (100 -> 99). The 1-column case is the

@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! Runs the bundled bash, zsh and fish integrations for real and checks the
-//! `sudo` wrapper (Tasks 151.12 and 151.C5) against a fake `sudo` that prints
+//! `sudo` wrapper against a fake `sudo` that prints
 //! its argv.
 //!
 //! The wrapper is freminal's own implementation of sudo(8)'s option syntax:

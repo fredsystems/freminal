@@ -72,7 +72,7 @@ pub(super) const fn x_scale(lw: LineWidth) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-//  DECSCNM (screen reverse video) × SGR-7 compose (Task 115.2)
+//  DECSCNM (screen reverse video) × SGR-7 compose
 // ---------------------------------------------------------------------------
 //
 // `StateColors::color()` / `StateColors::background_color()` already resolve
@@ -105,7 +105,7 @@ pub(super) const fn x_scale(lw: LineWidth) -> f32 {
 /// Effective foreground color for a cell: composes per-cell SGR-7 (already
 /// resolved inside `colors.color()`/`colors.background_color()`) with
 /// whole-screen DECSCNM by XOR, via the opposite-accessor trick documented
-/// above (Task 115.2).
+/// above.
 #[inline]
 pub(super) const fn effective_fg(
     colors: &freminal_common::buffer_states::cursor::StateColors,
@@ -126,14 +126,13 @@ pub(super) const fn effective_fg(
 /// already shows that colour, and drawing it again would only add overdraw
 /// (and double-blend at `background_opacity < 1.0`). Normal video: the
 /// default *background*. DECSCNM at full opacity: the default *foreground*,
-/// because the pane's base fill is the reversed default background (Task
-/// 147.27).
+/// because the pane's base fill is the reversed default background.
 ///
 /// DECSCNM below full opacity keeps the normal-video base. A foreground fill
 /// would sit under every translucent cell background and composite with it
 /// twice, so the cells draw their own backgrounds over the panel instead (a
 /// default cell is then drawn as the foreground colour) and the sub-cell
-/// remainder is not reversed (147 PR review R16).
+/// remainder is not reversed.
 ///
 /// A cell whose effective background is anything else, including the colour
 /// that is the base under the *other* inversion state (SGR 7 under DECSCNM
@@ -231,7 +230,7 @@ pub struct FgRenderOptions {
     pub text_blink_fast_visible: bool,
     /// Whether DECSCNM (whole-screen reverse video) is active for this
     /// pane. Composed with per-cell SGR-7 by XOR via `effective_fg` /
-    /// `effective_bg` (Task 115.2).
+    /// `effective_bg`.
     pub screen_inversion: ScreenInversion,
 }
 
@@ -256,7 +255,7 @@ impl FgRenderOptions {
 /// can compute UV coordinates that preserve aspect ratio even when the
 /// image is partially clipped by the terminal edge.
 ///
-/// Bucketed by `placement_instance` (Task 100.18), NOT by `image_id` — two
+/// Bucketed by `placement_instance`, NOT by `image_id` — two
 /// independent on-screen placements of the SAME image (e.g. two `a=p` puts
 /// with `p=0`/unspecified) are two separate `ImageBounds` entries, each
 /// producing its own quad, rather than merging into one oversized bucket.
@@ -273,22 +272,22 @@ struct ImageBounds {
     /// displays. Captured from the first cell of the bucket — correct
     /// because every cell of one placement instance shares one image id.
     image_id: u64,
-    /// Kitty `z=` layering value (Task 100.7b). Read from the first-seen
+    /// Kitty `z=` layering value. Read from the first-seen
     /// placement for this placement instance; all cells of one placement
     /// share the same z-index, so later cells must not overwrite it.
     z_index: i32,
     /// Source-crop (kitty `a=p` x/y/w/h); read from the first-seen
     /// placement, like `z_index`. `None` = full image. Bucketing by
-    /// `placement_instance` (Task 100.18) means two DIFFERENT placements of
+    /// `placement_instance` means two DIFFERENT placements of
     /// the same image with different crops no longer collapse — each gets
     /// its own bucket and therefore its own crop.
     crop: Option<SourceCrop>,
-    /// Sub-cell pixel offset (kitty `a=p`/`a=T` `X=`/`Y=`, Task 100.19);
+    /// Sub-cell pixel offset (kitty `a=p`/`a=T` `X=`/`Y=`);
     /// read from the first-seen placement, like `z_index`/`crop`.
     subcell_offset: Option<SubCellOffset>,
 }
 
-/// One entry in the authoritative image draw order (Task 100.18).
+/// One entry in the authoritative image draw order.
 ///
 /// Carries BOTH the placement instance id (the key into the vertex-slab
 /// bucketing done by [`build_image_verts`]) and the underlying image id
@@ -299,7 +298,7 @@ struct ImageBounds {
 /// placements).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageDrawEntry {
-    /// The placement-instance id (Task 100.18) — identifies which vertex
+    /// The placement-instance id — identifies which vertex
     /// slab in the image VBO this entry corresponds to.
     pub instance_id: u64,
     /// The underlying image id — identifies which GPU texture to bind.
@@ -535,7 +534,7 @@ pub struct BackgroundFrame<'a> {
     pub colors: &'a ResolvedColors,
     /// Whether DECSCNM (whole-screen reverse video) is active for this
     /// pane. Composed with per-cell SGR-7 by XOR via `effective_fg` /
-    /// `effective_bg` (Task 115.2).
+    /// `effective_bg`.
     pub screen_inversion: ScreenInversion,
     /// The pane's background opacity in `0.0..=1.0`. Selects the pane base
     /// (see `pane_base_color`), which decides which cell backgrounds are
@@ -565,7 +564,7 @@ pub struct BackgroundFrame<'a> {
 /// wanted-cursor decision alone does not account for the blink-visibility
 /// gate (`cursor_blink_is_visible`) applied here, and recomputing the append
 /// decision independently let the two silently disagree whenever a full
-/// rebuild happened to run during the cursor's blink-off phase (issue #432):
+/// rebuild happened to run during the cursor's blink-off phase:
 /// the offset bookkeeping would then assume a cursor quad was appended when it
 /// was not, causing a later cursor-only frame to blink the cursor back on by
 /// overwriting whatever quad actually occupies that tail position — in
@@ -604,12 +603,12 @@ pub fn build_background_instances(
         // --- Per-cell background instances ---
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            // Task 115.2: compute the DECSCNM/SGR-7-composed effective
+            // Compute the DECSCNM/SGR-7-composed effective
             // background BEFORE the skip check below, so the skip decision
             // operates on the post-swap color.
             let bg_color_raw = effective_bg(&run.colors, screen_inversion);
 
-            // Skip a background equal to what lies beneath (Task 147.27): the
+            // Skip a background equal to what lies beneath: the
             // pane's base fill, or the panel clear when no fill is drawn,
             // already shows it. That is the default background in normal
             // video and the default foreground under opaque DECSCNM; the
@@ -831,7 +830,7 @@ pub fn build_foreground_instances(
 
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            // Task 115.2: effective foreground composes per-cell SGR-7
+            // Effective foreground composes per-cell SGR-7
             // (already resolved in `colors.color()`) with whole-screen
             // DECSCNM by XOR via `effective_fg`.
             let normal_fg = internal_color_to_gl(
@@ -911,7 +910,7 @@ pub fn build_image_verts(
         return;
     }
 
-    // Bucketed by `placement_instance` (Task 100.18), NOT `image_id` — two
+    // Bucketed by `placement_instance`, NOT `image_id` — two
     // independent placements of the same image id (e.g. two `a=p` puts with
     // `p=0`/unspecified) must land in two separate buckets so they render
     // as two separate quads instead of merging into one oversized quad.
@@ -993,13 +992,12 @@ pub fn build_image_verts(
 /// `display_rows` grid; partial visibility (e.g. image clipped at the terminal
 /// edge) produces a UV sub-range.
 ///
-/// The quad's PIXEL EXTENT depends on the image's [`ImageSizeMode`]
-/// (Task 100.17b):
+/// The quad's PIXEL EXTENT depends on the image's [`ImageSizeMode`]:
 ///
 /// - `ExplicitCells` (kitty `c=`/`r=`, iTerm2 explicit `width=`/`height=`),
 ///   or when image metadata is unavailable: the quad fills the bounding box
 ///   `b` exactly — the image is scaled to fill the declared cell grid. This
-///   is the pre-100.17 behaviour, unchanged.
+///   is the original behaviour, unchanged.
 /// - `NativePixels` (kitty without `c=`/`r=`, iTerm2 `auto`, and ALWAYS for
 ///   sixel — the spec-mandated default): the quad is anchored at the cell
 ///   top-left `(b.x0, b.y0)` and sized to the image's *native* pixel
@@ -1007,7 +1005,7 @@ pub fn build_image_verts(
 ///   [`compute_image_quad_position`] for how this interacts with
 ///   source-crop and partial cell-grid visibility.
 ///
-/// If `b.crop` is set (kitty `a=p` source-crop, Task 100.9), the cell-grid
+/// If `b.crop` is set (kitty `a=p` source-crop), the cell-grid
 /// UV fractions above are re-mapped into the crop's pixel-space UV window
 /// instead of the full texture, so the placement displays only that
 /// sub-rectangle of the transmitted image. For `NativePixels` images the
@@ -1015,7 +1013,7 @@ pub fn build_image_verts(
 /// than the full image's), so a cropped native-size image is drawn at the
 /// crop's actual pixel size.
 ///
-/// If `b.subcell_offset` is set (kitty `a=p`/`a=T` `X=`/`Y=`, Task 100.19),
+/// If `b.subcell_offset` is set (kitty `a=p`/`a=T` `X=`/`Y=`),
 /// the quad's position (all four corners) is translated by that many
 /// pixels after [`compute_image_quad_position`] resolves the base
 /// position — orthogonal to both size mode (a position-only shift) and
@@ -1048,7 +1046,7 @@ fn compute_image_quad(
         (0.0, 0.0, 1.0, 1.0)
     };
 
-    // Compose a kitty `a=p` source-crop (Task 100.9) on top of the
+    // Compose a kitty `a=p` source-crop on top of the
     // cell-visibility UV fractions computed above: the crop defines the
     // outer texture-space UV window `[cu0,cu1]x[cv0,cv1]`, and the
     // cell-visibility fractions `u0..u1`/`v0..v1` are re-mapped INTO that
@@ -1073,7 +1071,7 @@ fn compute_image_quad(
 
     let (qx0, qy0, qx1, qy1) = compute_image_quad_position(b, img);
 
-    // Apply the kitty `X=`/`Y=` sub-cell pixel offset (Task 100.19) as a
+    // Apply the kitty `X=`/`Y=` sub-cell pixel offset as a
     // pure translation of all four corners — position only, independent of
     // size mode and crop (both already resolved above).
     let (qx0, qy0, qx1, qy1) = b.subcell_offset.map_or((qx0, qy0, qx1, qy1), |offset| {
@@ -1090,14 +1088,14 @@ fn compute_image_quad(
 }
 
 /// Compute the pixel-space quad rectangle `(x0, y0, x1, y1)` for an image,
-/// honoring its [`ImageSizeMode`] (Task 100.17b).
+/// honoring its [`ImageSizeMode`].
 ///
 /// - `ImageSizeMode::ExplicitCells`, or when `img` is `None` (metadata
 ///   unavailable): returns the cell bounding box `b` unchanged — the
-///   pre-100.17 behaviour.
+///   original behaviour.
 /// - `ImageSizeMode::NativePixels`: returns a quad anchored at the cell
 ///   top-left `(b.x0, b.y0)` and sized to the image's native pixel
-///   dimensions. If a source-crop (`b.crop`, Task 100.9) is active, the
+///   dimensions. If a source-crop (`b.crop`) is active, the
 ///   crop's pixel dimensions are used instead of the full image's — the
 ///   displayed native size is the size of the cropped region, not the
 ///   original image.
@@ -1112,7 +1110,7 @@ fn compute_image_quad(
 ///   fully-visible case (fraction == 1, full native size) and the
 ///   partially-visible case, without needing a separate fallback path.
 ///
-/// Sub-cell X/Y pixel offset (kitty `X=`/`Y=`, Task 100.19) is NOT applied
+/// Sub-cell X/Y pixel offset (kitty `X=`/`Y=`) is NOT applied
 /// here — this function returns the quad anchored exactly at the cell
 /// origin; the offset translation is applied by the caller,
 /// [`compute_image_quad`], after this function returns.
@@ -1275,7 +1273,7 @@ fn fit_color_glyph_rect(
     }
 }
 
-/// Emit a procedural box-drawing / block-element glyph (Task #410).
+/// Emit a procedural box-drawing / block-element glyph.
 ///
 /// The bitmap is generated at the exact cell pixel size and the quad spans the
 /// cell rectangle **exactly** — `[cell_left, cell_top]` to
@@ -1364,8 +1362,8 @@ struct NormalizedFallbackGlyph {
     uv: [f32; 4],
 }
 
-/// Normalise and emit a glyph if it was resolved from a **fallback** face
-/// (Task #411); returns `true` if it handled the glyph.
+/// Normalise and emit a glyph if it was resolved from a **fallback** face;
+/// returns `true` if it handled the glyph.
 ///
 /// A glyph from a face other than the user-selected primary (bundled fallback
 /// or a system face) was designed against *that* font's cell, not the
@@ -1410,7 +1408,7 @@ fn try_emit_fallback_glyph(
 }
 
 /// Emit a glyph resolved from a **fallback** face, normalised into the primary
-/// cell (Task #411).
+/// cell.
 ///
 /// The glyph was designed against the fallback font's own cell
 /// (`fb_cell_w` × `fb_cell_h`, baseline at `fb_baseline`). We map its natural
@@ -1495,7 +1493,7 @@ fn emit_glyph_instance(
     let cell_top = row_params.cell_y_range[0];
     let cell_bottom = row_params.cell_y_range[1];
 
-    // Procedural box-drawing / block-element glyphs (Task #410) are drawn to
+    // Procedural box-drawing / block-element glyphs are drawn to
     // fill the cell rectangle EXACTLY, so they tile with their neighbours with
     // no seam. They bypass the font-glyph baseline/bearing/clip math entirely
     // (that math accumulates sub-pixel error that shows up as hairline gaps
@@ -1574,7 +1572,7 @@ fn emit_glyph_instance(
         return;
     }
 
-    // Fallback-face glyphs (Task #411) are normalised into the primary cell —
+    // Fallback-face glyphs are normalised into the primary cell —
     // see `try_emit_fallback_glyph`.
     if try_emit_fallback_glyph(instances, glyph, &entry, font_manager, fg_color, row_params) {
         return;
@@ -1998,7 +1996,7 @@ mod tests {
     }
 
     /// Sibling of [`bg_instances_test`] that additionally accepts a
-    /// `screen_inversion` (Task 115.3), so DECSCNM composition tests can
+    /// `screen_inversion`, so DECSCNM composition tests can
     /// exercise `build_background_instances` without duplicating every other
     /// `BackgroundFrame` field. All other fields are hardcoded to match
     /// `bg_instances_test`'s defaults exactly (8x16 cells, no cursor, no
@@ -2036,7 +2034,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    //  DECSCNM (screen_inversion) / SGR-7 composition tests (Task 115.3)
+    //  DECSCNM (screen_inversion) / SGR-7 composition tests
     //
     //  Truth table exercised below (fg = cell foreground, bg = cell
     //  background):
@@ -2109,7 +2107,7 @@ mod tests {
     #[test]
     fn bg_screen_inversion_normal_matches_baseline() {
         // Proves adding `screen_inversion` with value `Normal` changed nothing:
-        // the pre-115.2 helper (`bg_instances_test`, hardcoded
+        // the earlier helper (`bg_instances_test`, hardcoded
         // `screen_inversion: ScreenInversion::Normal`) and the new helper called with
         // `screen_inversion: ScreenInversion::Normal` must produce byte-identical output.
         let colors = default_colors()
@@ -2590,7 +2588,7 @@ mod tests {
 
     #[test]
     fn normalized_fallback_full_cell_glyph_fills_primary_cell() {
-        // Reproduces the Task #411 case: a full-cell powerline glyph from the
+        // Reproduces the fallback-glyph case: a full-cell powerline glyph from the
         // bundled CaskaydiaCove fallback (its cell 19px, baseline 15, glyph
         // bearing_y 15 h 19 => fills its own cell) placed into a Courier Prime
         // primary cell (18px). It must fill the primary cell exactly, not clip.
@@ -2636,7 +2634,7 @@ mod tests {
 
     #[test]
     fn normalized_fallback_uses_independent_width_scale() {
-        // Aspect-ratio guard (Task #411 fix): a full-cell fallback glyph must be
+        // Aspect-ratio guard: a full-cell fallback glyph must be
         // scaled to the primary cell's WIDTH via the width ratio, not the height
         // ratio. Here the primary cell is much taller-and-narrower than the
         // fallback cell, so a height-ratio width would wildly over-fill.
@@ -2770,7 +2768,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    //  Resolved-colour routing (Task 132.10)
+    //  Resolved-colour routing
     //
     //  Every terminal-content colour must resolve through `ResolvedColors`
     //  (OSC 4 palette, OSC 10/11/17/19 dynamic colours), not the theme.
@@ -2968,7 +2966,7 @@ mod tests {
         // DECSCNM turns a Default-fg cell's effective background into the
         // (resolved) foreground, which is exactly the pane's base fill
         // (`PaneBackground::base_fill_for`), so the cell emits nothing
-        // (Task 147.27) -- with or without a foreground override.
+        // -- with or without a foreground override.
         let line = make_line(1, 8.0, default_colors(), FontDecorationFlags::empty());
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (7, 8, 9))]);
         let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Reversed);
@@ -2996,7 +2994,7 @@ mod tests {
     fn bg_sgr7_default_cell_in_normal_video_draws_the_foreground() {
         // Normal video: the base is the default background, so a reversed
         // default cell (effective background = default foreground) differs
-        // from it and is drawn. The Task 147.27 rule must not change this.
+        // from it and is drawn. The DECSCNM base-fill rule must not change this.
         let reversed = default_colors().with_reverse_video(ReverseVideo::On);
         let line = make_line(1, 8.0, reversed, FontDecorationFlags::empty());
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (7, 8, 9))]);
@@ -3009,7 +3007,7 @@ mod tests {
     fn bg_decscnm_below_full_opacity_draws_the_default_cell_over_the_panel() {
         // Below full opacity there is no foreground base fill, so a default
         // cell under DECSCNM draws its own (foreground-coloured) background
-        // and blends with the panel once (147 PR review R16).
+        // and blends with the panel once.
         let line = make_line(1, 8.0, default_colors(), FontDecorationFlags::empty());
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (7, 8, 9))]);
         let (bg, _) = bg_with_colors_at(&[line], &colors, None, ScreenInversion::Reversed, 0.5);
@@ -3247,7 +3245,7 @@ mod tests {
     #[test]
     fn default_underline_follows_the_effective_foreground_under_sgr7_and_decscnm() {
         // A default underline colour follows the text colour, after SGR 7 and
-        // DECSCNM are both applied (Task 132.C5). Overrides make fg and bg
+        // DECSCNM are both applied. Overrides make fg and bg
         // distinct and non-ANSI so the assertion cannot pass by accident.
         let mut flags = FontDecorationFlags::empty();
         flags.insert(FontDecorations::Underline);
@@ -3308,7 +3306,7 @@ mod tests {
         // colours. Its effective bg is `DefaultBackground`, which is NOT
         // what lies beneath under DECSCNM (the base fill is the
         // foreground), so it is drawn as one bg instance in the resolved
-        // default background (Task 147.27); the glyph is the resolved
+        // default background; the glyph is the resolved
         // default foreground. Both hold with OSC 10/11 overrides.
         let reversed = default_colors().with_reverse_video(ReverseVideo::On);
         let colors = overridden_colors(
@@ -3678,7 +3676,7 @@ mod tests {
         );
     }
 
-    /// Regression for issue #432: a full rebuild that happens to run during
+    /// Regression: a full rebuild that happens to run during
     /// the cursor's blink-*off* phase (a blinking cursor style, not steady)
     /// must report a zero-length cursor range and must NOT reserve
     /// `CURSOR_QUAD_FLOATS` tail floats for a cursor quad that was never
@@ -3761,7 +3759,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    //  Cursor appearance geometry (Task 127.3)
+    //  Cursor appearance geometry
     // -----------------------------------------------------------------------
 
     /// Fractional-position params used by the pinned-geometry tests: cell
@@ -3805,7 +3803,7 @@ mod tests {
         a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3
     }
 
-    /// `Solid` output must be bit-for-bit what the pre-127.3 builders produced.
+    /// `Solid` output must be bit-for-bit what the earlier builders produced.
     ///
     /// The expected `[x0, y0, x1, y1]` bit patterns were captured from
     /// `build_cursor_verts_only` BEFORE the refactor (8x16 cells, cursor at
@@ -4479,7 +4477,7 @@ mod tests {
 
     #[test]
     fn hover_tint_spans_full_term_width_not_shaped_run_extent() {
-        // Regression for PR #333 review comment 5: the hover-tint
+        // Regression: the hover-tint
         // band used to derive its width from the last shaped run on
         // each row, which silently truncated the tint at the last
         // non-blank glyph.  After the fix, the band always spans
@@ -4588,7 +4586,7 @@ mod tests {
         );
     }
 
-    // ── build_image_verts z-order (Task 100.7b) ──────────────────────
+    // ── build_image_verts z-order ──────────────────────
 
     /// Build a minimal 1x1-pixel `InlineImage` for `build_image_verts` tests.
     fn make_inline_image(id: u64) -> InlineImage {
@@ -4609,7 +4607,7 @@ mod tests {
     /// Build a single-cell `ImagePlacement` with the given image id,
     /// z-index, and placement instance id.
     ///
-    /// `instance_id` (Task 100.18) must be explicit rather than derived from
+    /// `instance_id` must be explicit rather than derived from
     /// `image_id` so tests can build two DISTINCT placements of the SAME
     /// image id and confirm they are bucketed separately.
     fn make_placement(image_id: u64, z_index: i32, instance_id: u64) -> ImagePlacement {
@@ -4628,7 +4626,7 @@ mod tests {
     }
 
     /// Higher z-index images must be emitted (and therefore drawn) after
-    /// lower z-index ones, so they render on top (Task 100.7b).
+    /// lower z-index ones, so they render on top.
     #[test]
     fn build_image_verts_orders_by_z_index() {
         let term_width = 4;
@@ -4781,10 +4779,9 @@ mod tests {
     /// Two independent placements of the SAME image id (e.g. two `a=p`
     /// puts with `p=0`/unspecified) must produce TWO separate `ImageBounds`
     /// buckets/draw-order entries with distinct instance ids and
-    /// correctly-sized separate quads — not one merged, oversized quad
-    /// (Task 100.18).
+    /// correctly-sized separate quads — not one merged, oversized quad.
     ///
-    /// This is the fail-before/pass-after assertion for 100.18: before the
+    /// This is the fail-before/pass-after assertion: before the
     /// fix, bucketing by `image_id` would have collapsed both placements'
     /// cells into a single `ImageBounds` entry spanning cells from BOTH
     /// placements (an oversized bounding box), yielding exactly one
@@ -4838,7 +4835,7 @@ mod tests {
     }
 
     /// A same NON-ZERO `placement_id` re-put (kitty spec REPLACE
-    /// semantics, Task 100.18/100.20) is exercised at the
+    /// semantics) is exercised at the
     /// `Buffer::clear_image_placements_by_placement` level in
     /// `freminal-buffer`; here we only confirm that once the OLD
     /// placement's cells are cleared (as that lower-level call does), only
@@ -4873,7 +4870,7 @@ mod tests {
         assert_eq!(draw_order[0].instance_id, 300);
     }
 
-    // ── compute_image_quad UV composition (Task 100.9 source-crop) ────
+    // ── compute_image_quad UV composition (source-crop) ────
 
     /// Build an `InlineImage` with caller-specified pixel dimensions and a
     /// single-cell display grid, for `compute_image_quad` UV tests where the
@@ -4896,7 +4893,7 @@ mod tests {
 
     /// Like [`make_inline_image_sized`], but with `size_mode` set to
     /// `ExplicitCells` (kitty `c=`/`r=`, iTerm2 explicit `width=`/`height=`),
-    /// for Task 100.17b quad-sizing tests that need to lock in the
+    /// for quad-sizing tests that need to lock in the
     /// unchanged "scale to the declared cell grid" behaviour for that mode.
     fn make_inline_image_sized_explicit_cells(
         id: u64,
@@ -4991,7 +4988,7 @@ mod tests {
 
     /// A source-crop (kitty `a=p` x/y/w/h) on a fully-visible single-cell
     /// image must re-map the UV range into the crop's pixel-space window
-    /// instead of the full texture (Task 100.9).
+    /// instead of the full texture.
     #[test]
     fn compute_image_quad_with_crop_maps_to_crop_sub_range() {
         let bounds = make_bounds(Some(SourceCrop {
@@ -5040,14 +5037,14 @@ mod tests {
         );
     }
 
-    // ── compute_image_quad position sizing (Task 100.17b) ────
+    // ── compute_image_quad position sizing ────
 
     const POS_EPSILON: f32 = 1e-4;
 
     /// `ImageSizeMode::NativePixels` with a native size SMALLER than the
     /// cell bounding box must produce a quad sized to the native pixels
     /// (anchored at `b.x0`/`b.y0`), NOT stretched to fill the full cell
-    /// box. This is the core Task 100.17 fail-before/pass-after
+    /// box. This is the core fail-before/pass-after
     /// assertion: before this fix, `x1-x0`/`y1-y0` equalled the 8x16 cell
     /// box regardless of the 4x4 native size.
     #[test]
@@ -5073,7 +5070,7 @@ mod tests {
     }
 
     /// `ImageSizeMode::ExplicitCells` must still scale the quad to fill the
-    /// full cell bounding box — unchanged pre-100.17 behaviour, locked in
+    /// full cell bounding box — unchanged original behaviour, locked in
     /// so a future regression can't silently apply native sizing to
     /// explicitly-sized (kitty `c=`/`r=`, iTerm2 explicit width/height)
     /// images.
@@ -5099,7 +5096,7 @@ mod tests {
         );
     }
 
-    /// `NativePixels` composed with a source-crop (kitty `a=p`, Task 100.9)
+    /// `NativePixels` composed with a source-crop (kitty `a=p`)
     /// must size the quad to the CROP's pixel dimensions, not the full
     /// image's — a cropped native-size image displays at the crop's actual
     /// size while the UV window (covered by the existing crop UV test)
@@ -5187,7 +5184,7 @@ mod tests {
         );
     }
 
-    // ── compute_image_quad sub-cell X/Y offset (Task 100.19) ────
+    // ── compute_image_quad sub-cell X/Y offset ────
 
     /// A kitty `X=`/`Y=` sub-cell offset must translate the quad's origin
     /// (all four corners) by that many pixels — position only, UVs

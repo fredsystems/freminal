@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! A real PTY child, spawned through the production path with the production
-//! environment, resolves the `xterm-freminal` terminfo entry (Task 151.9).
+//! environment, resolves the `xterm-freminal` terminfo entry.
 //!
 //! The child is started by `FreminalPtyInputOutput::new`, so `TERM` and
 //! `TERMINFO` are exactly what a pane gets: the entry is extracted per pane

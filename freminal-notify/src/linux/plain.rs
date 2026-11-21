@@ -3,8 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Plain (untracked) notifications through the D-Bus notification service
-//! (Task 149.2).
+//! Plain (untracked) notifications through the D-Bus notification service.
 //!
 //! OSC 9, OSC 777, OSC 133 `D` command-finished and the Settings "Test
 //! Notification" button show a summary and a body and need nothing back: no
@@ -258,7 +257,7 @@ mod tests {
         assert_no_queued_events(handle)
     }
 
-    /// Markup as a program could emit it (issue #560): tags, an entity start
+    /// Markup as a program could emit it: tags, an entity start
     /// and a link. The characters the daemon must not see as markup are the
     /// `<` and `&`.
     const MARKUP: &str = r#"<b>x</b> & <a href="http://e">y</a>"#;
@@ -649,7 +648,7 @@ mod tests {
         Ok(())
     }
 
-    // ── Adopting the daemon's identity (149.C17) ────────────────────────
+    // ── Adopting the daemon's identity ────────────────────────────────────
 
     #[test]
     fn a_plain_notification_adopts_the_reply_sender_as_the_owner_and_refreshes_the_capabilities()

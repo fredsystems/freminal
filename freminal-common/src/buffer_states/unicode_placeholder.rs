@@ -143,7 +143,7 @@ pub struct VirtualPlacement {
     pub cols: u32,
     /// Display height in terminal rows.
     pub rows: u32,
-    /// Unique placement-instance id (Task 100.20), minted once at
+    /// Unique placement-instance id, minted once at
     /// registration time via `next_placement_instance_id()`.
     ///
     /// Stamped onto every placeholder cell that resolves to this virtual

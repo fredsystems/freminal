@@ -16,7 +16,7 @@
 //! (`\\server\share\x`) -- even just canonicalising it -- opens an SMB
 //! connection and sends an `NTLMv2` challenge-response to `server`, which an
 //! attacker who controls the path (for example through terminal output) can
-//! harvest (GHSA-3g79-vfp3-q57g). Callers must classify the string and
+//! harvest. Callers must classify the string and
 //! reject everything that is not [`WindowsPathKind::LocalDrive`] **before**
 //! making any filesystem call.
 //!

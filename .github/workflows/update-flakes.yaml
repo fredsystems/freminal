@@ -68,7 +68,7 @@ jobs:
       # after v0.9.0. flake.nix vendors nix/cargo-bundle.lock and builds
       # cargo-bundle from that source via `cargoLock.lockFile`, so bumping
       # the input without regenerating the vendored lockfile breaks the Nix
-      # build the moment upstream's Cargo.toml drifts from it (see PR #481).
+      # build the moment upstream's Cargo.toml drifts from it.
       # This mirrors, for this one hand-vendored lockfile, what Renovate's
       # lockFileMaintenance does automatically for the main Cargo.lock.
       - name: Regenerate nix/cargo-bundle.lock for cargo-bundle-src

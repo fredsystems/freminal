@@ -74,7 +74,7 @@ impl Buffer {
         // height change and eviction below, and read it back at the end.
         let mut saved_pin = self.pin_saved_cursor();
 
-        // ---- NO BLANKET DECOMPACT NEEDED (Task 118.3 fix / 118.x follow-up) ----
+        // ---- NO BLANKET DECOMPACT NEEDED ----
         // An earlier version of this function force-decompacted every row
         // (including all of scrollback) up front on every resize, which was a
         // severe CPU regression on height-only resizes (`shrink_height`,
@@ -95,7 +95,7 @@ impl Buffer {
         //     height-only resize, where width didn't change at all.
         // Out-of-window rows are left `Live` after a resize; (re-)compacting
         // them is deferred to the PTY thread's idle tick via
-        // `Buffer::compact_idle_scrollback` (Task 118 follow-up), not
+        // `Buffer::compact_idle_scrollback`, not
         // performed synchronously here.
 
         // ---- WIDTH CHANGE → REFLOW ----
@@ -226,7 +226,7 @@ impl Buffer {
             );
             // The primary marks held in `self` belong to the store that was
             // just reflowed / trimmed; translate them with it (primary marks
-            // were otherwise left pointing at pre-resize rows, Task 125.14).
+            // were otherwise left pointing at pre-resize rows).
             let primary_base = parked.rows.base();
             self.parked_primary = Some(parked);
             if let Some(remap) = remap {
@@ -265,7 +265,7 @@ impl Buffer {
     /// The clipped cells can hold images, which the row cannot account for:
     /// the buffer-wide `image_cell_count` is reduced by every image cell
     /// removed, and a cell-owned (Sixel/iTerm2) image left without any cell is
-    /// freed, as when text overwrites its last cell (Task 125.C15). A Kitty
+    /// freed, as when text overwrites its last cell. A Kitty
     /// image's data outlives its cells and is kept.
     fn clip_rows_to_width(&mut self, new_width: usize) {
         let mut removed = 0usize;
@@ -405,7 +405,7 @@ impl Buffer {
             image_cell_count: parked.image_cell_count,
             prompt_rows: Vec::new(),
             command_blocks: CommandBlockLog::new(),
-            // Task 119: carried through so a resize while the other screen is
+            // Carried through so a resize while the other screen is
             // up (which reflows/enforces-scrollback-limit against this
             // throwaway `Buffer`, not `self`) keeps any compressed primary
             // scrollback blocks correctly in lockstep.
@@ -481,14 +481,13 @@ impl Buffer {
             return;
         }
 
-        // Task 119.4: restore every deep-cold compressed row across the
-        // WHOLE buffer back to real (Task-118 `Compact`) content before the
+        // Restore every deep-cold compressed row across the
+        // WHOLE buffer back to real (`Compact`) content before the
         // reflow algorithm below reads any cell. This is deliberately the
         // slow-but-correct decompress-everything path — the existing
         // synchronous reflow must keep working correctly with compressed
         // scrollback present; only decompressing the bands reflow actually
-        // needs is the deferred windowed-reflow design (`FUTURE_PLANS.md`
-        // B.10), not done here.
+        // needs is a deferred windowed-reflow design, not done here.
         self.ensure_decompressed(0..self.rows.len());
 
         let old_cursor_y = self.cursor.pos.y;
@@ -508,7 +507,7 @@ impl Buffer {
         // Note: reflow takes each row's cells exactly once, by value, via
         // `Row::into_cells` below, which decompacts a compact row on that
         // single move, so no up-front `ensure_live` pass is needed. Every
-        // row is now guaranteed to be `Live` or Task-118 `Compact` (never
+        // row is now guaranteed to be `Live` or `Compact` (never
         // evicted) thanks to the `ensure_decompressed` call above.
 
         // 1) Group rows into logical lines based on RowJoin.
@@ -521,7 +520,7 @@ impl Buffer {
         //    buffer-absolute row indices stored on `command_blocks` and
         //    `prompt_rows` to their post-reflow positions — those indices are
         //    absolute and would otherwise dangle once reflow changes the row
-        //    count (Task 113, Bug R).
+        //    count.
         let mut logical_lines: Vec<Vec<Row>> = Vec::new();
         let mut current_line: Vec<Row> = Vec::new();
 
@@ -613,7 +612,7 @@ impl Buffer {
                 for (row_pos, old_row) in line.into_iter().enumerate() {
                     let old_origin = old_row.origin;
                     // The old row is discarded here, so move its cells out
-                    // rather than cloning them (Task 120.3).
+                    // rather than cloning them.
                     let mut cells: Vec<crate::cell::Cell> = old_row.into_cells();
                     if cells.len() > new_width {
                         // An image wider than the new terminal width is
@@ -675,7 +674,7 @@ impl Buffer {
 
             // Flatten all rows in this logical line into a single Vec<Cell>.
             // The old rows are discarded here, so their cells are moved, not
-            // cloned (Task 120.3); a single-row line hands over its vector.
+            // cloned; a single-row line hands over its vector.
             let mut old_rows_of_line = line.into_iter();
             let mut flat_cells: Vec<crate::cell::Cell> = old_rows_of_line
                 .next()
@@ -704,7 +703,7 @@ impl Buffer {
             let mut is_first_row_for_line = true;
 
             // Consume the flattened line by value so every cell is moved
-            // into its new row rather than cloned (Task 120.3).
+            // into its new row rather than cloned.
             let mut flat_iter = flat_cells.into_iter().peekable();
             while let Some(cell) = flat_iter.next() {
                 if cell.is_head() {
@@ -824,14 +823,14 @@ impl Buffer {
         // the `ensure_decompressed` call at the top of this function already
         // decompressed everything the old `self.rows` referenced, so
         // `self.blocks` is empty here — `replace_all` likewise resets the
-        // block map to match the new row count (Task 119.4).
+        // block map to match the new row count.
         //
         // `replace_all` numbers the new rows from the old `next_number()`, so
         // every pre-reflow row number is below the new base until the remap
         // below translates it.
         let new_row_cells: Vec<usize> = new_rows.iter().map(|r| r.characters().len()).collect();
         self.rows.replace_all(new_rows);
-        // Task 121 Part C: the row cache was just replaced wholesale with
+        // The row cache was just replaced wholesale with
         // fresh entries for an entirely re-wrapped row layout — a stale
         // `merge_cache` (which could coincidentally still have a matching
         // `fp` if the window's row count happens to land on the same
@@ -845,8 +844,8 @@ impl Buffer {
         if had_image_cells {
             self.image_cell_count = self.rows.iter().map(Row::count_image_cells).sum();
         }
-        // The rows were renumbered, so every image's stamp horizon (Task
-        // 125.15) named a pre-reflow row: recompute them from the new cells.
+        // The rows were renumbered, so every image's stamp horizon
+        // named a pre-reflow row: recompute them from the new cells.
         self.rebuild_image_horizons();
 
         // 4) Remap cursor position based on reflow tracking.
@@ -864,8 +863,7 @@ impl Buffer {
             self.cursor.pos.x = self.width.saturating_sub(1);
         }
 
-        // 5) Translate every stored row number (Task 113, Bug R; Task
-        //    125.14). Reflow changed the row boundaries, so command blocks and
+        // 5) Translate every stored row number. Reflow changed the row boundaries, so command blocks and
         //    prompt rows would otherwise point at the wrong rows (or, now that
         //    rows are renumbered, at nothing), corrupting the command-block
         //    gutter and fold layout.
@@ -980,8 +978,7 @@ impl Buffer {
                 // cursor.  After a later shrink the bottom-anchored window then
                 // showed only that blank tail while the live prompt/output was
                 // stranded above it, in unreachable scrollback; no amount of
-                // scrolling recovered it and only `clear` fixed it (Task 113,
-                // Bug G).
+                // scrolling recovered it and only `clear` fixed it.
                 //
                 // The fix: reclaim any trailing blank screen-padding rows below
                 // the live cursor, then append nothing.  Rows below the cursor
@@ -1008,7 +1005,7 @@ impl Buffer {
             // (e.g. nvim) that rely on absolute cursor positioning after
             // SIGWINCH see gaps and mispositioned content.
             //
-            // Task 118.7 fix: the previous range `0..old_height` invalidated
+            // The previous range `0..old_height` invalidated
             // the WRONG rows whenever scrollback existed — those are the OLDEST
             // scrollback rows at the top of the buffer, not the visible window
             // at the bottom.  It over-invalidated cold scrollback (wasting cache
@@ -1017,7 +1014,7 @@ impl Buffer {
             // visible window instead.
             let new_visible_start = self.rows.len().saturating_sub(new_height);
             // Re-exposing scrollback can expose rows that were compressed into
-            // a block (Task 119): they are inert placeholders until restored,
+            // a block: they are inert placeholders until restored,
             // and the window is writable (cursor addressing, IL/DL and scroll
             // rotations touch its rows directly, before any flatten would
             // decompress them). Restore them now, as the flatten path does.
@@ -1091,7 +1088,7 @@ impl Buffer {
     ///
     /// This is used by the height-grow path so the taller window reveals real
     /// scrollback above the live bottom instead of accumulating an
-    /// unreclaimable blank tail below it (Task 113, Bug G).  It deliberately
+    /// unreclaimable blank tail below it.  It deliberately
     /// stops at the first non-pristine row from the bottom, so it never touches
     /// BCE-filled rows, content, or scrollback.
     fn reclaim_trailing_blank_padding(&mut self) {
@@ -1134,7 +1131,7 @@ impl Buffer {
     /// Without this, a narrowing resize left `scroll_region_right` at the old
     /// right edge, so text written under DECLRMM wrapped at a column past the
     /// buffer width and parked the cursor beyond it, and a later CBT sliced
-    /// the tab-stop table out of range (GHSA-8f32-mj37-fw6v).
+    /// the tab-stop table out of range.
     ///
     /// xterm's `ScreenResize` (screen.c, "adjust scrolling region") calls
     /// `resetMargins`, and `set_lr_margins` (charproc.c) clamps both margins
@@ -1195,9 +1192,8 @@ impl Buffer {
         // scrollback) — those rows are left `Live` here. Compaction is a
         // deferred, budgeted background task (`Buffer::compact_idle_scrollback`)
         // driven from the PTY thread's idle tick, never performed
-        // synchronously on this hot per-line ingest path (Task 118 follow-up:
-        // synchronous compaction here caused a +23% `softwrap_heavy` bench
-        // regression).
+        // synchronously on this hot per-line ingest path (doing
+        // so caused a +23% `softwrap_heavy` bench regression).
         if self.rows.len() <= max_rows {
             let max_offset = self.max_scroll_offset();
             return scroll_offset.min(max_offset);
@@ -1217,13 +1213,13 @@ impl Buffer {
         //
         // `evict_front_rows` settles everything keyed on the dropped rows --
         // the image-cell counter, the compressed blocks' live-row counts (a
-        // block whose every row was drained is freed, Task 119.4), the images
-        // whose last row went (Task 125.15 stamp horizon) and the marks that
+        // block whose every row was drained is freed), the images
+        // whose last row went and the marks that
         // pointed at them -- in time proportional to the rows dropped, not the
         // rows kept.
         let overflow = self.evict_front_rows(overflow);
 
-        // Task #405 / 125.16: once scrollback is at capacity, every line feed
+        // Once scrollback is at capacity, every line feed
         // pushes one row at the bottom and this eviction then removes
         // `overflow` rows from the front in the same logical step, netting
         // `self.rows.len()` unchanged. No explicit `merge_cache` invalidation
@@ -1250,7 +1246,7 @@ impl Buffer {
         // window are left `Live`. Compaction is deferred to the PTY
         // thread's idle tick via `Buffer::compact_idle_scrollback`, never
         // performed synchronously on this hot path (see the doc comment
-        // above and Task 118 follow-up).
+        // above).
 
         self.debug_assert_invariants();
 
@@ -1413,7 +1409,7 @@ impl Buffer {
                 AlternateContents::Clear => self.erase_tag(),
             };
             // The alternate screen's rows are numbered in their own
-            // namespace (Task 125.14), so a primary row number can never
+            // namespace, so a primary row number can never
             // alias an alternate row.
             ParkedScreen {
                 rows: Self::blank_alternate_store(
@@ -1437,7 +1433,7 @@ impl Buffer {
         // scan of the command blocks if none are recorded during this visit.
         self.command_blocks.checkpoint();
 
-        // Task 121 Part C: the row cache was just replaced wholesale — the
+        // The row cache was just replaced wholesale — the
         // outgoing screen's `merge_cache` must not be reused against it (a
         // matching `fp` here would be entirely coincidental).
         self.merge_cache = None;

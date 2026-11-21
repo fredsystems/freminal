@@ -352,7 +352,7 @@ pub struct ScrollbackConfig {
 
 impl Default for ScrollbackConfig {
     fn default() -> Self {
-        // Raised from 4000 to 10000 in Task 118 (compact cell representation).
+        // Raised from 4000 to 10000 once the compact cell representation landed.
         //
         // Chosen with data, not guessed: after compaction the measured settled
         // per-line cost of realistic colored scrollback is ~1.0–1.7 KB/line
@@ -486,13 +486,13 @@ pub struct TabsConfig {
     pub show_single_tab: bool,
     /// Position of the tab bar: `"top"` or `"bottom"`.
     pub position: TabBarPosition,
-    /// Whether toggling broadcast input *on* requires a confirmation dialog
-    /// (Task 74). When `true`, the first activation of broadcast in a tab
+    /// Whether toggling broadcast input *on* requires a confirmation dialog.
+    /// When `true`, the first activation of broadcast in a tab
     /// prompts "You are about to broadcast keyboard input to N panes.
     /// Continue?". Disabling broadcast never prompts. Default: `false`.
     pub confirm_broadcast: bool,
-    /// Whether keyboard focus follows the mouse across split panes (Task
-    /// 110). When `true` (default), mousing into a pane in a muxed session
+    /// Whether keyboard focus follows the mouse across split panes.
+    /// When `true` (default), mousing into a pane in a muxed session
     /// focuses it without a click. When `false`, panes are focused only by
     /// clicking (the legacy behavior). Tab switching is always click-to-focus
     /// regardless of this setting.
@@ -616,7 +616,7 @@ impl Default for BellConfig {
 /// An OSC 52 write replaces the user's clipboard, so any program able to print
 /// to a terminal -- including one in a background tab -- can overwrite it with
 /// something the user will later paste into a shell. The default restricts
-/// writes to the pane the user is looking at (Task 148.16, GHSA-v2hw-gcg8-2rfr).
+/// writes to the pane the user is looking at.
 /// Independent of this policy, a write whose decoded payload exceeds 1 MiB is
 /// dropped by the emulator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -808,7 +808,7 @@ impl PasteGuardConfig {
 //  Close Guard
 // ------------------------------------------------------------------------------------------------
 
-/// Configuration for the close-on-running-command guard (Task 98).
+/// Configuration for the close-on-running-command guard.
 ///
 /// When the user attempts to close a pane, tab, or window while one or more
 /// shells in the affected scope have a running foreground command — as
@@ -872,7 +872,7 @@ impl Default for CloseGuardConfig {
 /// freminal also injects the necessary env at PTY spawn time so the bundled
 /// bash/zsh/fish integration scripts auto-load — no manual sourcing required.
 /// The scripts emit OSC 133 A/B/C/D markers so the terminal can render
-/// command blocks, gutters (Task 73), and notifications (Task 76).
+/// command blocks, gutters, and notifications.
 ///
 /// ```toml
 /// [shell_integration]
@@ -1138,7 +1138,7 @@ pub enum FreminalToastCategory {
     ConfigReload,
 }
 
-/// Configuration for the notification system (Task 76).
+/// Configuration for the notification system.
 ///
 /// Notifications are produced from three sources: OSC 9 (iTerm2/WezTerm)
 /// text payloads, OSC 777 (`notify;TITLE;BODY`, urxvt) payloads, and OSC 133
@@ -1182,8 +1182,8 @@ pub struct NotificationsConfig {
 
     /// When `true`, OSC 99 (kitty stateful) notifications are honoured.
     /// Default: `true`. (This is the on/off kill-switch; the per-notification
-    /// occasion gating is separate. The drain-site enforcement lands in
-    /// Task 99.8 — 110.0 only makes the option loadable.)
+    /// occasion gating is separate. The drain-site enforcement lives where
+    /// notifications are drained; this only makes the option loadable.)
     pub osc_99: bool,
 
     /// When `true`, an OSC 133 `D` (command finished) event fires a
@@ -1203,7 +1203,7 @@ pub struct NotificationsConfig {
     /// urxvt) text notifications.  Default: [`NotificationRouting::Toast`].
     ///
     /// Accepts the deprecated key name `routing_info` as an alias for
-    /// backwards compatibility (issue #433 renamed it); a config still using
+    /// backwards compatibility (it has since been renamed); a config still using
     /// `routing_info` loads correctly and triggers a one-time deprecation
     /// warning at load time (see `load_partial`).
     #[serde(alias = "routing_info")]
@@ -1358,8 +1358,8 @@ pub struct ChromeConfig {
 /// Configuration for the per-pane OSC 9;4 progress indicator.
 ///
 /// This gates **display only**. Recognition and parsing of OSC 9;4 progress
-/// reports happen unconditionally regardless of this setting (see issue
-/// #502); disabling it only suppresses the rendered progress bar.
+/// reports happen unconditionally regardless of this setting; disabling it
+/// only suppresses the rendered progress bar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProgressConfig {
@@ -2257,8 +2257,7 @@ fn parse_partial(contents: &str) -> Result<ConfigPartial, toml::de::Error> {
 /// [`load_config_with_warnings`]).
 ///
 /// Currently detects:
-/// - `[notifications] routing_info` — renamed to `routing_osc_text` (issue
-///   #433).
+/// - `[notifications] routing_info` — renamed to `routing_osc_text`.
 fn collect_deprecated_key_warnings(path: &Path, contents: &str, warnings: &mut Vec<String>) {
     // A parse failure here is not fatal: the real deserialize below reports
     // the error with proper context, so a malformed file simply skips the
@@ -2272,7 +2271,7 @@ fn collect_deprecated_key_warnings(path: &Path, contents: &str, warnings: &mut V
     if config_uses_deprecated_routing_info(&value) {
         warnings.push(format!(
             "config key `[notifications] routing_info` in {} is deprecated and \
-             was renamed to `routing_osc_text` (issue #433); it still works via \
+             was renamed to `routing_osc_text`; it still works via \
              a compatibility alias but you should rename it in your config",
             path.display()
         ));
@@ -2280,9 +2279,9 @@ fn collect_deprecated_key_warnings(path: &Path, contents: &str, warnings: &mut V
 }
 
 /// Whether a parsed config document contains the deprecated
-/// `[notifications] routing_info` key (renamed to `routing_osc_text` in issue
-/// #433). Extracted as a pure predicate so the detection is unit-testable
-/// without a tracing subscriber.
+/// `[notifications] routing_info` key (renamed to `routing_osc_text`).
+/// Extracted as a pure predicate so the detection is unit-testable without a
+/// tracing subscriber.
 fn config_uses_deprecated_routing_info(value: &toml::Value) -> bool {
     value
         .get("notifications")
@@ -2732,7 +2731,7 @@ size = 14.0
 
     #[test]
     fn deprecated_routing_info_key_still_loads_via_alias() {
-        // Issue #433 renamed `routing_info` to `routing_osc_text`. A config
+        // `routing_info` was renamed to `routing_osc_text`. A config
         // still using the old key must keep working (via the serde alias)
         // rather than silently reverting to the default.
         let toml_str = "\
@@ -3592,7 +3591,7 @@ copy = "Ctrl+Shift+C"
         assert_eq!(cfg.tabs.position, TabBarPosition::Top);
         assert!(
             cfg.tabs.focus_follows_mouse,
-            "focus_follows_mouse should default to true (Task 110)"
+            "focus_follows_mouse should default to true"
         );
     }
 
@@ -3726,7 +3725,7 @@ mode = "none"
     /// `apply_partial`). This is the regression net for the class of bug
     /// where a section is added to `Config` but not wired into
     /// `ConfigPartial` / `apply_partial`, causing user TOML to be silently
-    /// dropped (see fix 76.4a). A non-default value is set in EVERY section;
+    /// dropped. A non-default value is set in EVERY section;
     /// if any section fails to merge, that section's assertion reverts to the
     /// default and fails here.
     #[test]
@@ -3906,7 +3905,7 @@ mode = "none"
         // adding a new field to `Config` breaks compilation here until the
         // author adds a mutation + assertion for it above. That converts the
         // "new section silently not wired into ConfigPartial/apply_partial"
-        // bug class (see fix 76.4a) from a runtime surprise into a
+        // bug class from a runtime surprise into a
         // compile-time failure. If you are here because of a build error:
         // wire your new field into `ConfigPartial` and `apply_partial`, then
         // add a mutation and an assertion to this test.
@@ -4187,7 +4186,7 @@ mode = "both"
     fn security_config_kitty_file_transfer_defaults_to_false() {
         assert!(
             !SecurityConfig::default().allow_kitty_file_transfer,
-            "kitty file transfer must be off by default (GHSA-8prj-mhmf-xpjg)"
+            "kitty file transfer must be off by default"
         );
         assert!(!Config::default().security.allow_kitty_file_transfer);
     }
@@ -4237,7 +4236,7 @@ allow_clipboard_read = true
     fn security_config_window_ops_defaults_to_false() {
         assert!(
             !SecurityConfig::default().allow_window_ops,
-            "XTWINOPS window operations must be off by default (GHSA-67hw-cw29-r66f)"
+            "XTWINOPS window operations must be off by default"
         );
         assert!(!Config::default().security.allow_window_ops);
     }
@@ -4292,7 +4291,7 @@ allow_clipboard_read = true
         assert_eq!(
             SecurityConfig::default().allow_clipboard_write,
             ClipboardWritePolicy::ActivePane,
-            "OSC 52 writes must default to the active pane only (GHSA-v2hw-gcg8-2rfr)"
+            "OSC 52 writes must default to the active pane only"
         );
         assert_eq!(
             Config::default().security.allow_clipboard_write,
@@ -4622,7 +4621,7 @@ unfocused_style = "dotted"
     }
 
     // =================================================================
-    //  Task 52 — Adaptive Light/Dark Theming (ThemeMode + ThemeConfig)
+    //  Adaptive Light/Dark Theming (ThemeMode + ThemeConfig)
     // =================================================================
 
     // ── ThemeMode TOML serialization ─────────────────────────────────
@@ -5378,11 +5377,10 @@ path = "/tmp/my.frag"
 
     #[test]
     fn shell_integration_dir_with_freminal_resources_dir_env_returns_packaging_provided() {
-        // Regression for the Copilot PR-333 review finding that
         // `FREMINAL_RESOURCES_DIR` should be the resources *root* (so
-        // `shell-integration/` is appended) and that the resulting
-        // directory must be tagged as packaging-provided so the binary
-        // never calls `sync_to_disk` against it.
+        // `shell-integration/` is appended) and the resulting directory
+        // must be tagged as packaging-provided so the binary never calls
+        // `sync_to_disk` against it.
         let _lock = SHELL_INTEGRATION_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5431,8 +5429,7 @@ path = "/tmp/my.frag"
     #[test]
     #[cfg(unix)]
     fn shell_integration_dir_with_xdg_data_dirs_hit_returns_packaging_provided() {
-        // Regression for the Copilot PR-333 review finding that an
-        // XDG_DATA_DIRS hit (typically a system path like
+        // An XDG_DATA_DIRS hit (typically a system path like
         // `/usr/share/freminal/shell-integration/`) must be tagged
         // packaging-provided so the binary never tries to `sync_to_disk`
         // into a system-owned directory.

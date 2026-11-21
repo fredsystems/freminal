@@ -1,11 +1,11 @@
 #!/run/current-system/sw/bin/bash
-# Reproducible Task 125 Freminal/WezTerm/Ghostty parity capture driver.
+# Reproducible Freminal/WezTerm/Ghostty parity capture driver.
 
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly SCRIPT_DIR
-# shellcheck source=assets/profiling/task125/workloads.sh
+# shellcheck source=assets/profiling/parity/workloads.sh
 source "${SCRIPT_DIR}/workloads.sh"
 
 readonly WEZTERM_BIN="/nix/store/mmvpz8sgpp4gg1lwsjv68knvkzqmsdwk-wezterm-0-unstable-2026-09-17/bin/wezterm"
@@ -19,12 +19,12 @@ readonly CONFIRM_REPEATS=7
 readonly AMDGPU_PCI="0000:03:00.0"
 # Substring the Freminal `Active OpenGL renderer` line must contain. Override
 # only when measuring on different hardware.
-readonly TASK125_EXPECTED_RENDERER="${TASK125_EXPECTED_RENDERER:-AMD Radeon RX 7900 XTX}"
-# Set TASK125_ALLOW_GPU_UNAVAILABLE=1 to record (rather than reject) a sample
+readonly PARITY_EXPECTED_RENDERER="${PARITY_EXPECTED_RENDERER:-AMD Radeon RX 7900 XTX}"
+# Set PARITY_ALLOW_GPU_UNAVAILABLE=1 to record (rather than reject) a sample
 # whose process exposes no DRM fdinfo; gpu_gfx_ns is then blank, never zero.
-readonly TASK125_ALLOW_GPU_UNAVAILABLE="${TASK125_ALLOW_GPU_UNAVAILABLE:-0}"
+readonly PARITY_ALLOW_GPU_UNAVAILABLE="${PARITY_ALLOW_GPU_UNAVAILABLE:-0}"
 readonly SAMPLE_CSV_HEADER='repeat,workload,terminal,wall_seconds,task_clock_ms,user_task_clock_ms,kernel_task_clock_ms,cycles,instructions,context_switches,wakeups,gpu_gfx_ns,grid_rows,grid_cols,gpu_status,exited_tids'
-readonly TASK125_FREMINAL_RUST_LOG='none,freminal::frame_profiling=debug,freminal::task_125::live_render_profile=debug,freminal_windowing::frame_profiling=debug,freminal_windowing::gl_context=info,freminal::task_125::gpu_timing=debug,freminal_windowing::task_125::gpu_timing=debug'
+readonly PARITY_FREMINAL_RUST_LOG='none,freminal::frame_profiling=debug,freminal::live_render_profile=debug,freminal_windowing::frame_profiling=debug,freminal_windowing::gl_context=info,freminal::gpu_timing=debug,freminal_windowing::gpu_timing=debug'
 SAMPLE_WARMUP=${SCREEN_WARMUP}
 SAMPLE_DURATION=${SCREEN_DURATION}
 SAMPLE_REPEATS=${SCREEN_REPEATS}
@@ -59,19 +59,19 @@ usage() {
 		'CURSOR: blink | steady'
 }
 
-task125_tree_tids() {
+parity_tree_tids() {
 	local root=$1 task
 	for task in "/proc/${root}"/task/*; do
 		[[ -d ${task} ]] && printf '%s\n' "${task##*/}"
 	done
 }
 
-task125_pid_csv() {
+parity_pid_csv() {
 	local root=$1
 	printf '%s\n' "${root}"
 }
 
-task125_wakeup_filter() {
+parity_wakeup_filter() {
 	local tids_file=$1 tid filter=''
 	while read -r tid; do
 		if [[ -n ${filter} ]]; then
@@ -82,10 +82,10 @@ task125_wakeup_filter() {
 	printf '%s\n' "${filter}"
 }
 
-task125_drm_gfx_ns() {
+parity_drm_gfx_ns() {
 	local root=$1 file fd target expected line client gfx key total=0
 	local -A seen=()
-	expected=$(task125_expected_render_node)
+	expected=$(parity_expected_render_node)
 	for file in "/proc/${root}"/fdinfo/*; do
 		[[ -r ${file} ]] || continue
 		fd=${file##*/}
@@ -116,12 +116,12 @@ task125_drm_gfx_ns() {
 	printf '%s\n' "${total}"
 }
 
-task125_perf_value() {
+parity_perf_value() {
 	local file=$1 event=$2
 	awk -F, -v event="${event}" '$3 == event || $3 == event ":u" { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit }' "${file}"
 }
 
-task125_tree_cpu_ticks() {
+parity_tree_cpu_ticks() {
 	local root=$1 stat
 	local -a fields=()
 	stat=$(<"/proc/${root}/stat")
@@ -130,7 +130,7 @@ task125_tree_cpu_ticks() {
 	printf '%s %s\n' "${fields[11]}" "${fields[12]}"
 }
 
-task125_expected_render_node() {
+parity_expected_render_node() {
 	local node
 	for node in "/sys/bus/pci/devices/${AMDGPU_PCI}/drm"/render*; do
 		[[ -e ${node} ]] && printf '/dev/dri/%s\n' "${node##*/}" && return 0
@@ -139,9 +139,9 @@ task125_expected_render_node() {
 	return 1
 }
 
-task125_verify_process_gpu() {
+parity_verify_process_gpu() {
 	local root=$1 expected fd target
-	expected=$(task125_expected_render_node)
+	expected=$(parity_expected_render_node)
 	for fd in "/proc/${root}"/fd/*; do
 		[[ -e ${fd} ]] || continue
 		target=$(readlink "${fd}" 2>/dev/null || true)
@@ -160,9 +160,9 @@ record_metadata() {
 		printf 'git_commit=%s\n' "$(git rev-parse HEAD)"
 		printf 'freminal_bin=%s\n' "$(realpath -m "${freminal_bin}")"
 		printf 'freminal_bin_sha256=%s\n' "$(sha256sum "${freminal_bin}" | cut -d' ' -f1)"
-		printf 'freminal_rust_log=%s\n' "${TASK125_FREMINAL_RUST_LOG}"
-		printf 'expected_renderer=%s\n' "${TASK125_EXPECTED_RENDERER}"
-		printf 'allow_gpu_unavailable=%s\n' "${TASK125_ALLOW_GPU_UNAVAILABLE}"
+		printf 'freminal_rust_log=%s\n' "${PARITY_FREMINAL_RUST_LOG}"
+		printf 'expected_renderer=%s\n' "${PARITY_EXPECTED_RENDERER}"
+		printf 'allow_gpu_unavailable=%s\n' "${PARITY_ALLOW_GPU_UNAVAILABLE}"
 		printf 'wezterm_bin=%s\n' "$(realpath -m "${WEZTERM_BIN}")"
 		printf 'wezterm_bin_sha256=%s\n' "$(sha256sum "${WEZTERM_BIN}" | cut -d' ' -f1)"
 		"${WEZTERM_BIN}" --version
@@ -200,9 +200,9 @@ capture_collectors() {
 	local pids filter gpu_before='' gpu_after='' gpu_status cpu_before cpu_after perf_pid wake_pid context_pid
 	local user_before system_before user_after system_after
 	printf 'process-tree\n' >"${run_dir}/collector-stage"
-	pids=$(task125_pid_csv "${root}")
-	task125_tree_tids "${root}" >"${run_dir}/tids-before"
-	filter=$(task125_wakeup_filter "${run_dir}/tids-before")
+	pids=$(parity_pid_csv "${root}")
+	parity_tree_tids "${root}" >"${run_dir}/tids-before"
+	filter=$(parity_wakeup_filter "${run_dir}/tids-before")
 	[[ -n ${pids} && -n ${filter} ]] || {
 		printf 'empty process tree for collector root %s\n' "${root}" >&2
 		return 1
@@ -212,27 +212,27 @@ capture_collectors() {
 		>"${run_dir}/amdgpu-processes.json"
 	gpu_status=$(<"${run_dir}/gpu-process-status")
 	if [[ ${gpu_status} == available ]]; then
-		gpu_before=$(task125_drm_gfx_ns "${root}") || {
+		gpu_before=$(parity_drm_gfx_ns "${root}") || {
 			printf 'GPU fdinfo vanished for PID %s before the interval\n' "${root}" >&2
 			return 1
 		}
 	fi
-	cpu_before=$(task125_tree_cpu_ticks "${root}")
+	cpu_before=$(parity_tree_cpu_ticks "${root}")
 	printf 'counters\n' >"${run_dir}/collector-stage"
 
 	perf stat -x, -o "${run_dir}/perf.csv" \
 		-e task-clock,cycles,instructions \
 		-p "${pids}" --timeout "$((duration * 1000))" &
 	perf_pid=$!
-	task125_register_collector "${perf_pid}"
+	parity_register_collector "${perf_pid}"
 	sudo perf stat -x, -p "${root}" -e context-switches \
 		--timeout "$((duration * 1000))" 2>"${run_dir}/context-switches.csv" &
 	context_pid=$!
-	task125_register_collector "${context_pid}"
+	parity_register_collector "${context_pid}"
 	sudo perf stat -x, -a -e sched:sched_wakeup --filter "${filter}" \
 		--timeout "$((duration * 1000))" 2>"${run_dir}/wakeups.csv" &
 	wake_pid=$!
-	task125_register_collector "${wake_pid}"
+	parity_register_collector "${wake_pid}"
 
 	# Synthetic input starts only now that every counter is armed and every
 	# discovery call has finished, so the interval contains the whole workload
@@ -244,7 +244,7 @@ capture_collectors() {
 	COLLECTOR_PIDS=()
 	COLLECTOR_START_TIMES=()
 	finish_input_loop
-	task125_tree_tids "${root}" >"${run_dir}/tids-after"
+	parity_tree_tids "${root}" >"${run_dir}/tids-after"
 	# Threads that exit mid-capture were in the wakeup filter from the start,
 	# and their CPU time folds into the process, so exits are recorded but do
 	# not invalidate the sample. A new TID would be missing from the filter.
@@ -255,9 +255,9 @@ capture_collectors() {
 	fi
 	comm -23 <(sort "${run_dir}/tids-before") <(sort "${run_dir}/tids-after") | wc -l \
 		>"${run_dir}/exited-tids"
-	cpu_after=$(task125_tree_cpu_ticks "${root}")
+	cpu_after=$(parity_tree_cpu_ticks "${root}")
 	if [[ ${gpu_status} == available ]]; then
-		gpu_after=$(task125_drm_gfx_ns "${root}") || {
+		gpu_after=$(parity_drm_gfx_ns "${root}") || {
 			printf 'GPU fdinfo vanished for PID %s during the interval\n' "${root}" >&2
 			return 1
 		}
@@ -282,15 +282,15 @@ append_sample_csv() {
 	local csv=$1 repeat=$2 workload=$3 terminal=$4 run_dir=$5
 	local task_clock user_ticks system_ticks user_clock kernel_clock cycles instructions switches wakeups gpu clock_tick
 	local grid_rows grid_cols gpu_status exited_tids
-	task_clock=$(task125_perf_value "${run_dir}/perf.csv" task-clock)
+	task_clock=$(parity_perf_value "${run_dir}/perf.csv" task-clock)
 	read -r user_ticks system_ticks <"${run_dir}/cpu-ticks"
 	clock_tick=$(getconf CLK_TCK)
 	user_clock=$(awk -v ticks="${user_ticks}" -v hz="${clock_tick}" 'BEGIN { printf "%.6f", ticks * 1000 / hz }')
 	kernel_clock=$(awk -v ticks="${system_ticks}" -v hz="${clock_tick}" 'BEGIN { printf "%.6f", ticks * 1000 / hz }')
-	cycles=$(task125_perf_value "${run_dir}/perf.csv" cycles)
-	instructions=$(task125_perf_value "${run_dir}/perf.csv" instructions)
-	switches=$(task125_perf_value "${run_dir}/context-switches.csv" context-switches)
-	wakeups=$(task125_perf_value "${run_dir}/wakeups.csv" sched:sched_wakeup)
+	cycles=$(parity_perf_value "${run_dir}/perf.csv" cycles)
+	instructions=$(parity_perf_value "${run_dir}/perf.csv" instructions)
+	switches=$(parity_perf_value "${run_dir}/context-switches.csv" context-switches)
+	wakeups=$(parity_perf_value "${run_dir}/wakeups.csv" sched:sched_wakeup)
 	gpu=$(<"${run_dir}/gpu-gfx-ns")
 	read -r grid_rows grid_cols <"${run_dir}/grid"
 	gpu_status=$(<"${run_dir}/gpu-process-status")
@@ -302,9 +302,9 @@ append_sample_csv() {
 		"${grid_rows}" "${grid_cols}" "${gpu_status}" "${exited_tids}" >>"${csv}"
 }
 
-task125_register_collector() {
+parity_register_collector() {
 	local pid=$1 start
-	start=$(task125_process_start_time "${pid}") || return 0
+	start=$(parity_process_start_time "${pid}") || return 0
 	COLLECTOR_PIDS+=("${pid}")
 	COLLECTOR_START_TIMES[${pid}]=${start}
 }
@@ -313,10 +313,10 @@ task125_register_collector() {
 # root, so an unprivileged TERM can be refused; fall back to a non-interactive
 # `sudo kill` (credentials were cached by collector_preflight). PID reuse is
 # guarded by the recorded start time.
-task125_stop_collector() {
+parity_stop_collector() {
 	local pid=$1 expected_start=$2 current_start
 	[[ -r "/proc/${pid}/stat" ]] || return 0
-	current_start=$(task125_process_start_time "${pid}") || return 0
+	current_start=$(parity_process_start_time "${pid}") || return 0
 	[[ ${current_start} == "${expected_start}" ]] || return 0
 	kill -TERM "${pid}" 2>/dev/null ||
 		sudo -n kill -TERM "${pid}" 2>/dev/null || true
@@ -328,12 +328,12 @@ cleanup() {
 	local pid start
 	set +e
 	for pid in "${COLLECTOR_PIDS[@]}"; do
-		task125_stop_collector "${pid}" "${COLLECTOR_START_TIMES[${pid}]:-}"
+		parity_stop_collector "${pid}" "${COLLECTOR_START_TIMES[${pid}]:-}"
 	done
 	for pid in "${OWNED_PIDS[@]}"; do
 		start=${OWNED_START_TIMES[${pid}]:-}
 		if [[ -n ${start} ]]; then
-			task125_terminate_tree "${pid}" "${start}" || true
+			parity_terminate_tree "${pid}" "${start}" || true
 		fi
 	done
 	return 0
@@ -353,7 +353,7 @@ require_command() {
 
 preflight() {
 	local command
-	task125_require_system_bash
+	parity_require_system_bash
 	for command in perf wtype amdgpu_top hyprctl python3 jq install stat tac \
 		paste awk tee realpath date lspci readlink getconf grep cmp tr sha256sum cut sudo; do
 		require_command "${command}"
@@ -385,7 +385,7 @@ preflight() {
 
 interaction_notice() {
 	local terminal=$1 cursor=$2 workload=${3:-smoke}
-	printf '\nTask 125 is about to spawn one %s window (%s cursor, workload=%s).\n' \
+	printf '\nThe parity runner is about to spawn one %s window (%s cursor, workload=%s).\n' \
 		"${terminal}" "${cursor}" "${workload}"
 	printf '%s\n' \
 		'Hyprland may place it under the current pointer; startup pointer events are expected' \
@@ -408,7 +408,7 @@ isolated_env() {
 		PATH="/run/current-system/sw/bin" \
 		USER="${USER}" LOGNAME="${LOGNAME:-${USER}}" \
 		LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-		SHELL="${TASK125_SYSTEM_BASH}" \
+		SHELL="${PARITY_SYSTEM_BASH}" \
 		XDG_CONFIG_HOME="${run_dir}/config" \
 		XDG_CACHE_HOME="${run_dir}/cache" \
 		XDG_STATE_HOME="${run_dir}/state" \
@@ -419,11 +419,11 @@ isolated_env() {
 		DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
 		DISPLAY="${DISPLAY:-}" \
 		LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
-		TASK125_READY_FILE="${run_dir}/ready" \
-		TASK125_SHELL_PID_FILE="${run_dir}/shell-pid" \
-		TASK125_GRID_REPORT_FILE="${run_dir}/grid" \
-		TASK125_FORCE_TERMINAL_ROWS="${TASK125_FORCE_TERMINAL_ROWS:-}" \
-		TASK125_FORCE_TERMINAL_COLS="${TASK125_FORCE_TERMINAL_COLS:-}" \
+		PARITY_READY_FILE="${run_dir}/ready" \
+		PARITY_SHELL_PID_FILE="${run_dir}/shell-pid" \
+		PARITY_GRID_REPORT_FILE="${run_dir}/grid" \
+		PARITY_FORCE_TERMINAL_ROWS="${PARITY_FORCE_TERMINAL_ROWS:-}" \
+		PARITY_FORCE_TERMINAL_COLS="${PARITY_FORCE_TERMINAL_COLS:-}" \
 		"$@"
 }
 
@@ -434,7 +434,7 @@ launch_terminal() {
 	local launcher_pid launcher_start
 	mkdir -p "${run_dir}"/{home,config,cache,state,data}
 	hyprctl clients -j | jq -r '.[].address' >"${run_dir}/preexisting-windows"
-	task125_render_fixtures "${SCRIPT_DIR}" "${run_dir}" "${terminal}" "${cursor}" "${marker}"
+	parity_render_fixtures "${SCRIPT_DIR}" "${run_dir}" "${terminal}" "${cursor}" "${marker}"
 	if [[ ${terminal} == freminal ]]; then
 		# A fresh isolated XDG state otherwise opens the first-run welcome
 		# overlay, contaminating every sample. Seed only the persisted onboarding
@@ -446,9 +446,9 @@ launch_terminal() {
 	freminal)
 		expected_class=freminal
 		expected_exe_root=$(realpath -m "${freminal_bin}")
-		isolated_env "${run_dir}" env RUST_LOG="${TASK125_FREMINAL_RUST_LOG}" \
+		isolated_env "${run_dir}" env RUST_LOG="${PARITY_FREMINAL_RUST_LOG}" \
 			"${freminal_bin}" --config "${run_dir}/freminal.toml" -- \
-			"${TASK125_SYSTEM_BASH}" --noprofile --rcfile "${run_dir}/shell.rc" -i \
+			"${PARITY_SYSTEM_BASH}" --noprofile --rcfile "${run_dir}/shell.rc" -i \
 			>"${run_dir}/freminal.stdout.log" 2>"${run_dir}/freminal.stderr.log" &
 		;;
 	wezterm)
@@ -470,13 +470,13 @@ launch_terminal() {
 	# interrupted (window wait, readiness wait): an abort in that gap must
 	# still tear it down. `$!` here is the background job started above.
 	launcher_pid=$!
-	if launcher_start=$(task125_process_start_time "${launcher_pid}" 2>/dev/null); then
+	if launcher_start=$(parity_process_start_time "${launcher_pid}" 2>/dev/null); then
 		OWNED_PIDS+=("${launcher_pid}")
 		OWNED_START_TIMES[${launcher_pid}]=${launcher_start}
 	fi
-	task125_wait_new_window \
+	parity_wait_new_window \
 		"${run_dir}/preexisting-windows" "${expected_class}" "${run_dir}/config"
-	pid=${TASK125_NEW_WINDOW_PID}
+	pid=${PARITY_NEW_WINDOW_PID}
 	mapped_exe=$(readlink -f "/proc/${pid}/exe")
 	if [[ ${terminal} == freminal ]]; then
 		[[ ${mapped_exe} == "${expected_exe_root}" ]] || {
@@ -488,22 +488,22 @@ launch_terminal() {
 			"${terminal}" "${pid}" "${mapped_exe}" >&2
 		return 1
 	fi
-	start=$(task125_process_start_time "${pid}")
+	start=$(parity_process_start_time "${pid}")
 	if [[ -z ${OWNED_START_TIMES[${pid}]:-} ]]; then
 		OWNED_PIDS+=("${pid}")
 	fi
 	OWNED_START_TIMES[${pid}]=${start}
-	task125_wait_ready "${run_dir}/ready" "${pid}"
+	parity_wait_ready "${run_dir}/ready" "${pid}"
 	shell_pid=$(<"${run_dir}/shell-pid")
-	shell_start=$(task125_process_start_time "${shell_pid}")
+	shell_start=$(parity_process_start_time "${shell_pid}")
 	OWNED_START_TIMES[${shell_pid}]=${shell_start}
-	if ! task125_descendants_one "${pid}" | grep -Fxq -- "${shell_pid}"; then
+	if ! parity_descendants_one "${pid}" | grep -Fxq -- "${shell_pid}"; then
 		OWNED_PIDS+=("${shell_pid}")
 	fi
-	task125_wait_focused "${TASK125_NEW_WINDOW_ADDRESS}"
-	hyprctl clients -j | jq --arg address "${TASK125_NEW_WINDOW_ADDRESS}" \
+	parity_wait_focused "${PARITY_NEW_WINDOW_ADDRESS}"
+	hyprctl clients -j | jq --arg address "${PARITY_NEW_WINDOW_ADDRESS}" \
 		'.[] | select(.address == $address)' >"${run_dir}/hyprland-client.json"
-	pty=$(task125_pty_path "${shell_pid}")
+	pty=$(parity_pty_path "${shell_pid}")
 	stty -F "${pty}" size >"${run_dir}/grid"
 	LAUNCHED_PID=${pid}
 	LAUNCHED_SHELL_PID=${shell_pid}
@@ -551,12 +551,12 @@ smoke() {
 	local terminal=$1 cursor=$2
 	interaction_notice "${terminal}" "${cursor}" smoke
 	local run_dir pid
-	run_dir=$(mktemp -d "${TMPDIR:-/tmp}/freminal-task125-smoke.XXXXXX")
+	run_dir=$(mktemp -d "${TMPDIR:-/tmp}/freminal-parity-smoke.XXXXXX")
 	launch_terminal "${terminal}" "${cursor}" "smoke-${terminal}" "${run_dir}"
 	pid=${LAUNCHED_PID}
 	sleep "${SAMPLE_WARMUP}"
 	verify_grid "${run_dir}"
-	if task125_verify_process_gpu "${pid}"; then
+	if parity_verify_process_gpu "${pid}"; then
 		printf 'available\n' >"${run_dir}/gpu-process-status"
 	else
 		printf 'unavailable\n' >"${run_dir}/gpu-process-status"
@@ -566,9 +566,9 @@ smoke() {
 	fi
 	printf 'Smoke window is correctly sized and will close in 5 seconds.\n'
 	sleep 5
-	task125_terminate_tree "${pid}" "${OWNED_START_TIMES[${pid}]}"
+	parity_terminate_tree "${pid}" "${OWNED_START_TIMES[${pid}]}"
 	if [[ ${LAUNCHED_SHELL_PID} != "${pid}" ]]; then
-		task125_terminate_tree \
+		parity_terminate_tree \
 			"${LAUNCHED_SHELL_PID}" "${OWNED_START_TIMES[${LAUNCHED_SHELL_PID}]}"
 	fi
 }
@@ -577,53 +577,53 @@ profile_smoke() {
 	SAMPLE_WARMUP=5
 	SAMPLE_DURATION=10
 	interaction_notice freminal blink sustained-output
-	printf 'FREMINAL_BIN must be built with --features frame-profiling,gpu-profiling: this validation requires the task 125.5/125.6 live-render-work summary and the task 125.8 and 125.9 GPU timing flush log lines.\n'
+	printf 'FREMINAL_BIN must be built with --features frame-profiling,gpu-profiling: this validation requires the live render-work summary and the terminal and chrome GPU timing flush log lines.\n'
 	local run_dir pid output
-	run_dir=$(mktemp -d "${TMPDIR:-/tmp}/freminal-task125-profile-smoke.XXXXXX")
+	run_dir=$(mktemp -d "${TMPDIR:-/tmp}/freminal-parity-profile-smoke.XXXXXX")
 	launch_terminal freminal blink profile-smoke "${run_dir}"
 	pid=${LAUNCHED_PID}
-	task125_start_workload sustained-output "${SAMPLE_DURATION}" "${run_dir}" >/dev/null
+	parity_start_workload sustained-output "${SAMPLE_DURATION}" "${run_dir}" >/dev/null
 	sleep "$((SAMPLE_WARMUP + SAMPLE_DURATION))"
 	verify_grid "${run_dir}"
-	task125_verify_process_gpu "${pid}"
+	parity_verify_process_gpu "${pid}"
 	output=$(<"${run_dir}/freminal.stdout.log")
 	verify_freminal_renderer "${run_dir}"
-	[[ ${output} == *'live render-work profile (task 125.5/125.6)'* ]] || {
-		printf 'profile smoke did not record a Task 125 live-render summary\n' >&2
+	[[ ${output} == *'live render-work profile'* ]] || {
+		printf 'profile smoke did not record a live-render summary\n' >&2
 		return 1
 	}
-	[[ ${output} == *'Task 125.8 terminal GPU timing flush'* ]] || {
-		printf 'profile smoke did not record a Task 125.8 GPU timing flush\n' >&2
+	[[ ${output} == *'terminal GPU timing flush'* ]] || {
+		printf 'profile smoke did not record a terminal GPU timing flush\n' >&2
 		return 1
 	}
-	[[ ${output} == *'Task 125.9 chrome and frame GPU timing flush'* ]] || {
-		printf 'profile smoke did not record a Task 125.9 chrome and frame GPU timing flush\n' >&2
+	[[ ${output} == *'chrome and frame GPU timing flush'* ]] || {
+		printf 'profile smoke did not record a chrome and frame GPU timing flush\n' >&2
 		return 1
 	}
 	printf 'Profile smoke validated: %s\n' "${run_dir}/freminal.stdout.log"
-	task125_terminate_tree "${pid}" "${OWNED_START_TIMES[${pid}]}"
+	parity_terminate_tree "${pid}" "${OWNED_START_TIMES[${pid}]}"
 	if [[ ${LAUNCHED_SHELL_PID} != "${pid}" ]]; then
-		task125_terminate_tree \
+		parity_terminate_tree \
 			"${LAUNCHED_SHELL_PID}" "${OWNED_START_TIMES[${LAUNCHED_SHELL_PID}]}"
 	fi
 }
 
 # Record whether the terminal process exposes DRM fdinfo, and refuse the sample
-# when it does not unless TASK125_ALLOW_GPU_UNAVAILABLE=1 explicitly accepts a
+# when it does not unless PARITY_ALLOW_GPU_UNAVAILABLE=1 explicitly accepts a
 # blank GPU cell. A silently-zero GPU column would read as "GPU idle".
 record_gpu_status() {
 	local pid=$1 run_dir=$2
-	if task125_verify_process_gpu "${pid}" &&
-		task125_drm_gfx_ns "${pid}" >/dev/null; then
+	if parity_verify_process_gpu "${pid}" &&
+		parity_drm_gfx_ns "${pid}" >/dev/null; then
 		printf 'available\n' >"${run_dir}/gpu-process-status"
 		return 0
 	fi
 	printf 'unavailable\n' >"${run_dir}/gpu-process-status"
-	if [[ ${TASK125_ALLOW_GPU_UNAVAILABLE} == 1 ]]; then
-		printf 'GPU fdinfo unavailable for PID %s; accepted by TASK125_ALLOW_GPU_UNAVAILABLE=1\n' "${pid}" >&2
+	if [[ ${PARITY_ALLOW_GPU_UNAVAILABLE} == 1 ]]; then
+		printf 'GPU fdinfo unavailable for PID %s; accepted by PARITY_ALLOW_GPU_UNAVAILABLE=1\n' "${pid}" >&2
 		return 0
 	fi
-	printf 'GPU fdinfo unavailable for PID %s; refusing the sample (set TASK125_ALLOW_GPU_UNAVAILABLE=1 to record a blank GPU cell)\n' "${pid}" >&2
+	printf 'GPU fdinfo unavailable for PID %s; refusing the sample (set PARITY_ALLOW_GPU_UNAVAILABLE=1 to record a blank GPU cell)\n' "${pid}" >&2
 	return 1
 }
 
@@ -646,9 +646,9 @@ verify_freminal_renderer() {
 		return 1
 		;;
 	esac
-	if [[ ${renderer} != *"${TASK125_EXPECTED_RENDERER}"* ]]; then
+	if [[ ${renderer} != *"${PARITY_EXPECTED_RENDERER}"* ]]; then
 		printf 'Freminal renderer %q does not match expected %q\n' \
-			"${renderer}" "${TASK125_EXPECTED_RENDERER}" >&2
+			"${renderer}" "${PARITY_EXPECTED_RENDERER}" >&2
 		return 1
 	fi
 }
@@ -656,7 +656,7 @@ verify_freminal_renderer() {
 # True when the shell has had a live child (the workload's `btop`, `seq`, or
 # `sleep`) within about two seconds. Shell-driven loops spend nearly all their
 # time in `sleep`, so a window this wide cannot miss one by timing alone.
-task125_shell_has_child() {
+parity_shell_has_child() {
 	local shell_pid=$1 file i
 	local -a children=()
 	file="/proc/${shell_pid}/task/${shell_pid}/children"
@@ -680,7 +680,7 @@ assert_workload_live() {
 	local workload=$1 shell_pid=$2 phase=$3
 	case "${workload}" in
 	sparse-row | btop | sustained-output | sustained-output-varying | sustained-output-marked | streaming-output)
-		task125_shell_has_child "${shell_pid}" || {
+		parity_shell_has_child "${shell_pid}" || {
 			printf 'workload %s is not running %s (shell %s has no live child); sample is invalid\n' \
 				"${workload}" "${phase}" "${shell_pid}" >&2
 			return 1
@@ -697,17 +697,17 @@ start_input_loop() {
 	INPUT_LOOP_PID=
 	case "${workload}" in
 	typing)
-		task125_type_loop "${SAMPLE_DURATION}" &
+		parity_type_loop "${SAMPLE_DURATION}" &
 		;;
 	scrollback)
-		task125_scroll_loop "${SAMPLE_DURATION}" &
+		parity_scroll_loop "${SAMPLE_DURATION}" &
 		;;
 	*)
 		return 0
 		;;
 	esac
 	INPUT_LOOP_PID=$!
-	if start=$(task125_process_start_time "${INPUT_LOOP_PID}" 2>/dev/null); then
+	if start=$(parity_process_start_time "${INPUT_LOOP_PID}" 2>/dev/null); then
 		OWNED_PIDS+=("${INPUT_LOOP_PID}")
 		OWNED_START_TIMES[${INPUT_LOOP_PID}]=${start}
 	fi
@@ -748,14 +748,14 @@ prepare_workload_before_warmup() {
 	# Everything below types into the spawned window; never into another one.
 	case "${workload}" in
 	idle-blink | idle-steady | pointer) ;;
-	*) task125_focus_guard ;;
+	*) parity_focus_guard ;;
 	esac
 	case "${workload}" in
 	chrome-blink | chrome-steady)
-		task125_setup_chrome_topology
+		parity_setup_chrome_topology
 		;;
 	btop | sparse-row | sustained-output | sustained-output-varying | sustained-output-marked | streaming-output)
-		task125_start_workload "${workload}" "${SAMPLE_DURATION}" "${run_dir}" >/dev/null
+		parity_start_workload "${workload}" "${SAMPLE_DURATION}" "${run_dir}" >/dev/null
 		;;
 	scrollback)
 		wtype 'seq 1 10000' -k Return
@@ -797,9 +797,9 @@ capture_one() {
 	capture_collectors "${pid}" "${SAMPLE_DURATION}" "${run_dir}" "${workload}"
 	assert_workload_live "${workload}" "${LAUNCHED_SHELL_PID}" "at the end of the capture interval"
 	append_sample_csv "${csv}" "${repeat}" "${workload}" "${terminal}" "${run_dir}"
-	task125_terminate_tree "${pid}" "${OWNED_START_TIMES[${pid}]}"
+	parity_terminate_tree "${pid}" "${OWNED_START_TIMES[${pid}]}"
 	if [[ ${LAUNCHED_SHELL_PID} != "${pid}" ]]; then
-		task125_terminate_tree \
+		parity_terminate_tree \
 			"${LAUNCHED_SHELL_PID}" "${OWNED_START_TIMES[${LAUNCHED_SHELL_PID}]}"
 	fi
 }
@@ -812,7 +812,7 @@ matrix_output_dir() {
 			return 0
 		fi
 	done
-	printf '%s/freminal-task125-%(%Y%m%d-%H%M%S)T\n' "${TMPDIR:-/tmp}" -1
+	printf '%s/freminal-parity-%(%Y%m%d-%H%M%S)T\n' "${TMPDIR:-/tmp}" -1
 }
 
 run_series() {
@@ -824,7 +824,7 @@ run_series() {
 	for workload in "${workloads[@]}"; do
 		# Fail before any window spawns rather than mid-series.
 		if [[ ${workload} == btop ]]; then
-			task125_btop_bin >/dev/null
+			parity_btop_bin >/dev/null
 		fi
 	done
 	mkdir -p "${output_dir}/raw"
@@ -859,7 +859,7 @@ run_series() {
 	done
 	python3 "${SCRIPT_DIR}/summarize.py" --expected-repeats "${SAMPLE_REPEATS}" "${csv}" |
 		tee "${output_dir}/${label}-summary.txt"
-	printf 'Task 125 raw results: %s\n' "${output_dir}"
+	printf 'Parity raw results: %s\n' "${output_dir}"
 }
 
 run_screen() {

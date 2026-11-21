@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Deferred GL teardown (Task 125.C2).
+//! Deferred GL teardown.
 //!
 //! One concept: getting a renderer's GL objects deleted **while the GL
 //! context that owns them is current**, when the code that stops needing the
@@ -159,8 +159,7 @@ impl GlRetireQueue {
     /// rather than queued -- this keeps the queue empty (and `drain` free) for
     /// every pane that never painted. The test is what the renderer *holds*,
     /// not whether its `init` reported success: a renderer whose `init` failed
-    /// partway (or was interrupted) still owns whatever it had created
-    /// (Task 125.C16).
+    /// partway (or was interrupted) still owns whatever it had created.
     pub fn retire(&self, renderer: TerminalRenderer) {
         if !renderer.holds_gl_objects() {
             return;

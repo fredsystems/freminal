@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! CHT / CBT with an enormous `Ps` must finish immediately (Task 148.C2).
+//! CHT / CBT with an enormous `Ps` must finish immediately.
 //!
 //! `CSI Ps I` used to advance one tab stop at a time, `Ps` times, even after
 //! the cursor was pinned at the last column, so `CSI 4294967295 I` (or the

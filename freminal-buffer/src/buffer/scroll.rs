@@ -305,7 +305,7 @@ impl Buffer {
 
     /// Scroll rows `[first, last]` DOWN by `n` lines, honouring DECLRMM.
     ///
-    /// The moved images' stamp horizons (Task 125.15) are raised once, after
+    /// The moved images' stamp horizons are raised once, after
     /// the last shift: they only have to be correct before the next eviction,
     /// and restamping per line would rescan the region `n` times.
     pub(in crate::buffer) fn scroll_slice_down_confined_n(
@@ -456,7 +456,7 @@ impl Buffer {
         // New blank row at `last` — no cached representation yet.
         self.rows.cache_mut()[last] = None;
 
-        // Task 121 Part C fix: this loop rotates already-clean row-cache
+        // This loop rotates already-clean row-cache
         // entries between row indices (a moved row's cache moves with it)
         // without marking the moved rows dirty or nulling their cache, and
         // without changing `self.rows.len()`. Neither the visible-window
@@ -472,7 +472,7 @@ impl Buffer {
     /// Scroll a contiguous vertical slice [first, last] DOWN by one line.
     /// Rows outside that range are untouched. New top line is blank.
     ///
-    /// Does **not** raise the moved images' stamp horizons (Task 125.15): go
+    /// Does **not** raise the moved images' stamp horizons: go
     /// through [`Self::scroll_slice_down_confined_n`], which does so once.
     pub(in crate::buffer) fn scroll_slice_down(&mut self, first: usize, last: usize) {
         if first >= last {
@@ -507,7 +507,7 @@ impl Buffer {
         // New blank row at `first` — no cached representation yet.
         self.rows.cache_mut()[first] = None;
 
-        // Task 121 Part C fix: same rationale as the equivalent comment in
+        // Same rationale as the equivalent comment in
         // `scroll_slice_up` — this loop rotates already-clean row-cache
         // entries between row indices without dirtying the moved rows or
         // changing `self.rows.len()`, which the fingerprint + first-rebuilt
@@ -728,7 +728,7 @@ impl Buffer {
         let new_row = Row::new(self.width);
         self.rows.push(new_row);
 
-        // No explicit `merge_cache` invalidation (Task 125.16): the eviction
+        // No explicit `merge_cache` invalidation: the eviction
         // above advances the row store's base, so a merge cached before this
         // call has a different first-row logical number than the window the
         // next flatten sees. See `Buffer::merge_cache`'s field doc.

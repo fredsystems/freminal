@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! OSC 9 / OSC 777 / OSC 99 — desktop notification parsers (Tasks 76, 99).
+//! OSC 9 / OSC 777 / OSC 99 — desktop notification parsers.
 //!
 //! OSC 9 and OSC 777 are one-way, fire-and-forget notification requests. They
 //! produce an [`AnsiOscType::Notify`] which the GUI routes to an in-app
@@ -14,12 +14,12 @@
 //! [`AnsiOscType::Notify99`] carrying a fully-parsed
 //! [`freminal_common::buffer_states::osc_notify_99::Osc99Command`].
 //! Chunk reassembly, transport to the GUI, and reverse-write are handled
-//! downstream (Tasks 99.3+).  A sequence the parser rejects produces an
+//! downstream.  A sequence the parser rejects produces an
 //! [`AnsiOscType::Notify99Rejected`] carrying only its `i=` and `d=`, so the
 //! handler can abandon the transfer it belonged to.
 //!
 //! OSC 9 also carries the conflicting `ConEmu` progress-report sub-protocol
-//! (`9;4;<state>[;<value>]`, issue #507). A valid progress report produces an
+//! (`9;4;<state>[;<value>]`). A valid progress report produces an
 //! [`AnsiOscType::Progress`] carrying a typed
 //! [`freminal_common::buffer_states::progress::ProgressUpdate`] instead of a
 //! notification; a `4;`-prefixed body that does not match the progress wire
@@ -53,7 +53,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// The entire payload after the leading `9;` is the notification body unless
 /// it is the conflicting `ConEmu` progress-report form `9;4;<state>[;<value>]`,
 /// in which case it is parsed into a typed [`ProgressUpdate`] and emitted as
-/// [`AnsiOscType::Progress`] instead (issue #507). An empty notification body
+/// [`AnsiOscType::Progress`] instead. An empty notification body
 /// is silently consumed (nothing useful to display).
 pub(super) fn handle_osc_notify_9(raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
     // raw_params looks like: b"9;Build finished"
@@ -107,10 +107,10 @@ pub(super) fn handle_osc_notify_9(raw_params: &[u8], output: &mut Vec<TerminalOu
 /// requirement. The ghostty reference documents only `4;<s>` and
 /// `4;<s>;<v>`; Windows Terminal documents `4;<state>;<progress>` and says
 /// state 3 ignores `<progress>`. Neither describes an empty value field.
-/// It is accepted because the alternative, which the narrower #502 rule
-/// produced, is to show the raw text `4;1;` as an OSC 9 desktop
+/// It is accepted because the alternative, which a stricter rule that rejected
+/// the empty field produced, is to show the raw text `4;1;` as an OSC 9 desktop
 /// notification, and that is never what a sender writing a `4;<state>`
-/// prefix meant. The widening is intentional: do not restore the #502
+/// prefix meant. The widening is intentional: do not restore the
 /// rejection on the assumption that this is a regression.
 ///
 /// Leniency stops at the value field. An empty *state* field (`4;`) is
@@ -546,7 +546,7 @@ mod tests {
         // `9;4;1;` — a present-but-empty value field is treated the same as
         // an omitted one (deliberate leniency; see the doc comment on
         // `parse_conemu_progress_report`), NOT rejected as it was under the
-        // narrower #502 rule.
+        // earlier, stricter rule.
         let output = feed_osc(b"9;4;1;\x07");
         assert_eq!(expect_progress(&output), ProgressUpdate::InProgress(0));
     }

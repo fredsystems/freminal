@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 148.5 (issue #558): `insert_text` terminates even when the margins
+//! `insert_text` terminates even when the margins
 //! give a fresh row no room at all.
 //!
 //! Valid state never has such margins -- DECSLRM requires `left < right <

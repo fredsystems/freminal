@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 #
-# CodeRabbit configuration for Freminal (GitHub issue 554): the most thorough,
+# CodeRabbit configuration for Freminal: the most thorough,
 # effective review we can get out of CodeRabbit.
 #
 # This repo's guidelines file is the lowercase `agents.md`. CodeRabbit only

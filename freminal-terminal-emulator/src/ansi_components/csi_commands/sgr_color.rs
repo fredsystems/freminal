@@ -12,8 +12,8 @@
 //! values after the `38`/`48`/`58` into a [`TerminalColor`].
 //!
 //! This is the single extractor shared by SGR and by every later consumer of
-//! the same wire syntax (DECCARA, Task 143; multiple cursors, Task 103), so
-//! that all of them agree on edge cases.
+//! the same wire syntax (DECCARA, multiple cursors), so that all of
+//! them agree on edge cases.
 //!
 //! The edge-case semantics follow kitty (`vt-parser.c` `_parse_sgr` and
 //! `cursor.c` `parse_color`), because ECMA-48 and ITU T.416 are silent on
@@ -76,7 +76,7 @@ fn low_byte(value: Option<usize>) -> u8 {
 /// counted in [`SgrColor::consumed`].
 ///
 /// This is the shared extractor for SGR and for future consumers of the same
-/// syntax (DECCARA, Task 143; multiple cursors, Task 103).
+/// syntax (DECCARA, multiple cursors).
 ///
 /// # Errors
 ///

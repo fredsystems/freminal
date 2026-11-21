@@ -9,7 +9,7 @@
 //! `Button`, `SelectableLabel` or menu entry shows the ordinary arrow unless
 //! the caller explicitly asks otherwise via [`egui::Response::on_hover_cursor`].
 //! Without that, nothing in the menu bar, tab strip, settings window or any
-//! modal tells the user an element can be clicked (issue #493).
+//! modal tells the user an element can be clicked.
 //!
 //! This module provides the vocabulary for saying so once per widget, rather
 //! than repeating a bare `CursorIcon` at every call site. Naming the *intent*

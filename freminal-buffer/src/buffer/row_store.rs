@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! The buffer's row storage: rows plus the two per-row side tables that must
-//! stay index-parallel with them (Task 125.13).
+//! stay index-parallel with them.
 //!
 //! [`RowStore`] owns, as one unit:
 //!
@@ -27,7 +27,7 @@
 //! [`RowStore::cache`] / [`RowStore::block_map`] and their `_mut` forms, or
 //! all at once, as disjoint borrows, through [`RowStore::split_mut`].
 //!
-//! # Logical row numbers (Task 125.14)
+//! # Logical row numbers
 //!
 //! The store also owns a `base`: the [`RowNumber`] of the row at index `0`.
 //! Row `i` is numbered `base + i`. Front eviction advances `base` by the number
@@ -37,7 +37,7 @@
 //! front eviction (a trailing [`RowStore::pop`] does re-issue the popped row's
 //! number: that row was never durable content, only blank screen padding).
 //!
-//! # Moving-head storage and O(evicted) eviction (Task 125.15)
+//! # Moving-head storage and O(evicted) eviction
 //!
 //! Storage is three plain `Vec`s sharing one `head`. The *live* region is
 //! `[head..]`; `[..head]` holds *dead slots*: the zero-width placeholder row,
@@ -81,7 +81,7 @@ const MIN_COMPACT_DEAD_SLOTS: usize = 64;
 /// and the dead slots never exceed half the live rows (so the slot arrays
 /// stay within 1.5x the live size). A larger divisor compacts sooner and
 /// wastes less memory at the price of more frequent moves; a smaller one is
-/// the reverse. Valid range per the 125.11 record: `live / 4 ..= live`.
+/// the reverse. Valid range: `live / 4 ..= live`.
 const COMPACT_LIVE_DIVISOR: usize = 2;
 
 /// The inert row left in a dead slot. Zero-width and unallocated, so keeping
@@ -859,7 +859,7 @@ mod tests {
         assert!(store.block_map()[2..].iter().all(Option::is_none));
     }
 
-    // ── Logical row numbers (Task 125.14) ───────────────────────────────
+    // ── Logical row numbers ───────────────────────────────
 
     #[test]
     fn default_and_from_iter_stores_are_numbered_from_zero() {
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(store.clone().base(), RowNumber::new(3));
     }
 
-    // ── Moving head (Task 125.15) ───────────────────────────────────────
+    // ── Moving head ───────────────────────────────────────
 
     /// A big enough store that its compaction threshold is the proportional
     /// one, not the fixed minimum.

@@ -62,12 +62,12 @@ pub struct PlaceImageRequest {
 ///
 /// `origin_row`/`origin_col` reflect where the image's top-left cell
 /// (`row_in_image == 0`, `col_in_image == 0`) actually landed. `origin_row` is
-/// a stable [`RowNumber`] (Task 125.14): it names the row itself, so it stays
+/// a stable [`RowNumber`]: it names the row itself, so it stays
 /// correct however many rows an `enforce_scrollback_limit` drain during this
 /// call (or a later eviction) removes above it. Convert it to a retained index
 /// with [`Buffer::row_index_of`]; `None` means the row has since been evicted.
 /// Callers that need to record a placement's origin (e.g. Kitty
-/// relative-placement parents, Task 100.14) must use these fields rather than
+/// relative-placement parents) must use these fields rather than
 /// re-reading the cursor before calling `place_image`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaceImageResult {
@@ -79,7 +79,7 @@ pub struct PlaceImageResult {
     pub origin_row: RowNumber,
     /// The column at which the image's top-left cell was actually stamped.
     pub origin_col: usize,
-    /// The placement instance id (Task 100.18) this call stamped every
+    /// The placement instance id this call stamped every
     /// cell with — echoed back from the caller-supplied `placement_instance`
     /// argument so the caller can feed it into `record_real_placement`
     /// without having to keep a second copy around.
@@ -119,7 +119,7 @@ impl Buffer {
     /// Set an image cell at a specific (row, col) position in the buffer.
     ///
     /// Also invalidates the corresponding row cache entry, and raises the
-    /// image's stamp horizon to this row (Task 125.15). Used by
+    /// image's stamp horizon to this row. Used by
     /// `TerminalHandler` for Kitty Unicode placeholder cells.
     pub fn set_image_cell_at(
         &mut self,
@@ -161,7 +161,7 @@ impl Buffer {
     }
 
     /// Raise image `image_id`'s stamp horizon to the logical number of row
-    /// `row_idx` (Task 125.15). Every site that puts an image cell on a row
+    /// `row_idx`. Every site that puts an image cell on a row
     /// must call this, so that front eviction can tell when the image's last
     /// row is gone without scanning cells.
     fn stamp_image_row(&mut self, image_id: u64, row_idx: usize) {
@@ -332,7 +332,7 @@ impl Buffer {
         let mut cleared = 0usize;
         let (rows, cache, _) = self.rows.split_mut();
         for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
-            // Task 119: an evicted (or Task-118 compact) row provably holds
+            // An evicted (or compact) row provably holds
             // no image cells, so skip it — reading its cells would trip
             // `cells_mut`'s eviction debug_assert (and needlessly decompact a
             // compact row) for no possible clearing work.
@@ -360,7 +360,7 @@ impl Buffer {
         let mut cleared = 0usize;
         let (rows, cache, _) = self.rows.split_mut();
         for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
-            // Task 119: skip evicted/compact rows — they hold no images.
+            // Skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
             }
@@ -396,13 +396,13 @@ impl Buffer {
     /// named placement — used to implement the kitty spec's REPLACE
     /// semantics (a second `a=p` put with the same non-zero `p=` replaces
     /// only that placement, leaving any other coexisting placements of the
-    /// same image untouched, Task 100.18/100.20) and `d=i,p=<n>` deletion
-    /// narrowing (Task 100.20).
+    /// same image untouched) and `d=i,p=<n>` deletion
+    /// narrowing.
     pub fn clear_image_placements_by_placement(&mut self, image_id: u64, placement_id: u32) {
         let mut cleared = 0usize;
         let (rows, cache, _) = self.rows.split_mut();
         for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
-            // Task 119: skip evicted/compact rows — they hold no images.
+            // Skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
             }
@@ -464,7 +464,7 @@ impl Buffer {
         let mut cleared = 0usize;
         let (rows, cache, _) = self.rows.split_mut();
         for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
-            // Task 119: skip evicted/compact rows — they hold no images.
+            // Skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
             }
@@ -573,7 +573,7 @@ impl Buffer {
         let mut cleared = 0usize;
         let (rows, cache, _) = self.rows.split_mut();
         for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
-            // Task 119: skip evicted/compact rows — they hold no images.
+            // Skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
             }
@@ -679,7 +679,7 @@ impl Buffer {
         let mut cleared = 0usize;
         let (rows, cache, _) = self.rows.split_mut();
         for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
-            // Task 119: skip evicted/compact rows — they hold no images.
+            // Skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
             }
@@ -741,8 +741,8 @@ impl Buffer {
     /// the image, at column 0 — matching iTerm2/Kitty behaviour. If no row
     /// already exists below the image (the common case: the image was
     /// placed at the buffer's tail), a fresh blank row is appended so
-    /// subsequent output never overwrites the image's own cells (Task
-    /// 100.15 — previously the cursor was parked on the image's own last
+    /// subsequent output never overwrites the image's own cells (previously
+    /// the cursor was parked on the image's own last
     /// row in this case, so the very next character write destroyed the
     /// image via `Self::clear_images_overwritten_by_text`). The only
     /// exception is a primary-buffer image tall enough that appending
@@ -769,7 +769,7 @@ impl Buffer {
     /// the origin reflects any `enforce_scrollback_limit` drain that
     /// occurred during placement, so callers must use it (not a
     /// pre-call cursor read) when recording where the image actually
-    /// landed (Task 100.14).
+    /// landed.
     pub fn place_image(
         &mut self,
         image: InlineImage,
@@ -1053,7 +1053,7 @@ impl Buffer {
     ///
     /// The row is located by its stable [`RowNumber`], never by an index read
     /// before the call: placement can evict scrollback rows from the top, which
-    /// shifts every retained index (Task 125.C7). An origin row that was itself
+    /// shifts every retained index. An origin row that was itself
     /// evicted, or one that scrolled above the live window (an image taller
     /// than the space below the cursor), clamps to the top of the live
     /// window: the cursor is never parked in off-screen scrollback, where the
@@ -1072,7 +1072,7 @@ impl Buffer {
     /// Stamp an image's cell grid at an explicit screen origin `(origin_row,
     /// origin_col)` WITHOUT moving the cursor or scrolling the buffer.
     ///
-    /// Used for relative kitty graphics placements (Task 100.4a), whose
+    /// Used for relative kitty graphics placements, whose
     /// position is derived from a parent placement's origin plus an offset,
     /// not from the cursor. Cells outside the current buffer bounds are
     /// silently skipped (the visible part is stamped). The image must

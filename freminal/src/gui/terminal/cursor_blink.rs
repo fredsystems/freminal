@@ -297,7 +297,7 @@ mod cursor_blink_phase_tests {
         assert!(cursor_blink_phase(regain_time, Some(regain_time), TICK));
     }
 
-    /// Task 127.C2: the focus baseline is held back on a skipped frame, so a
+    /// The focus baseline is held back on a skipped frame, so a
     /// regain that happened while skipped is still seen as a non-`Focused` ->
     /// `Focused` edge on the first drawn frame, and the blink still
     /// re-anchors there.

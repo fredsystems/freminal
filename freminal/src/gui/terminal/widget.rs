@@ -69,7 +69,7 @@ use conv2::{ApproxFrom, ConvUtil};
 use egui_glow::CallbackFn;
 use std::sync::{Arc, Mutex};
 
-// Task 125.5: live render-work profiling is entirely absent from a default
+// Live render-work profiling is entirely absent from a default
 // build -- no field, no branch -- see `RenderState::live_profile` and its
 // call sites below, all gated on the same feature.
 #[cfg(feature = "frame-profiling")]
@@ -77,14 +77,14 @@ use super::super::renderer::profiling::{
     LiveRenderProfile, PaneFrameToken, RawRebuildDecision, ReevaluatedRebuild, UploadByteCounts,
     resolve_render_work_class,
 };
-// Task 125.8: asynchronous terminal GPU upload/draw timing is entirely
+// Asynchronous terminal GPU upload/draw timing is entirely
 // absent from a default build -- see `gui::renderer::gpu_profiling`'s doc.
 #[cfg(feature = "gpu-profiling")]
 use super::super::renderer::gpu_profiling::LOG_TARGET as GPU_TIMING_LOG_TARGET;
 use std::time::Duration;
 use tracing::error;
 
-// ─── Fold-placeholder helpers (Task 72.10b-3) ────────────────────────────
+// ─── Fold-placeholder helpers ────────────────────────────────────
 
 /// Format the placeholder text shown on a collapsed fold-row.
 ///
@@ -124,7 +124,7 @@ use tracing::error;
 ///
 /// Returns the new [`CursorVertRange`], which the caller must store: it is
 /// what the next patch truncates to. Deriving it from anything but the
-/// geometry actually written is the issue #432 corruption class (a stale
+/// geometry actually written is a known corruption class (a stale
 /// offset overwrites the bottom-row selection quad).
 ///
 /// `range` is `Option` because the render state stores it that way
@@ -154,7 +154,7 @@ fn patch_cursor_only_deco_verts(
 
 /// Scissor a GPU draw to the windowing-published present region, run
 /// `draw`, then restore GL scissor state to what egui expects (disabled)
-/// before returning (124.23).
+/// before returning.
 ///
 /// Both of the paint callback's arms — cursor-only and full-draw — call
 /// this with the *same* `region` read, rather than each reading (or
@@ -338,7 +338,7 @@ fn gutter_block_id_at_pos(
     let layout = FoldLayout::new(snap, &view_state.folded_blocks);
     let rendered_row = layout.screen_to_rendered(screen_row);
     // Running blocks extend only to the cursor's row (last output line so far),
-    // not the bottom of the pane (106.2b).
+    // not the bottom of the pane.
     let running_extent = super::coords::running_block_extent(snap);
 
     match layout.row_map.rendered_to_snapshot(rendered_row) {
@@ -366,10 +366,10 @@ fn gutter_block_id_at_pos(
 /// rendered-row space: the final step below converts through
 /// `layout.rendered_to_screen` before returning, because the caller
 /// consumes the result directly as an index into the screen-indexed
-/// `rendered_shaped_lines` array at the `widget.rs` call site (124.14b-ii
-/// recon) -- the same array `screen_selection_rendered` indexes.
+/// `rendered_shaped_lines` array at the `widget.rs` call site
+/// -- the same array `screen_selection_rendered` indexes.
 ///
-/// The **gutter strip is the sole hover trigger** (73.5): hovering a cell in
+/// The **gutter strip is the sole hover trigger**: hovering a cell in
 /// the terminal output area does nothing block-related, so the tint no longer
 /// fires during text selection, mouse-tracking apps, or passive cursor motion.
 /// Returns `None` when the feature is off, the gutter is disabled
@@ -461,8 +461,8 @@ pub(super) fn compute_command_block_hover_rows(
 ///
 /// Every pane in a split runs `write_input_to_terminal` against the same
 /// window-wide event queue, so `view_state.mouse_position` can hold a
-/// position that belongs to a sibling pane rather than this one (issue
-/// #510: a URL on a pane's top row got "stuck" hovered when the pointer
+/// position that belongs to a sibling pane rather than this one (a URL on a
+/// pane's top row got "stuck" hovered when the pointer
 /// moved into the pane stacked above it). Requiring containment here --
 /// not just a `Some`/`None` check on `mouse_position` -- is what stops a
 /// stale out-of-pane position from resolving, via
@@ -499,7 +499,7 @@ pub(super) struct ScrollbarOutcome {
     /// The scrollbar's exact hit rect this frame ([`scrollbar_hit_rect`]),
     /// or `None` when the thumb was not rendered at all — mirrors
     /// `rendered`, since there is nothing to hover/drag when the scrollbar
-    /// is not shown. Task 124.3b: published verbatim into
+    /// is not shown. Published verbatim into
     /// `PanePointerReportInputs::scrollbar_hit_rect` so the out-of-frame
     /// pointer-motion predicate can compare it across the previous and
     /// current pointer position without recomputing scrollbar geometry.
@@ -522,7 +522,7 @@ impl ScrollbarOutcome {
 /// The scrollbar's exact clickable/hoverable hit rect for a pane, computed
 /// from the pane's viewport rect alone.
 ///
-/// Task 124.3b: single source of truth for this geometry, replacing the
+/// Single source of truth for this geometry, replacing the
 /// constants (`SCROLLBAR_WIDTH`/`SCROLLBAR_MARGIN`/`HIT_TEST_PADDING`) that
 /// were previously hand-copied between `show()`'s scrollbar pre-check and
 /// [`handle_scrollbar`] itself — the two could not drift apart by
@@ -604,7 +604,7 @@ pub(super) fn handle_scrollbar(
     );
 
     // ── Mouse interaction ────────────────────────────────────────────────
-    // Single source of truth for the hit-test rect (Task 124.3b) — see
+    // Single source of truth for the hit-test rect — see
     // `scrollbar_hit_rect`'s doc.
     let hit_rect = scrollbar_hit_rect(viewport);
 
@@ -657,7 +657,7 @@ pub(super) fn handle_scrollbar(
     // Sourcing the paint and the damage decision (see the call site's
     // `scrollbar_damage_decision`) from one consistent signal is what keeps
     // the thumb's hover alpha from getting stuck one frame on window-exit —
-    // mirroring how the command-block gutter (#461) drives both its tint and
+    // mirroring how the command-block gutter drives both its tint and
     // its damage from the single non-lagged `view_state.mouse_position`.
     let effectively_hovered = ui.input(|i| {
         i.pointer.latest_pos().is_some()
@@ -736,8 +736,8 @@ pub(super) struct ScrollbarDamageState {
     pub(super) rendered: bool,
     /// Whether the thumb was hovered this frame. MUST already fold in
     /// `pointer_in_window` (`hovered && latest_pos().is_some()`) to avoid
-    /// the `interact_pos()` one-frame window-exit lag that PR #461
-    /// documents for the gutter.
+    /// the `interact_pos()` one-frame window-exit lag that the gutter
+    /// hover also guards against.
     pub(super) effectively_hovered: bool,
 }
 
@@ -790,7 +790,7 @@ enum BellFlashOutcome {
 }
 
 /// Pure mapping from a [`BellFlashOutcome`] to the repaint delay
-/// [`paint_bell_flash`] needs (subtask 121.12), factored out so the
+/// [`paint_bell_flash`] needs, factored out so the
 /// delay-selection logic is unit-testable without a live `egui::Ui` — see
 /// [`paint_bell_flash`]'s doc for why the delay is returned rather than
 /// requested on the `Context` directly.
@@ -850,7 +850,7 @@ fn bell_flash_outcome(window_focused: bool, elapsed: Duration) -> BellFlashOutco
 /// pane, or a newly created split/tab that never itself received a real
 /// focus transition, would flash once and then never clear).
 ///
-/// Returns the repaint delay this call needs (subtask 121.12): `Some(16ms)`
+/// Returns the repaint delay this call needs: `Some(16ms)`
 /// while a fade is in progress (so the fade continues smoothly next frame),
 /// `None` for the static persistent overlay and the cleared case. THE
 /// CALLER MUST FOLD THE RETURNED DELAY INTO THE PANE'S [`PaneRenderCache`]
@@ -1274,7 +1274,7 @@ pub struct RenderState {
     /// Pre-built image vertex data (one quad per unique inline image).
     pub(super) image_verts: Vec<f32>,
     /// Authoritative `(z_index, id)` draw order for the quads in
-    /// `image_verts`, computed by [`build_image_verts`] (Task 100.7b).
+    /// `image_verts`, computed by [`build_image_verts`].
     /// `draw_images` iterates this SAME list so the vertex slab order and the
     /// draw order can never drift apart. Retained (not recomputed) on the
     /// cursor-only fast path, alongside `image_verts` and `snap_images`.
@@ -1289,7 +1289,7 @@ pub struct RenderState {
     /// just this region whatever its length (0, solid, or hollow).
     ///
     /// `None` means no rebuild has ever populated this render state: the
-    /// "never built" signal that 124.21 lists among the eight genuinely
+    /// "never built" signal, one of the genuinely
     /// global damage triggers. It is deliberately NOT inferred from
     /// `deco_verts.is_empty()`: a plain-shell pane has no underline,
     /// selection, or search quads, so a blink-off (or DECTCEM-hidden)
@@ -1302,7 +1302,7 @@ pub struct RenderState {
     pub(super) cell_height_px: f32,
     /// Background opacity (0.0–1.0), for the instanced background shader.
     pub(super) bg_opacity: f32,
-    /// OSC 11 base fill (Task 132.11): the pane's resolved default
+    /// OSC 11 base fill: the pane's resolved default
     /// background as `[r, g, b]` in `0.0..=1.0`, or `None` when it equals the
     /// configured theme's (nothing is drawn underneath the cells then).
     ///
@@ -1331,9 +1331,8 @@ pub struct RenderState {
     /// `Some(PendingGpuOp::Clear)` → clear the current image.
     /// `None` → no pending change this frame.
     pub(super) pending_bg_image: Option<PendingGpuOp<std::path::PathBuf>>,
-    /// Live, feature-gated render-work profile for this pane (Task 125.4's
-    /// state machine; Task 125.5 wires `show()` and this pane's
-    /// `PaintCallback` into it). Both need to reach the SAME instance --
+    /// Live, feature-gated render-work profile for this pane (`show()` and this pane's
+    /// `PaintCallback` both feed it). Both need to reach the SAME instance --
     /// `show()` computes the raw/resolved classification and starts a
     /// fresh token every call; the paint callback finalizes it -- and
     /// `RenderState` is already the `Arc<Mutex<...>>` both share (see
@@ -1341,7 +1340,7 @@ pub struct RenderState {
     /// from a default build.
     #[cfg(feature = "frame-profiling")]
     pub(super) live_profile: LiveRenderProfile,
-    /// The window's retired-renderer queue (Task 125.C2), cloned from
+    /// The window's retired-renderer queue, cloned from
     /// `window_post` at construction.
     ///
     /// `Drop` has no GL context, so [`Drop for RenderState`](#impl-Drop-for-RenderState)
@@ -1424,7 +1423,7 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
     }))
 }
 
-/// Emit the Task 125.5/125.6 live render-work profile's periodic flush
+/// Emit the live render-work profile's periodic flush
 /// summary, if (and only if) `profile` currently has one pending.
 ///
 /// Two call sites in [`FreminalTerminalWidget::show`] invoke this: right
@@ -1442,7 +1441,7 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
 /// the two can never drift into logging the same boundary twice or
 /// checking it with different field sets).
 ///
-/// Task 125.6 extends the line with real upload-byte totals: the overall
+/// The line also carries real upload-byte totals: the overall
 /// total, the per-buffer-category breakdown [`LiveRenderProfile::upload_totals`]
 /// owns, and the per-resolved-class byte distribution
 /// [`LiveRenderProfile::class_upload_totals`] owns -- dividing the latter
@@ -1486,7 +1485,7 @@ fn maybe_log_live_render_profile_flush(
         upload_bytes_by_class_cursor_only = class_bytes.cursor_only,
         upload_bytes_by_class_bounded = class_bytes.bounded,
         upload_bytes_by_class_full = class_bytes.full,
-        "live render-work profile (task 125.5/125.6): cumulative raw \
+        "live render-work profile: cumulative raw \
          VertexRebuild decisions vs. resolved render-work class, the \
          changed-row histogram, and real per-buffer-category and \
          per-resolved-class upload-byte totals, for this pane since its \
@@ -1515,7 +1514,7 @@ pub struct PaneRenderCache {
     /// Last key processed by input handling.
     pub(super) previous_key: Option<Key>,
     /// Physical Super/Command key hold-state from the most recently
-    /// processed frame (Task 101.2), tracked per side. egui exposes no
+    /// processed frame, tracked per side. egui exposes no
     /// `Modifiers` bit for the physical Super/Windows key on Linux/Windows,
     /// so this is tracked across frames via discrete `SuperLeft`/`SuperRight`
     /// press/release events observed in `write_input_to_terminal`. Tracking
@@ -1551,7 +1550,7 @@ pub struct PaneRenderCache {
     pub(super) previous_cursor_color_override: Option<(u8, u8, u8)>,
     /// The `visible_chars` arc from the last full vertex rebuild.
     ///
-    /// As of Task 124.12 this is **not** the primary content-change signal
+    /// This is **not** the primary content-change signal
     /// any more — that is [`Self::last_rendered_row_epochs`]. Its one
     /// surviving use is the selection auto-clear's confirmation comparison
     /// in `frame_dirty.rs`: a byte-value comparison against
@@ -1566,7 +1565,7 @@ pub struct PaneRenderCache {
     /// This is the baseline `diff_row_epochs` (`frame_dirty.rs`) diffs the
     /// current frame's epochs against to compute
     /// [`super::frame_dirty::ChangedRows`] — the primary content-change
-    /// signal since Task 124.12. It replaces the two `Arc::ptr_eq` tests
+    /// signal. It replaces the two `Arc::ptr_eq` tests
     /// that used to run against `last_rendered_visible` and the
     /// now-deleted `last_rendered_line_widths`: the epoch already folds in
     /// merged characters, merged format tags, and each row's `LineWidth`,
@@ -1597,12 +1596,11 @@ pub struct PaneRenderCache {
     pub(super) previous_bg_opacity: Option<f32>,
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild. Logical row
-    /// numbers (Task 125.17), so it is stable across eviction and scrolling.
+    /// numbers, so it is stable across eviction and scrolling.
     pub(super) previous_selection: Option<(LogicalCell, LogicalCell)>,
     /// The selection in snapshot-row space at the last full vertex rebuild:
     /// `(start_col, start_row, end_col, end_row)` relative to the flattened
-    /// window, as `DirtyTrackingOutcome::screen_selection` reports it
-    /// (Task 125.17).
+    /// window, as `DirtyTrackingOutcome::screen_selection` reports it.
     ///
     /// [`Self::previous_selection`] is stable under eviction, so it cannot
     /// notice a selection that stayed attached to its text while the window
@@ -1612,7 +1610,7 @@ pub struct PaneRenderCache {
     pub(super) previous_screen_selection: Option<(usize, usize, usize, usize)>,
     /// The screen-row span (inclusive, `(min, max)`) the selection occupied
     /// at the last full vertex rebuild, in **screen**-row space, not
-    /// logical-row space (Task 124.14b-i).
+    /// logical-row space.
     ///
     /// [`Self::previous_selection`] holds logical row numbers and
     /// `DirtyTrackingOutcome::screen_selection` is snapshot-row space, so a
@@ -1647,7 +1645,7 @@ pub struct PaneRenderCache {
     /// frame. Mirrors `overlay_was_open_last_frame`'s one-frame release tail
     /// but tracks a distinct cause: the release-click that ends a divider
     /// drag must not leak through to the terminal on the same frame
-    /// `border_drag_active` goes false (issue #453 review). Kept separate
+    /// `border_drag_active` goes false. Kept separate
     /// from `overlay_was_open_last_frame` so each latch tracks only its own
     /// cause.
     pub(super) border_drag_was_active_last_frame: bool,
@@ -1669,7 +1667,7 @@ pub struct PaneRenderCache {
     /// selection -- whose [`Self::previous_selection`] is in logical-row space and
     /// needed a dedicated screen-space companion -- this field is unioned
     /// straight into [`build_bounded_damage`] with no conversion and no
-    /// second field (Task 124.14b-ii).
+    /// second field.
     pub(super) previous_command_block_hover_rows: Option<(usize, usize)>,
     /// Cached URL from the most recent URL hover lookup.
     pub(super) cached_hovered_url: Option<Arc<Url>>,
@@ -1677,7 +1675,6 @@ pub struct PaneRenderCache {
     /// hover lookup.
     pub(super) hover_snap_ptr: usize,
     /// The `row_epochs` `Arc` this pane observed on the previous frame
-    /// (issue #439 fix #4).
     ///
     /// The PTY thread only publishes a new `Arc<TerminalSnapshot>` when real
     /// output arrives (~a few times/sec under a settled full-screen TUI), but
@@ -1688,15 +1685,14 @@ pub struct PaneRenderCache {
     /// scheduling in `app_impl` so an already-drawn snapshot does not
     /// perpetually re-arm a 60fps wake for pixels that are not changing.
     ///
-    /// This used to compare `visible_chars` `Arc` pointers instead. Task
-    /// 124.12 switched it to `row_epochs` because the pointer test reported
+    /// This used to compare `visible_chars` `Arc` pointers instead. It
+    /// now uses `row_epochs` because the pointer test reported
     /// "new" for a byte-identical re-flatten in a fresh `Arc` — a cursor-blink
     /// repaint, for example, allocates a fresh `Arc<Vec<TChar>>` with
     /// unchanged bytes — which re-armed a 16ms wake for pixels that were not
     /// changing. Comparing epochs suppresses that too: two `Arc`s with
     /// content-equal `row_epochs` are treated as the same observation even
-    /// when they are different allocations. This is the same direction issue
-    /// #439 fix #4 was already going, taken further.
+    /// when they are different allocations.
     ///
     /// A skipped (`skip_draw`) frame does not corrupt this baseline: repaint
     /// *scheduling* is not the vertex-rebuild trigger. The rebuild decision
@@ -1721,7 +1717,7 @@ pub struct PaneRenderCache {
     /// pointer leaves the gutter so the hover-tint clearing frame is drawn.
     pub(super) pointer_in_gutter_last_frame: bool,
     /// Whether the scrollbar thumb was hovered on the previous frame (using
-    /// the #461-proven `hovered && pointer_in_window` shape to avoid the
+    /// the `hovered && pointer_in_window` shape to avoid the
     /// `interact_pos()` one-frame window-exit lag). Drives a one-frame
     /// hover-alpha clearing repaint + Full damage, since the thumb is painted
     /// on the plain egui painter outside the per-pane VBO damage tracking.
@@ -1766,13 +1762,12 @@ pub struct PaneRenderCache {
     /// was uploaded to the GPU (root `pixels` for still images, the
     /// GUI-selected animation frame for animated images — see
     /// `build_image_pixel_ptrs`). A store-only pixel mutation that changes no
-    /// cell and no `run_mode` (e.g. a Kitty `a=c` animation compose, Task
-    /// 100.12) still swaps in a new `Arc` for the affected frame, so
+    /// cell and no `run_mode` (e.g. a Kitty `a=c` animation compose) still swaps in a new `Arc` for the affected frame, so
     /// comparing this map against the current snapshot's pixel pointers
     /// detects the change and forces a full rebuild + texture re-upload even
     /// though `content_changed`/`image_frame_changed` stay false.
     pub(super) last_rendered_image_pixel_ptrs: std::collections::HashMap<u64, usize>,
-    /// Damage report for the frame just rendered (#435).
+    /// Damage report for the frame just rendered.
     ///
     /// Records which render path this pane took, so the per-window
     /// aggregation in `app_impl` can decide whether the whole frame was a
@@ -1791,33 +1786,33 @@ pub struct PaneRenderCache {
     /// Repaint delay this pane's `show()` needs, folded to the shortest across
     /// every in-frame requester. Drained by `central_body` after `show()`
     /// returns and folded into `shortest_repaint_delay`, so the need is visible
-    /// in `App::take_terminal_requested_delay` (subtask 121.12). Requesting a
+    /// in `App::take_terminal_requested_delay`. Requesting a
     /// repaint directly on the `Context` here would be invisible to
     /// `effective_repaint_delay`'s suppressed-pointer substitution and would be
     /// silently downgraded to the fallback interval.
     pub(crate) pending_repaint_delay: Option<std::time::Duration>,
     /// This frame's geometry and input-suppression snapshot for the
-    /// out-of-frame immediate PTY mouse-report path (Task 124.3a). Set
+    /// out-of-frame immediate PTY mouse-report path. Set
     /// unconditionally, every frame `show()` runs, immediately after
     /// `terminal_rect` and `InputSuppressors` are computed — this is the
     /// *only* place `terminal_rect` (and therefore the pane's terminal-rect
     /// origin, `terminal_rect.min`) is computed; nothing else may re-derive
-    /// it (subtask 122.15). `app_impl` lifts this into
+    /// it. `app_impl` lifts this into
     /// [`crate::gui::published_frame_state::PublishedFrameState`] right
     /// after `show()` returns, the same way it drains
-    /// [`Self::pending_repaint_delay`], so subtask 121.17/124.3b can read a
+    /// [`Self::pending_repaint_delay`], so a caller can read a
     /// pane's terminal-rect origin from outside a frame via
     /// `PublishedFrameState::pane_terminal_origin`, which derives it from
     /// this same published snapshot rather than a second, parallel field —
     /// an earlier revision of this seam kept a dedicated
-    /// `terminal_rect_origin` field here too, which Task 124.3a's review
+    /// `terminal_rect_origin` field here too, which was
     /// removed as a redundant, driftable copy of `terminal_rect.min`.
     /// Holds a stale (previous frame's) value before the first `show()`
     /// call and between frames; callers needing "is this fresh" semantics
     /// must go through the published type's own per-frame rebuild
     /// discipline rather than this field directly.
     pub(in crate::gui) pointer_report_inputs: PanePointerReportInputs,
-    /// Cross-frame search-overlay damage state (Task 124.14d): the
+    /// Cross-frame search-overlay damage state: the
     /// highlight rows and popup paint bounds the search overlay actually
     /// drew, so a bounded rebuild can union the old/new extents into its
     /// damage instead of forcing `Full` while search is open. See
@@ -1825,8 +1820,7 @@ pub struct PaneRenderCache {
     pub(super) search_damage: super::search_damage::SearchDamageState,
     /// The OSC 9;4 progress bar's `(state, percent)` fingerprint as of the
     /// most recently rendered frame, or `None` when the bar was not drawn
-    /// (progress inactive, or `progress_enabled` off) -- issue #507 phase
-    /// B2. Compared against the current frame's fingerprint in `show()` to
+    /// (progress inactive, or `progress_enabled` off). Compared against the current frame's fingerprint in `show()` to
     /// decide whether the bar's fixed-geometry damage rect needs merging
     /// into [`Self::last_frame_cursor_damage`]; see `merge_progress_damage`.
     pub(super) previous_progress: Option<(ProgressState, u8)>,
@@ -1894,11 +1888,11 @@ impl PaneRenderCache {
     }
 
     /// Physical Super/Command key hold-state as of the most recently
-    /// rendered frame (Task 114.7).
+    /// rendered frame.
     ///
     /// `super_pressed` is `pub(super)` (visible only within `gui::terminal`)
     /// because it is render-pipeline-internal state; this narrow accessor
-    /// lets `app_impl.rs`'s raw-key drain (Task 114.7) read the true
+    /// lets `app_impl.rs`'s raw-key drain read the true
     /// physical Super state for the active pane without widening the
     /// field's visibility.
     #[must_use]
@@ -1920,8 +1914,7 @@ impl PaneRenderCache {
         self.cached_hovered_url.is_some()
     }
 
-    /// This pane's search-overlay safety classification this frame (Task
-    /// 124.14d) -- see [`crate::gui::search::SearchOverlaySafety`]. Mirrors
+    /// This pane's search-overlay safety classification this frame -- see [`crate::gui::search::SearchOverlaySafety`]. Mirrors
     /// [`Self::hover_tooltip_active`]'s narrow-accessor pattern:
     /// `search_damage` stays `pub(super)` (render-pipeline internal), and
     /// `app_impl.rs`'s chrome-damage aggregation reads only this
@@ -1931,16 +1924,14 @@ impl PaneRenderCache {
         self.search_damage.safety()
     }
 
-    /// This pane's search-overlay popup damage rects this frame (Task
-    /// 124.14d), for `frame_damage::PaneDamageInput::search_overlay_rects`.
+    /// This pane's search-overlay popup damage rects this frame, for `frame_damage::PaneDamageInput::search_overlay_rects`.
     #[must_use]
     pub(crate) fn search_overlay_damage_rects(&self) -> &[crate::gui::renderer::PaneDamageRect] {
         self.search_damage.overlay_damage_rects()
     }
 
     /// Record that this pane observed `row_epochs` this frame and report
-    /// whether it is the first observation of a genuinely-new snapshot
-    /// (issue #439 fix #4).
+    /// whether it is the first observation of a genuinely-new snapshot.
     ///
     /// Returns `true` only when `row_epochs` differs (element-for-element)
     /// from the one observed on the previous call — i.e. the PTY thread
@@ -1987,7 +1978,7 @@ impl PaneRenderCache {
     /// Record that some in-frame animation (bell flash, cursor trail,
     /// animated image, gutter hover clear, scrollbar damage) needs another
     /// repaint after `delay`, folding to the shortest delay requested so far
-    /// this frame (subtask 121.12).
+    /// this frame.
     ///
     /// Every in-frame repaint need must be routed through this method rather
     /// than calling `ui.ctx().request_repaint_after()` directly — see the
@@ -2028,7 +2019,7 @@ impl Default for PaneRenderCache {
 /// `pixels` directly.
 ///
 /// Used to detect store-level pixel mutations (e.g. a Kitty `a=c` animation
-/// compose, Task 100.12) that change no cell and no `run_mode` — so none of
+/// compose) that change no cell and no `run_mode` — so none of
 /// the other full-rebuild triggers (`content_changed`, `image_frame_changed`,
 /// ...) would otherwise fire, and the GPU texture would go stale forever.
 fn build_image_pixel_ptrs(
@@ -2077,7 +2068,7 @@ struct RowDamageGeometry {
     viewport_width_px: f32,
     /// The terminal viewport's top-left corner, physical pixels, top-left
     /// origin — the same `vp_left_px`/`vp_top_px` the cursor-only arm
-    /// derives (hoisted to the `show` call site by Task 124.14a so both
+    /// derives (hoisted to the `show` call site so both
     /// arms share one computation).
     vp_left_px: f32,
     /// See [`Self::vp_left_px`].
@@ -2093,7 +2084,7 @@ struct RowDamageGeometry {
 /// run degenerates to nothing under `from_cursor_cells`' clamping.
 ///
 /// Reuses [`crate::gui::renderer::PaneDamageRect::from_cursor_cells`] for the
-/// coordinate transform (Task 124.14a's design decision) rather than
+/// coordinate transform rather than
 /// hand-rolling a second Y-flip / outward-rounding / framebuffer-clamp —
 /// that function already consumes top-left-origin, viewport-relative
 /// physical pixels and does exactly this conversion for the cursor's own
@@ -2121,7 +2112,7 @@ fn row_run_damage(
 }
 
 /// Build the [`crate::gui::renderer::PaneDamageRect`] rect for a pane's OWN
-/// full rebuild (Task 124.21 finding 2: the multi-pane fan-out).
+/// full rebuild (avoiding the multi-pane fan-out).
 /// `decide_frame_damage` does `rects.clear(); break;` the moment any pane
 /// reports [`crate::gui::renderer::PaneFrameDamage::Full`], discarding rects
 /// already collected from every other pane -- so in a split, one pane
@@ -2142,7 +2133,7 @@ fn row_run_damage(
 /// both of which live inside `pane_rect` but outside `terminal_rect`.
 ///
 /// Reuses [`crate::gui::renderer::PaneDamageRect::from_cursor_cells`] rather
-/// than a second hand-rolled transform (124.14a's design decision). This is
+/// than a second hand-rolled transform. This is
 /// the first caller whose rect can extend LEFT of the viewport origin
 /// `vp_left_px`/`vp_top_px` measure from -- the cell offset below is
 /// negative whenever the gutter is enabled -- but `from_cursor_cells`
@@ -2167,14 +2158,14 @@ fn full_pane_rebuild_damage_rect(
 }
 
 /// Shared coordinate transform behind [`full_pane_rebuild_damage_rect`] and
-/// the search-overlay popup-rect conversion (Task 124.14d, see `show`'s
+/// the search-overlay popup-rect conversion (see `show`'s
 /// search-overlay block): convert a rect in the same logical-point space as
 /// `terminal_rect` -- which may extend outside it, as both a pane's own
 /// gutter-inclusive bounds and a floating popup anchored elsewhere in the
 /// pane do -- into a [`crate::gui::renderer::PaneDamageRect`] rect, relative
 /// to the viewport origin `vp_left_px`/`vp_top_px` already measure from.
 /// Reusing one function for both callers is what stops them silently
-/// drifting apart on the exact conversion (124.14a's design decision, the
+/// drifting apart on the exact conversion (the
 /// same reasoning behind hoisting `vp_left_px`/`vp_top_px`/`fb_height_px`
 /// themselves into [`viewport_framebuffer_geometry`]).
 ///
@@ -2214,7 +2205,7 @@ fn rect_damage_relative_to_terminal(
 }
 
 /// Height, in physical pixels, of the OSC 9;4 progress indicator bar
-/// painted across each pane's top edge (issue #507, phase B2). Thin enough
+/// painted across each pane's top edge. Thin enough
 /// not to compete visually with the first row of terminal content, while
 /// still reading clearly at typical DPI scales.
 const PROGRESS_BAR_HEIGHT_PX: f32 = 3.0;
@@ -2252,7 +2243,7 @@ fn progress_fill_rect(track_rect: egui::Rect, percent: u8) -> egui::Rect {
 }
 
 /// Merge the OSC 9;4 progress bar's damage into this frame's already-decided
-/// `PaneFrameDamage` (issue #507, phase B2). Called only when the bar's
+/// `PaneFrameDamage`. Called only when the bar's
 /// active/state/percent fingerprint changed since the last frame -- see the
 /// call site in `show()`.
 ///
@@ -2307,8 +2298,8 @@ fn merge_progress_damage(
 /// Compute the terminal viewport's top-left corner in physical framebuffer
 /// pixels, plus the framebuffer height, from egui's own screen rect and
 /// `ppp`. Shared by the cursor-only/bounded-damage full-rebuild arms
-/// (hoisted at Task 124.14a) and the search-overlay popup-rect conversion
-/// (Task 124.14d, computed again here because that block runs outside the
+/// (hoisted out of the cursor-only arm) and the search-overlay popup-rect conversion
+/// (computed again here because that block runs outside the
 /// `!snap.skip_draw` guard the first computation lives inside) so a second
 /// hand-rolled version cannot drift from the first.
 fn viewport_framebuffer_geometry(ui: &Ui, terminal_rect: egui::Rect, ppp: f32) -> (f32, f32, i32) {
@@ -2325,21 +2316,20 @@ fn viewport_framebuffer_geometry(ui: &Ui, terminal_rect: egui::Rect, ppp: f32) -
 }
 
 /// Whether -- and how -- a frame's full vertex rebuild can report bounded
-/// damage (Task 124.14).
+/// damage.
 ///
 /// Decided before the rebuild body runs, because the body is byte-for-byte
 /// the same either way: [`VertexRebuild::Bounded`] means "full rebuild,
 /// bounded *damage*", never a bounded rebuild. The vertex upload stays
-/// whole-buffer because no instance buffer has a fixed per-row stride; Task
-/// 125 measured a fixed-stride relayout and refuted it (see
-/// `Documents/DESIGN_DECISIONS.md`, "Performance Parity and the `RowStore`
-/// (Task 125)").
+/// whole-buffer because no instance buffer has a fixed per-row stride; a
+/// fixed-stride relayout was measured and refuted (see
+/// `Documents/DESIGN_DECISIONS.md`, "Performance Parity and the `RowStore`").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FullRebuildDamage {
     /// Content changed only within known bounds -- the frame's
-    /// `changed_rows` row list (Task 124.14a), the current/previous
-    /// selection's screen-row span (Task 124.14b-i), the current/previous
-    /// command-block hover span (Task 124.14b-ii), or any combination of
+    /// `changed_rows` row list, the current/previous
+    /// selection's screen-row span, the current/previous
+    /// command-block hover span, or any combination of
     /// the three -- and no other full-repaint trigger fired. Build
     /// [`crate::gui::renderer::PaneFrameDamage::Region`] from it once the
     /// rebuild completes (or fall back to `Full` if every contributing row
@@ -2360,7 +2350,7 @@ pub(super) enum FullRebuildDamage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PriorVertexState {
     /// No rebuild has ever stored a cursor range: nothing on screen for a
-    /// reuse to preserve (124.21's "never-built" global category).
+    /// reuse to preserve (a genuinely-global trigger).
     NeverBuilt,
     /// At least one rebuild has run, so the pane's GPU buffers are reusable.
     Built,
@@ -2392,7 +2382,7 @@ impl PriorVertexState {
 /// home instead of living inline in `show()`: the inline form needs a live
 /// egui `Ui` and so could not be tested, and the property worth pinning
 /// (a pane-wide trigger rebuilds THIS pane, see [`pane_damage_for_full_rebuild`])
-/// was therefore unpinned (Task 132.C2).
+/// was therefore unpinned.
 ///
 /// [`VertexRebuild::ReevaluateFullRebuild`] rebuilds in full when any
 /// observation fired or the pane was never built. Pane-wide triggers
@@ -2408,8 +2398,7 @@ pub(super) const fn decide_full_rebuild(
         VertexRebuild::CursorOnly => None,
         VertexRebuild::Bounded => Some(FullRebuildDamage::Bounded),
         VertexRebuild::ReevaluateFullRebuild => {
-            // `prior` is the "never built" signal (124.21's empty-prior-state
-            // category). NOT `deco_verts.is_empty()` -- see
+            // `prior` is the "never built" signal (a genuinely-global trigger). NOT `deco_verts.is_empty()` -- see
             // `RenderState::cursor_vert_range`.
             if observations.content_changed
                 || observations.selection_changed
@@ -2432,13 +2421,12 @@ pub(super) const fn decide_full_rebuild(
 ///
 /// The pane's OWN rect (`Region`), not [`crate::gui::renderer::PaneFrameDamage::Full`]:
 /// `decide_frame_damage` returns `Full` for the whole window the moment any
-/// pane reports `Full`, discarding every sibling's bounded damage (Task
-/// 124.21 finding 2). `pane_rect_damage` is `None` only when the pane's own
+/// pane reports `Full`, discarding every sibling's bounded damage. `pane_rect_damage` is `None` only when the pane's own
 /// bounds are degenerate (see [`full_pane_rebuild_damage_rect`]), in which
 /// case `Full` is the correct, safe fallback.
 ///
 /// Extracted from `show()` so the property can be tested without a live egui
-/// `Ui` (Task 132.C2).
+/// `Ui`.
 pub(super) fn pane_damage_for_full_rebuild(
     pane_rect_damage: Option<crate::gui::renderer::PaneDamageRect>,
 ) -> crate::gui::renderer::PaneFrameDamage {
@@ -2449,10 +2437,10 @@ pub(super) fn pane_damage_for_full_rebuild(
 
 /// The current/previous screen-row span for each of [`build_bounded_damage`]'s
 /// selection and hover union sources. Every field is already screen-row
-/// space -- see the two Task 124.14b-ii fields' doc comments for why no
+/// space -- see the hover fields' doc comments for why no
 /// further conversion happens inside [`build_bounded_damage`] itself.
 ///
-/// The search fields (Task 124.14d) differ in shape from selection/hover:
+/// The search fields differ in shape from selection/hover:
 /// search matches are not necessarily contiguous, so they are borrowed
 /// slices of individual rows rather than a single `(start, end)` span. They
 /// are still already screen-row space, sorted, and deduplicated --
@@ -2461,34 +2449,33 @@ pub(super) fn pane_damage_for_full_rebuild(
 /// translated) rather than re-translating `MatchSpan`s a second time.
 ///
 /// Grouped into one `Copy` struct (mirroring `RowDamageGeometry`'s
-/// precedent) so adding the hover pair at Task 124.14b-ii, and the search
-/// pair at Task 124.14d, did not push [`build_bounded_damage`] over
+/// precedent) so adding the hover pair and the search
+/// pair did not push [`build_bounded_damage`] over
 /// clippy's `too_many_arguments` threshold. Slice references are `Copy`, so
 /// this stays `Copy` despite the added lifetime.
 #[derive(Clone, Copy)]
 struct BoundedDamageSpans<'a> {
     /// This frame's selection highlight (derived from
-    /// `screen_selection_rendered` at the call site, Task 124.14b-i).
+    /// `screen_selection_rendered` at the call site).
     current_selection: Option<(usize, usize)>,
     /// Last frame's selection highlight
-    /// ([`PaneRenderCache::previous_selection_screen_rows`], Task
-    /// 124.14b-i).
+    /// ([`PaneRenderCache::previous_selection_screen_rows`]).
     previous_selection: Option<(usize, usize)>,
     /// This frame's command-block hover tint (`command_block_hover_rows_early`
     /// -- see [`super::frame_dirty::compute_command_block_hover_rows`]'s doc
     /// for why no further conversion is needed here, unlike the selection
-    /// field above, Task 124.14b-ii).
+    /// field above).
     current_hover: Option<(usize, usize)>,
     /// Last frame's command-block hover tint
     /// ([`PaneRenderCache::previous_command_block_hover_rows`], already
-    /// screen-space -- Task 124.14b-ii).
+    /// screen-space).
     previous_hover: Option<(usize, usize)>,
-    /// This frame's search-highlight screen rows (Task 124.14d), sorted and
+    /// This frame's search-highlight screen rows, sorted and
     /// deduplicated.
     current_search_rows: &'a [usize],
     /// The search-highlight screen rows from the last full rebuild
     /// ([`super::search_damage::SearchDamageState::replace_highlight_rows`]'s
-    /// return value, Task 124.14d), sorted and deduplicated.
+    /// return value), sorted and deduplicated.
     previous_search_rows: &'a [usize],
     /// This frame's cursor row when cursor state changed.
     current_cursor_row: Option<usize>,
@@ -2496,7 +2483,7 @@ struct BoundedDamageSpans<'a> {
     previous_cursor_row: Option<usize>,
 }
 
-/// Whether an empty bounded-damage row union (Task 124.14d) should fall
+/// Whether an empty bounded-damage row union should fall
 /// back to [`crate::gui::renderer::PaneFrameDamage::Full`] or
 /// [`crate::gui::renderer::PaneFrameDamage::Unchanged`].
 ///
@@ -2526,11 +2513,11 @@ enum EmptyBoundedDamage {
 
 /// The [`EmptyBoundedDamage`] fallback for a [`FullRebuildDamage::Bounded`]
 /// frame: `Unchanged` only when search is the sole bounded source this frame
-/// (no selection, hover or row change), otherwise `Full` (Task 124.14d; see
+/// (no selection, hover or row change), otherwise `Full` (see
 /// [`EmptyBoundedDamage`] for why).
 ///
 /// A named decision rather than an inline condition so every combination is
-/// unit-tested (Task 132 review, N1).
+/// unit-tested.
 const fn empty_bounded_fallback(
     observations: FrameDirtyObservations,
     changed_rows: &super::frame_dirty::ChangedRows,
@@ -2548,29 +2535,26 @@ const fn empty_bounded_fallback(
 
 /// Build a [`crate::gui::renderer::PaneFrameDamage::Region`] from every
 /// bounded damage source a [`VertexRebuild::Bounded`] outcome may carry,
-/// falling back to `empty_fallback` when no bound can be established (Task
-/// 124.14, extended by 124.14d).
+/// falling back to `empty_fallback` when no bound can be established.
 ///
 /// Nine sources are unioned into one row set before any rect is built:
 ///
-/// - `changed_rows` (Task 124.14a) -- the window rows named by
+/// - `changed_rows` -- the window rows named by
 ///   [`super::frame_dirty::ChangedRows::Rows`], translated snapshot ->
 ///   rendered -> screen.
-/// - `spans.current_selection` / `spans.previous_selection` (Task
-///   124.14b-i) -- the selection highlight's current and previous frame
+/// - `spans.current_selection` / `spans.previous_selection` -- the selection highlight's current and previous frame
 ///   extent, both already in screen-row space. Erasing the *old* highlight
 ///   matters as much as drawing the *new* one: a selection that shrank or
 ///   was cleared still left pixels on screen that only these rows will
 ///   repaint.
-/// - `spans.current_hover` / `spans.previous_hover` (Task 124.14b-ii) --
+/// - `spans.current_hover` / `spans.previous_hover` --
 ///   the command-block hover tint's current and previous frame extent,
 ///   also both already in screen-row space, for the same
 ///   erase-the-old/draw-the-new reason as selection: moving the hover
 ///   between two blocks (or off a block entirely) must repaint the
 ///   previously-tinted rows or the stale tint lingers with no later event
 ///   to correct it.
-/// - `spans.current_search_rows` / `spans.previous_search_rows` (Task
-///   124.14d) -- the search-match tint's current and previous frame rows,
+/// - `spans.current_search_rows` / `spans.previous_search_rows` -- the search-match tint's current and previous frame rows,
 ///   for the same erase-the-old/draw-the-new reason as selection and
 ///   hover.
 /// - `spans.current_cursor_row` / `spans.previous_cursor_row` -- the cursor's
@@ -2591,8 +2575,8 @@ const fn empty_bounded_fallback(
 /// hidden behind folds — the result is `empty_fallback`, not an empty
 /// `Region`: an empty region would be a third way of spelling "nothing
 /// changed", and `decide_frame_damage` already carries one dead
-/// `RequestedWithNoRects` variant from the last time that shape existed
-/// (124.21 finding 4). This is the ONLY place `empty_fallback` is read —
+/// `RequestedWithNoRects` variant from the last time that shape existed.
+/// This is the ONLY place `empty_fallback` is read —
 /// once `screen_rows` (below) is non-empty, every subsequent fallback (rows
 /// that survived the union but produced no convertible rect) stays `Full`
 /// unconditionally, per that field's own doc comment.
@@ -2606,8 +2590,7 @@ const fn empty_bounded_fallback(
 /// [`crate::gui::renderer::PaneDamageRect`] rather than many — but
 /// non-contiguous rows (e.g. rows 3 and 40) stay separate rects rather
 /// than collapsing to their bounding box, which is the entire reason
-/// `PaneFrameDamage::Region` carries a `Vec` instead of one rect (124.14a's
-/// design decision: a single bbox would present the rows between them
+/// `PaneFrameDamage::Region` carries a `Vec` instead of one rect (a single bbox would present the rows between them
 /// too).
 fn build_bounded_damage(
     changed_rows: &super::frame_dirty::ChangedRows,
@@ -2719,7 +2702,7 @@ pub struct FreminalTerminalWidget {
     /// Hot-reloadable single-bool feature toggles cached from config,
     /// grouped into their own type to keep this struct's own field count
     /// under clippy's `struct_excessive_bools` threshold (a fourth
-    /// independent bool -- `progress_enabled`, issue #507 phase B2 -- would
+    /// independent bool -- `progress_enabled` -- would
     /// otherwise trip it). See [`WidgetDisplayToggles`]'s own doc for why
     /// each field is still correctly a `bool`, not an enum.
     toggles: WidgetDisplayToggles,
@@ -2760,7 +2743,7 @@ struct WidgetDisplayToggles {
     /// Whether cursor trail animation is enabled (cursor glides to new position).
     cursor_trail: bool,
     /// Whether the per-pane OSC 9;4 progress indicator is drawn
-    /// (`config.progress.enabled`, issue #507 phase B2). Gates display
+    /// (`config.progress.enabled`). Gates display
     /// only -- recognition/parsing of OSC 9;4 always happens regardless of
     /// this flag (see [`freminal_common::config::ProgressConfig`]'s doc).
     progress_enabled: bool,
@@ -2776,8 +2759,8 @@ struct WidgetDisplayToggles {
 /// exact computation `show` uses without driving a full `show()` call
 /// (which needs a live `Ui`, GPU-backed `RenderState`, and PTY channels —
 /// not practical to construct in a unit test). `show` and the test below
-/// are the only two callers; subtask 122.15 forbids any *third* call site
-/// re-deriving this from `cached_central_rect` + a gutter inset
+/// are the only two callers; no *third* call site may
+/// re-derive this from `cached_central_rect` + a gutter inset
 /// independently — see `PublishedFrameState::pane_terminal_origin`'s doc.
 fn terminal_rect_origin(
     pane_rect: egui::Rect,
@@ -2848,8 +2831,8 @@ impl FreminalTerminalWidget {
     }
 
     /// Mutable access to this window's shared `FontManager`, for main-thread
-    /// shaping/measuring outside the terminal grid (e.g. the toast overlay,
-    /// issue #433). Shaping must never happen inside a `PaintCallback`
+    /// shaping/measuring outside the terminal grid (e.g. the toast overlay).
+    /// Shaping must never happen inside a `PaintCallback`
     /// (`FontManager` is `!Sync`); this is called on the GUI thread.
     pub(crate) const fn font_manager_mut(&mut self) -> &mut FontManager {
         &mut self.font_manager
@@ -2912,8 +2895,7 @@ impl FreminalTerminalWidget {
     ///   phantom selection while a pane-border drag-to-resize is in
     ///   progress. The invisible drag-sensor rect geometrically overlaps
     ///   the adjacent pane's `terminal_rect`, so without this the same
-    ///   press+drag would also start/extend a real text selection there
-    ///   (issue #453).
+    ///   press+drag would also start/extend a real text selection there.
     /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
     /// - `bg_image_opacity` — background image opacity (`0.0`–`1.0`) from config.
     /// - `bg_image_mode` — background image fit mode from config.
@@ -2923,7 +2905,7 @@ impl FreminalTerminalWidget {
     ///   with `is_active_pane` it decides whether the cursor is drawn as a
     ///   focused (solid) or an unfocused (config-styled) cursor.
     /// - `key_broadcast_targets` — input senders of the other panes to mirror
-    ///   keyboard input to when broadcast mode is active (Task 74); empty when
+    ///   keyboard input to when broadcast mode is active; empty when
     ///   broadcast is off or this is not the active pane.
     ///
     /// Returns `(left_mouse_button_pressed, copied_to_clipboard, deferred_actions)`.
@@ -2985,7 +2967,7 @@ impl FreminalTerminalWidget {
         // Suppress input for one extra frame after a modal closes, or after
         // a pane-border drag-to-resize ends. This prevents the dismiss-click
         // (Cancel / X / click-away) or the drag-release-click from leaking
-        // through to the terminal as a pointer event (issue #453 review).
+        // through to the terminal as a pointer event.
         let suppress_input = ui_overlay_open
             || border_drag_active
             || cache.overlay_was_open_last_frame
@@ -3075,7 +3057,7 @@ impl FreminalTerminalWidget {
         // `hover_changed` cache invalidation below; both are required:
         //
         //   1. WAKING A FRAME on cursor motion.  The windowing layer's
-        //      cursor-move fast path (Task 65/68 idle-CPU optimization) only
+        //      cursor-move fast path (idle-CPU optimization) only
         //      schedules a repaint when egui itself reports `repaint` — i.e.
         //      when an egui-tracked interactive region's hover state changes.
         //      Registering the gutter as a `Sense::click()` region makes egui
@@ -3118,11 +3100,10 @@ impl FreminalTerminalWidget {
             // this frame is resolved once, at the end of `show`, by
             // `PointerHover`. Setting it at this point had no visible effect
             // at all, because the URL / OSC-22 block below unconditionally
-            // overwrote `output.cursor_icon` a few hundred lines later
-            // (issue #462).
+            // overwrote `output.cursor_icon` a few hundred lines later.
             gutter_hovered = effectively_hovered;
             if needs_repaint {
-                // 16ms, not `Duration::ZERO` (subtask 121.12): scheduling is
+                // 16ms, not `Duration::ZERO`: scheduling is
                 // unchanged either way (`clamp_repaint_delay` already floors
                 // any delay, including a bare `request_repaint()`, at
                 // `MIN_REPAINT_INTERVAL` = 16ms), so this value is
@@ -3149,7 +3130,7 @@ impl FreminalTerminalWidget {
                 if !ptr.primary_pressed() {
                     return false;
                 }
-                // Task 124.3b: the shared `scrollbar_hit_rect` helper is now
+                // The shared `scrollbar_hit_rect` helper is now
                 // the single source of truth for this geometry — no more
                 // hand-copied constants to keep in sync with
                 // `handle_scrollbar`.
@@ -3224,7 +3205,7 @@ impl FreminalTerminalWidget {
         // `terminal_rect`), so its click-to-focus intent is carried here.
         let mut left_mouse_button_pressed = left_mouse_button_pressed_gutter;
         // Set to `true` below iff a non-empty local selection is actually
-        // copied to the system clipboard this frame (Subtask D3).
+        // copied to the system clipboard this frame.
         let mut copied_to_clipboard = false;
         let pane_focus_now = if is_active_pane {
             PaneFocus::Active
@@ -3270,12 +3251,12 @@ impl FreminalTerminalWidget {
                 // A pane-border drag geometrically overlaps the adjacent
                 // pane's `terminal_rect`; the same press+drag would
                 // otherwise start and extend a phantom text selection
-                // here (issue #453). Fully clear it rather than
+                // here. Fully clear it rather than
                 // finalize-and-keep, since the gesture was a resize, not
                 // a selection.
                 view_state.selection.clear();
             } else {
-                // Task 116.3 (defect 3): route through `finalize_interrupted_drag`
+                // Route through `finalize_interrupted_drag`
                 // instead of bluntly clearing `is_selecting`. An in-progress drag
                 // interrupted here (modal/menu/search/command-history opening,
                 // scrollbar-drag starting, or a split-pane-boundary release that
@@ -3395,7 +3376,7 @@ impl FreminalTerminalWidget {
             // only when the buffer extent has moved on and the last request is
             // old enough. At scrollback capacity the extent advances with every
             // evicted row, so a reply that must equal the live extent is never
-            // accepted (Task 125 review S1).
+            // accepted.
             let reply = search_buffer_rx.try_iter().last();
             if view_state
                 .search_state
@@ -3446,7 +3427,7 @@ impl FreminalTerminalWidget {
         // `[cursor] unfocused_style` when the pane or window is not focused.
         let mut cursor_appearance = frame_cursor.appearance;
 
-        // ── Command-block folding (Task 72.10b) ─────────────────────────────
+        // ── Command-block folding ─────────────────────────────
         //
         // Compute the per-frame fold-range list from the snapshot's
         // `command_blocks` and the GUI-local `folded_blocks` set, then build
@@ -3454,9 +3435,7 @@ impl FreminalTerminalWidget {
         // PTY/buffer produced) and rendered-row space (what we actually paint,
         // with folded ranges collapsed to single placeholder rows).
         //
-        // For 72.10b-2, a folded range collapses to a *blank* row at its
-        // placeholder slot — the placeholder visual (line count, triangle
-        // glyph) and click-to-unfold land in 72.10b-3.
+        // A folded range collapses to a placeholder row at its slot.
         // `compute_fold_ranges` produces ranges in **buffer-absolute** row
         // space (because `CommandBlock` row fields are buffer-absolute).
         // `RowMap` works in **snapshot-row** space `[0, term_height)`.
@@ -3492,7 +3471,7 @@ impl FreminalTerminalWidget {
             h.finish()
         };
 
-        // Task 125.5: one live-profiling observation begins per `show()`
+        // One live-profiling observation begins per `show()`
         // call, once the raw/resolved rebuild outcome for THIS frame is
         // known below. `LiveRenderProfile::start` is given that raw/resolved
         // classification directly and retains it internally, so only the
@@ -3585,22 +3564,22 @@ impl FreminalTerminalWidget {
 
             // Default: this pane rendered no change (the no-op reuse branch).
             // The cursor-only and full-rebuild branches below overwrite this
-            // with the appropriate `PaneFrameDamage` (#435).
+            // with the appropriate `PaneFrameDamage`.
             cache.last_frame_cursor_damage = crate::gui::renderer::PaneFrameDamage::Unchanged;
 
-            // Hoisted out of the cursor-only arm (124.14a activation recon):
+            // Hoisted out of the cursor-only arm (it is shared with the bounded-damage arm):
             // the bounded-damage full-rebuild arm below needs the same
             // viewport-to-framebuffer-pixel conversion to build its
             // `PaneFrameDamage::Region` rects, and computing it twice risked
             // the two arms silently drifting apart on the exact conversion.
             // `viewport_framebuffer_geometry` is also reused, recomputed,
-            // by the search-overlay popup-rect conversion further below
-            // (Task 124.14d), which runs outside this `!snap.skip_draw`
+            // by the search-overlay popup-rect conversion further below,
+            // which runs outside this `!snap.skip_draw`
             // block and so cannot see this local binding.
             let (vp_left_px, vp_top_px, fb_height_px) =
                 viewport_framebuffer_geometry(ui, terminal_rect, ppp);
 
-            // Task 124.21 finding 2 (the multi-pane fan-out): this pane's own
+            // Avoiding the multi-pane fan-out: this pane's own
             // rect, so a full rebuild below can report bounded damage
             // instead of escalating the whole frame to `Full`. See
             // `full_pane_rebuild_damage_rect`'s doc comment for why.
@@ -3616,19 +3595,19 @@ impl FreminalTerminalWidget {
             // Whether -- and how -- this frame's full rebuild (if any) can
             // report bounded damage, decided BEFORE the (identical either
             // way) rebuild body runs below. `VertexRebuild::Bounded` means
-            // "full rebuild, bounded *damage*" (Task 124.14): the rebuild
+            // "full rebuild, bounded *damage*": the rebuild
             // itself never changes shape or becomes partial -- the vertex
             // upload stays whole-buffer because no instance buffer has a
-            // fixed per-row stride (Task 125 measured a fixed-stride relayout
-            // and refuted it; see `Documents/DESIGN_DECISIONS.md`,
-            // "Performance Parity and the `RowStore` (Task 125)").
+            // fixed per-row stride (a fixed-stride relayout was measured
+            // and refuted; see `Documents/DESIGN_DECISIONS.md`,
+            // "Performance Parity and the `RowStore`").
             let full_rebuild = decide_full_rebuild(
                 dirty.rebuild,
                 dirty.observations,
                 PriorVertexState::of(render_state),
             );
 
-            // Task 125.5: the raw `VertexRebuild` decision and its
+            // The raw `VertexRebuild` decision and its
             // resolved render-work class are both known now -- before
             // either candidate branch below runs -- so record them into a
             // fresh profile token here. `ChangedRows::bounded_row_count`
@@ -3663,8 +3642,7 @@ impl FreminalTerminalWidget {
                 // finalized a PREVIOUS token as unpainted and crossed a
                 // `FLUSH_EVERY` boundary doing so -- check here, not only
                 // from the paint callback's `complete` call site below, or
-                // that boundary is lost forever (Task 125.5 regression
-                // fix; see `LiveRenderProfile::take_flush_signal`'s doc).
+                // that boundary is lost forever (see `LiveRenderProfile::take_flush_signal`'s doc).
                 maybe_log_live_render_profile_flush(&mut guard.live_profile, pane_id);
                 drop(guard);
                 profiling_token = Some(token);
@@ -3675,7 +3653,7 @@ impl FreminalTerminalWidget {
                 let cursor_verts = build_cursor_verts_only(cell_w, cell_h, &cursor_draw);
                 is_cursor_only = true;
 
-                // Compute the frame-damage rect (#435): the region that
+                // Compute the frame-damage rect: the region that
                 // actually changed this frame, so the windowing layer can
                 // skip the full clear and present only this rect. The changed
                 // region is the union of the cursor's *previous* cell (whose
@@ -3736,7 +3714,7 @@ impl FreminalTerminalWidget {
             } else if let Some(full_rebuild_damage) = full_rebuild {
                 // Full rebuild path: the whole pane changed, so the frame
                 // must clear + present fully -- or, when the change is
-                // bounded to known rows (124.14), a smaller region (#435).
+                // bounded to known rows, a smaller region.
                 // `cache.last_frame_cursor_damage` is assigned once, at the
                 // end of this branch, once `full_rebuild_damage` (decided
                 // above, before this identical-either-way rebuild ran) can
@@ -3762,7 +3740,7 @@ impl FreminalTerminalWidget {
                     // `rendered_row_count`, mapping each rendered row index back
                     // to its snapshot row (or to a blank placeholder).
                     //
-                    // 72.10b-3: each placeholder row carries a shaped line of
+                    // Each placeholder row carries a shaped line of
                     // `"▶ {N} lines hidden — click to unfold"` rendered in a
                     // dim foreground colour (BrightBlack from the active
                     // palette).  Per-placeholder hit rects are recorded into
@@ -3859,8 +3837,8 @@ impl FreminalTerminalWidget {
                                 .collect()
                         };
 
-                    // This frame's search-highlight screen rows (Task
-                    // 124.14d), for `build_bounded_damage`'s union with
+                    // This frame's search-highlight screen rows,
+                    // for `build_bounded_damage`'s union with
                     // `changed_rows`/selection/hover. Derived from
                     // `search_highlights` above -- already snapshot ->
                     // rendered -> screen translated -- rather than
@@ -3892,7 +3870,7 @@ impl FreminalTerminalWidget {
 
                     // This frame's selection screen-row span (inclusive),
                     // for the union-with-selection extension of
-                    // `build_bounded_damage` (Task 124.14b-i). Derived from
+                    // `build_bounded_damage`. Derived from
                     // `screen_selection_rendered` above rather than
                     // re-translating `screen_selection` a second time --
                     // that value already performed the identical snapshot
@@ -3912,10 +3890,8 @@ impl FreminalTerminalWidget {
                     // blocks describe primary-screen rows and must not tint
                     // a full-screen TUI), or when no blocks exist.
                     //
-                    // Two trigger surfaces feed this: hovering a cell inside
-                    // the terminal area (72.12), and hovering the command-block
-                    // gutter strip (73.3).  73.5 will retire the cell trigger,
-                    // leaving the gutter as the sole affordance.
+                    // The sole trigger is hovering the command-block gutter
+                    // strip.
                     // `command_block_hover_rows` was computed earlier (before the
                     // vertex-rebuild decision) so a hover-only change can force a
                     // rebuild; reuse it here.
@@ -3936,7 +3912,7 @@ impl FreminalTerminalWidget {
                     // cursor sits in `deco_verts` (always the final region). It
                     // MUST be stored as returned rather than re-derived from
                     // `cursor_appearance`, which ignores the blink phase and
-                    // the cursor's variable length (issue #432).
+                    // the cursor's variable length.
                     let cursor_range = build_background_instances(
                         &BackgroundFrame {
                             opacity: bg_opacity,
@@ -3954,7 +3930,7 @@ impl FreminalTerminalWidget {
                             command_block_hover_rows,
                             term_width_cols: snap.term_width,
                             colors: &snap.resolved_colors,
-                            // Task 115.2: DECSCNM (whole-screen reverse video)
+                            // DECSCNM (whole-screen reverse video)
                             // composes with per-cell SGR-7 by XOR inside the
                             // vertex builders via `effective_fg`/`effective_bg`.
                             screen_inversion: snap.screen_inversion,
@@ -3968,7 +3944,7 @@ impl FreminalTerminalWidget {
                         selection_is_block: view_state.selection.is_block,
                         text_blink_slow_visible: view_state.text_blink_slow_visible,
                         text_blink_fast_visible: view_state.text_blink_fast_visible,
-                        // Task 115.2: see the matching `BackgroundFrame`
+                        // See the matching `BackgroundFrame`
                         // construction above for the XOR-compose rationale.
                         screen_inversion: snap.screen_inversion,
                     };
@@ -3996,7 +3972,7 @@ impl FreminalTerminalWidget {
                     rs_ref.snap_images.clone_from(snap.images.as_ref());
                     // Overwrite each animated image's pixels with the frame
                     // currently selected by the GUI-side wall-clock playback
-                    // clock (Task 100.2c). `build_image_verts` above only reads
+                    // clock. `build_image_verts` above only reads
                     // frame-invariant display dims, so only the texture-upload
                     // path (which reads `img.pixels`) needs the swapped frame.
                     for (id, img) in &mut rs_ref.snap_images {
@@ -4024,7 +4000,7 @@ impl FreminalTerminalWidget {
                     // selection auto-clear's chars-only confirmation comparison
                     // (`frame_dirty.rs`), and `row_epochs` as the baseline the
                     // next frame's `diff_row_epochs` diffs against -- the
-                    // primary content-change signal since Task 124.12.
+                    // primary content-change signal.
                     cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
                     cache.last_rendered_row_epochs = Some(Arc::clone(&snap.row_epochs));
                     cache.previous_theme = Some(snap.theme);
@@ -4033,8 +4009,8 @@ impl FreminalTerminalWidget {
                     cache.previous_bg_opacity = Some(bg_opacity);
                     // Captured BEFORE the overwrite below so the damage
                     // build a few lines down can still see where THIS
-                    // frame's selection was painted last time (Task
-                    // 124.14b-i) -- `previous_selection` and
+                    // frame's selection was painted last time
+                    // -- `previous_selection` and
                     // `previous_selection_screen_rows` are updated in
                     // lockstep here, inside the rebuild body, so both only
                     // advance on a frame that actually drew.
@@ -4045,15 +4021,15 @@ impl FreminalTerminalWidget {
                     cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
                     cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
                     cache.previous_search_epoch = search_epoch;
-                    // Same capture-before-overwrite shape as selection above
-                    // (Task 124.14b-ii). No screen-space companion field is
+                    // Same capture-before-overwrite shape as selection above.
+                    // No screen-space companion field is
                     // needed here: this value is already screen-space, so
                     // there is nothing to keep in lockstep and no pair that
                     // could drift apart.
                     let previous_hover_screen_rows = cache.previous_command_block_hover_rows;
                     cache.previous_command_block_hover_rows = command_block_hover_rows_early;
                     // Same capture-before-overwrite shape as selection/hover
-                    // above (Task 124.14d): only advances the search-overlay
+                    // above: only advances the search-overlay
                     // highlight-row baseline on a frame that actually ran
                     // this rebuild body, so a skipped frame cannot advance
                     // it. `replace_highlight_rows` sorts/dedups internally,
@@ -4067,7 +4043,7 @@ impl FreminalTerminalWidget {
                     cache.previous_term_height = snap.term_height;
                     cache.previous_fold_epoch = fold_epoch;
                     // Record exactly which selected-frame pixel buffers were just
-                    // uploaded (Task 100.12), so the next frame's
+                    // uploaded, so the next frame's
                     // `image_pixels_changed` comparison is against fresh state —
                     // otherwise a one-off pixel mutation would pin the pane in
                     // the full-rebuild path forever.
@@ -4075,7 +4051,7 @@ impl FreminalTerminalWidget {
                         build_image_pixel_ptrs(&snap.images, |id| view_state.selected_frame(id));
 
                     cache.last_frame_cursor_damage = match full_rebuild_damage {
-                        // Task 124.21 finding 2: report this pane's OWN rect
+                        // Report this pane's OWN rect
                         // rather than escalating the whole frame to `Full`,
                         // so a busy pane in a split no longer forces a full
                         // clear + present of every sibling. `pane_rect_damage`
@@ -4084,7 +4060,7 @@ impl FreminalTerminalWidget {
                         // safe fallback.
                         FullRebuildDamage::Full => pane_damage_for_full_rebuild(pane_rect_damage),
                         FullRebuildDamage::Bounded => {
-                            // Task 124.14d: `Unchanged` is the accurate
+                            // `Unchanged` is the accurate
                             // terminal-band contribution -- not a fallback --
                             // only when search is the SOLE bounded source
                             // this frame and its own highlight-row union
@@ -4137,7 +4113,7 @@ impl FreminalTerminalWidget {
 
             // Drive the cursor trail animation: request a repaint on the next
             // frame so the interpolation continues smoothly until it completes.
-            // Folded into `cache` (subtask 121.12), not requested on the
+            // Folded into `cache`, not requested on the
             // `Context` directly — see `PaneRenderCache::request_repaint_after`.
             if cursor_animating {
                 cache.request_repaint_after(std::time::Duration::from_millis(16));
@@ -4189,8 +4165,7 @@ impl FreminalTerminalWidget {
         // is read from `RenderState::deco_verts` inside the closure, not
         // captured separately.
         let render_state_for_cb = Arc::clone(render_state);
-        // Authoritative present region (124.18, formerly a
-        // `present_is_partial: AtomicBool`): the windowing layer publishes
+        // Authoritative present region: the windowing layer publishes
         // this just before this callback runs. The cursor-only scissor
         // reads it directly, rather than scissoring to this pane's own
         // narrower cursor-damage rect — see the scissor call site below for
@@ -4265,8 +4240,8 @@ impl FreminalTerminalWidget {
                 let restore_fbo = painter.intermediate_fbo();
 
                 // Scissor the GPU redraw to what the windowing layer
-                // published as this frame's present region (124.18), NOT to
-                // this pane's own damage rect (the earlier `#435` design for
+                // published as this frame's present region, NOT to
+                // this pane's own damage rect (the earlier design for
                 // the cursor-only arm). The rest of the framebuffer already
                 // holds the previous frame's contents, but on a stale
                 // (`buffer_age() > 1`) back buffer the windowing layer's
@@ -4279,7 +4254,7 @@ impl FreminalTerminalWidget {
                 // convention as `glScissor`.
                 //
                 // Both the cursor-only and full-draw arms below read this
-                // *same* value (124.23): a full draw that scissored nothing
+                // *same* value: a full draw that scissored nothing
                 // could redraw pixels the clear deliberately skipped over,
                 // which then blend against stale (rather than cleared)
                 // content when `background_opacity < 1.0`. One region now
@@ -4300,7 +4275,7 @@ impl FreminalTerminalWidget {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-                // Task 125.6: exactly the uploads the draw call below
+                // Exactly the uploads the draw call below
                 // issues, assigned exactly once inside whichever arm runs.
                 // Declared here (rather than a default-initialized `let
                 // mut`) so a future arm added without an assignment fails
@@ -4318,7 +4293,7 @@ impl FreminalTerminalWidget {
                     // moved/blinked), so it is always fully re-uploaded via a
                     // safe orphan-then-write into its own double-buffer slot
                     // — never patched live with `glBufferSubData` into a
-                    // buffer a pending GPU read may still be using (#432).
+                    // buffer a pending GPU read may still be using.
                     let bg_len = rs.bg_instances.len();
                     let fg_len = rs.fg_instances.len();
                     let img_len = rs.image_verts.len();
@@ -4344,15 +4319,15 @@ impl FreminalTerminalWidget {
                     // used to emit `rs_ref.image_verts` last time.
                     let draw_order = &rs_ref.image_draw_order;
 
-                    // Task 125.6: the `frame-profiling` arm captures
+                    // The `frame-profiling` arm captures
                     // `draw_with_cursor_only_update`'s returned upload-byte
                     // measurement (dropping the closure body's trailing
                     // semicolon makes it the closure's — and so
                     // `draw_scissored_to_present_region`'s — return
                     // value); the default arm issues the identical call
                     // and discards its (unconditionally computed, but
-                    // here-unused) return, exactly as before this
-                    // subtask.
+                    // here-unused) return, exactly as before profiling
+                    // existed.
                     #[cfg(feature = "frame-profiling")]
                     {
                         frame_uploads = draw_scissored_to_present_region(gl, region, || {
@@ -4410,7 +4385,7 @@ impl FreminalTerminalWidget {
                     let rs_ref: &mut RenderState = &mut rs;
                     let renderer = &mut rs_ref.renderer;
                     let atlas = &mut rs_ref.atlas;
-                    // Task 125.6: see the `is_cursor_only` arm above for
+                    // See the `is_cursor_only` arm above for
                     // why the two cfg arms differ only in whether the
                     // closure's return value is bound.
                     #[cfg(feature = "frame-profiling")]
@@ -4459,13 +4434,13 @@ impl FreminalTerminalWidget {
                     });
                 }
 
-                // Task 125.5/125.6: finalize this frame's live-profiling
+                // Finalize this frame's live-profiling
                 // observation now that the actual GL draw above has run.
                 // `complete` takes back only the token and the upload
                 // counts -- the raw/resolved classification was already
                 // recorded by `start` above, against this exact token, so
                 // it cannot be reported differently here. `frame_uploads`
-                // is exactly what the draw call issued (Task 125.6): real
+                // is exactly what the draw call issued: real
                 // per-buffer/per-texture byte counts, not an estimate from
                 // any buffer's length. `profiling_token` is `None` on a
                 // `skip_draw` frame (no rebuild decision was made, so
@@ -4489,7 +4464,7 @@ impl FreminalTerminalWidget {
                     maybe_log_live_render_profile_flush(&mut rs.live_profile, pane_id);
                 }
 
-                // Task 125.8: log this pane's asynchronous GPU upload/draw
+                // Log this pane's asynchronous GPU upload/draw
                 // timing flush, if one is due. Independent of
                 // `frame-profiling`/`profiling_token` -- GPU timing samples
                 // are issued and polled unconditionally by the draw call
@@ -4510,7 +4485,7 @@ impl FreminalTerminalWidget {
                         last_latency_frames = report.last_latency_frames,
                         dropped_sample_count = report.dropped_sample_count,
                         unavailable_sample_count = report.unavailable_sample_count,
-                        "Task 125.8 terminal GPU timing flush"
+                        "terminal GPU timing flush"
                     );
                 }
             })),
@@ -4532,14 +4507,14 @@ impl FreminalTerminalWidget {
             ));
         }
 
-        // Task 124.3a/124.3b: publish this frame's geometry + suppressor
+        // Publish this frame's geometry + suppressor
         // snapshot for the out-of-frame immediate PTY mouse-report path AND
         // the out-of-frame pointer-motion repaint predicate. `app_impl`
         // lifts this into `PublishedFrameState` immediately after `show()`
         // returns.
         //
         // Deliberately published HERE, after `handle_scrollbar` runs, not
-        // back where `suppressors` was built (124.3a's original site,
+        // back where `suppressors` was built (the original site,
         // before terminal-input processing): `cache.scrollbar_dragging` is
         // mutated BY `handle_scrollbar` (release detection, drag-continue),
         // so reading it before that call published a stale snapshot — a
@@ -4563,7 +4538,7 @@ impl FreminalTerminalWidget {
             scrollbar_hit_rect: scrollbar_outcome.hit_rect,
         };
 
-        // #459 item 9 / mirrors #461 gutter: the scrollbar thumb is painted on
+        // Like the gutter hover: the scrollbar thumb is painted on
         // the plain egui painter (alpha varies with hover), outside per-pane VBO
         // damage. A hover-alpha change or a rendered->not-rendered vanish must
         // force one Full clear or a Partial present (driven by an unrelated
@@ -4580,7 +4555,7 @@ impl FreminalTerminalWidget {
             effectively_hovered: cache.scrollbar_was_hovered_last_frame,
         };
         if scrollbar_damage_decision(current_scrollbar_state, previous_scrollbar_state) {
-            // 16ms, not `Duration::ZERO` (subtask 121.12) — see the
+            // 16ms, not `Duration::ZERO` — see the
             // gutter-hover comment above: scheduling is unchanged (already
             // floored at 16ms by `clamp_repaint_delay`), so this value is
             // scheduling-equivalent to zero.
@@ -4591,7 +4566,7 @@ impl FreminalTerminalWidget {
         cache.scrollbar_was_hovered_last_frame = scrollbar_outcome.hovered;
 
         // ── Visual bell flash overlay ────────────────────────────────
-        // Fold the returned delay into `cache` (subtask 121.12) — see
+        // Fold the returned delay into `cache` — see
         // `paint_bell_flash`'s doc comment for why it does not request the
         // repaint on the `Context` directly.
         if let Some(delay) = paint_bell_flash(ui, rect, view_state) {
@@ -4643,7 +4618,7 @@ impl FreminalTerminalWidget {
         {
             let win_start = flat_window_start;
             // Running blocks extend only to the cursor's row (the last line of
-            // output produced so far), not the bottom of the pane (106.2b).
+            // output produced so far), not the bottom of the pane.
             let running_extent = running_block_extent(snap);
             // Iterate on-screen rows (bottom-anchored); map each back through
             // rendered → snapshot → buffer.
@@ -4693,12 +4668,12 @@ impl FreminalTerminalWidget {
             }
         }
 
-        // ── Command-block duration label (gutter-anchored, 73.6) ─────
+        // ── Command-block duration label (gutter-anchored) ─────
         // For each finished block whose duration meets the configured
         // threshold, paint a compact duration label as a floating layer
         // immediately RIGHT of the gutter strip, anchored to the block's
         // LAST visible rendered row.  Anchoring to the last on-screen row
-        // (rather than the first, as 72.12 did) keeps the label visible:
+        // (rather than the first) keeps the label visible:
         // the first row scrolls off almost immediately for any command
         // that produces output, whereas the gutter follows the block.
         //
@@ -4778,7 +4753,7 @@ impl FreminalTerminalWidget {
             }
         }
 
-        // ── OSC 9;4 progress indicator (issue #507, phase B2) ─────────
+        // ── OSC 9;4 progress indicator ─────────
         // Ghostty-style: a thin bar across the pane's TOP edge, drawn only
         // when the config gate is on and the snapshot reports active
         // progress. Unlike the gutter/duration-label overlays above, this
@@ -4798,8 +4773,8 @@ impl FreminalTerminalWidget {
                 // continuously re-armed repaint request and its own
                 // moving-extent damage handling -- `merge_progress_damage`
                 // below relies on the bar's rect being fixed across frames,
-                // which a moving sweep would break. Deliberately out of
-                // scope for this phase; see the phase B2 plan.
+                // which a moving sweep would break. Deliberately not
+                // supported.
                 ui.painter().rect_filled(track_rect, 0.0, fill_color);
             } else {
                 // Determinate states (InProgress/Error/Paused): a dim
@@ -4812,7 +4787,7 @@ impl FreminalTerminalWidget {
             }
         }
 
-        // Damage (issue #507 phase B2; BOUNDABLE-NOW, see
+        // Damage (BOUNDABLE-NOW, see
         // `merge_progress_damage`'s doc): only touch
         // `cache.last_frame_cursor_damage` when the bar's active/state/
         // percent fingerprint actually changed since the last frame. An
@@ -4844,7 +4819,7 @@ impl FreminalTerminalWidget {
         // ── Search overlay ───────────────────────────────────────────
         // Run search refresh when query changed (outside the !snap.skip_draw block
         // to ensure it fires even on identical content frames). Also update
-        // the cross-frame search-overlay damage state (Task 124.14d)
+        // the cross-frame search-overlay damage state
         // unconditionally, every frame the widget runs -- not gated on
         // whether a full rebuild happened -- because the bar's own
         // caret/hover/text content can change independently of any
@@ -4897,7 +4872,7 @@ impl FreminalTerminalWidget {
                 }
                 None => {
                     // A degenerate/unconvertible current popup rect is an
-                    // unbounded safety case for this frame (Task 124.14d),
+                    // unbounded safety case for this frame,
                     // not a silently-dropped one.
                     search_popup_safety = crate::gui::search::SearchOverlaySafety::TooltipMayEscape;
                 }
@@ -5010,7 +4985,7 @@ impl FreminalTerminalWidget {
                     }
                 }
             } else {
-                // Mouse left the terminal area, or (issue #510) is over a
+                // Mouse left the terminal area, or is over a
                 // sibling pane and never actually entered this one. Only the
                 // URL-hover cache is cleared here; the icon itself is
                 // resolved once below.
@@ -5030,7 +5005,7 @@ impl FreminalTerminalWidget {
         // once. This replaces four independent unconditional writes whose
         // relative outcome was decided purely by which one happened to run
         // last in `show` -- which silently discarded the command-block
-        // gutter's pointing-hand entirely (issue #462).
+        // gutter's pointing-hand entirely.
         //
         // The write is unconditional because egui resets
         // `output.cursor_icon` to `Default` at the start of every frame.
@@ -5128,8 +5103,8 @@ impl FreminalTerminalWidget {
         self.unfocused_cursor_style = new_config.cursor.unfocused_style;
 
         // Keep egui font infrastructure updated for chrome (menu bar, settings
-        // modal).  This is retained from the old pipeline; it will be cleaned
-        // up in subtask 1.9 once chrome fonts are fully migrated.
+        // modal).  This is retained from the old pipeline; it can be cleaned
+        // up once chrome fonts are fully migrated.
         let font_changed = old_config.font.family != new_config.font.family
             || (old_config.font.size - new_config.font.size).abs() > f32::EPSILON;
         if font_changed {
@@ -5205,7 +5180,7 @@ impl FreminalTerminalWidget {
     }
 
     /// Live-preview an expensive font change (family and/or line height) via
-    /// a full [`FontManager::rebuild`] (issue #452 phase C).
+    /// a full [`FontManager::rebuild`].
     ///
     /// Callers reserve this for changes that actually touch family or line
     /// height -- a size-only change should go through the cheaper
@@ -5242,7 +5217,7 @@ impl FreminalTerminalWidget {
             .font_changed()
     }
 
-    /// Live-preview the OpenType ligature toggle (issue #452 phase B)
+    /// Live-preview the OpenType ligature toggle
     /// without a full [`FontManager::rebuild`].
     ///
     /// Ligatures only change which shaping features `harfrust` applies --
@@ -5271,7 +5246,7 @@ impl FreminalTerminalWidget {
         self.egui_fonts_dirty = true;
     }
 
-    /// Live-preview the OSC 9;4 progress-bar display toggle (issue #507).
+    /// Live-preview the OSC 9;4 progress-bar display toggle.
     ///
     /// Only flips the cached toggle `show()` reads each frame. No atlas
     /// invalidation is needed: the bar is a plain painter overlay, and
@@ -5286,8 +5261,7 @@ impl FreminalTerminalWidget {
         true
     }
 
-    /// Live-preview the cursor trail toggle and its duration (issue #452
-    /// phase B).
+    /// Live-preview the cursor trail toggle and its duration.
     ///
     /// Both are GUI-side render parameters `show()` reads each frame
     /// (`CursorFrameInputs::trail_enabled` / `CursorFrameInputs::trail_duration`)
@@ -5298,7 +5272,7 @@ impl FreminalTerminalWidget {
         self.cursor_trail_duration = Duration::from_millis(u64::from(duration_ms));
     }
 
-    /// Live-preview the unfocused-cursor style (Task 127.7).
+    /// Live-preview the unfocused-cursor style.
     ///
     /// A GUI-side render parameter `show()` reads each frame (it resolves
     /// the inactive-pane / unfocused-window cursor appearance from this
@@ -5312,13 +5286,13 @@ impl FreminalTerminalWidget {
 #[cfg(test)]
 mod visual_preview_tests {
     //! Tests for the cheap, GUI-side preview setters used by
-    //! `apply_visual_preview` (issue #452 phase B): `set_ligatures_preview`
+    //! `apply_visual_preview`: `set_ligatures_preview`
     //! and `set_cursor_trail_preview`. Both avoid the full
     //! `apply_config_changes[_no_ctx]` path, so they need their own
     //! coverage that the cached toggles actually change (or correctly
     //! report no change).
     //!
-    //! Also covers `apply_font_preview_rebuild` (issue #452 phase C), the
+    //! Also covers `apply_font_preview_rebuild`, the
     //! expensive counterpart applied only once the debounce in
     //! `visual_preview::DebouncedPreview` settles.
 
@@ -5455,7 +5429,7 @@ mod visual_preview_tests {
 /// *geometrically inside* one of the two adjacent panes while *logically*
 /// over chrome. A pane must therefore abstain from writing the cursor icon
 /// here, or it overwrites the resize arrow for all but the hairline sliver
-/// that falls between the two pane rects (issue #462).
+/// that falls between the two pane rects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitBorderHover {
     /// Pointer is over a split-border drag sensor; that chrome owns the icon.
@@ -5749,7 +5723,7 @@ mod gutter_hover_repaint_decision_tests {
 mod scrollbar_damage_decision_tests {
     //! Tests for [`scrollbar_damage_decision`], the pure decision function
     //! behind the scrollbar thumb's hover/visibility repaint + Full-present
-    //! forcing (#459 item 9, mirroring #461's gutter fix). Covers the
+    //! forcing (mirroring the gutter hover fix). Covers the
     //! rendered<->not-rendered vanish/appear transitions, the hover-alpha
     //! change while rendered, and the steady-state no-op cases — including
     //! the case where hover *would* differ but the thumb isn't rendered at
@@ -5920,7 +5894,7 @@ mod bell_flash_tests {
         );
     }
 
-    // ── Subtask 121.12: `bell_flash_repaint_delay` ────────────────────────
+    // ── `bell_flash_repaint_delay` ────────────────────────
     // `paint_bell_flash` itself needs a live `egui::Ui` and cannot be driven
     // headlessly, so its delay-selection logic is factored into this pure
     // function and pinned directly here.
@@ -5963,7 +5937,7 @@ mod patch_cursor_only_deco_verts_tests {
     //! integration-style tests here use the real vertex builders as the
     //! reference: after every patch, `deco_verts` must be bit-identical to a
     //! from-scratch full rebuild with the same cursor params. That is the
-    //! invariant whose violation was issue #432 (stale offset bookkeeping
+    //! invariant whose violation was a past corruption bug (stale offset bookkeeping
     //! overwriting the bottom row's selection quad).
 
     use super::{CursorVertRange, patch_cursor_only_deco_verts};
@@ -6021,7 +5995,7 @@ mod patch_cursor_only_deco_verts_tests {
 
     /// A from-scratch full rebuild over a two-row screen whose rows are both
     /// selected, so `deco` has non-cursor quads (the bottom row's selection
-    /// quad is the last one before the cursor, the quad #432 corrupted).
+    /// quad is the last one before the cursor, the quad that bug corrupted).
     fn full_rebuild(cursor: &CursorDrawParams) -> (Vec<f32>, CursorVertRange) {
         full_rebuild_with_selection(cursor, Some((0, 0, 2, 1)))
     }
@@ -6251,7 +6225,7 @@ mod patch_cursor_only_deco_verts_tests {
         assert_matches_full_rebuild(&deco, range, &moved, "moved hollow");
     }
 
-    /// Issue #432-style regression: a full rebuild lands between cursor-only
+    /// Regression: a full rebuild lands between cursor-only
     /// frames of differing lengths. The rebuild's blink-off cursor has length
     /// 0, so the stored range must be `{ start: len, len: 0 }`; a later
     /// cursor-only patch must append after it and never overwrite the bottom
@@ -6364,7 +6338,7 @@ mod patch_cursor_only_deco_verts_tests {
 }
 
 #[cfg(test)]
-mod subtask_1_7_tests {
+mod render_state_tests {
     use super::*;
 
     /// Verify that an empty `RenderState` has empty vertex buffers.
@@ -6448,7 +6422,7 @@ mod subtask_1_7_tests {
 
     #[test]
     fn observe_row_epochs_reports_new_only_on_genuine_change() {
-        // Issue #439 fix #4 (Task 124.12 revision): the repaint scheduler
+        // The repaint scheduler
         // gates the content-driven 16ms wake on this returning `true` only
         // when a genuinely-new snapshot is observed. Re-observing the SAME
         // `Arc` (the idle frames between real PTY updates) must return
@@ -6494,7 +6468,7 @@ mod subtask_1_7_tests {
     }
 }
 
-/// Task 125.5: `RenderState::live_profile`'s token lifecycle through the
+/// `RenderState::live_profile`'s token lifecycle through the
 /// exact `Arc<Mutex<RenderState>>` API `show()` and the pane `PaintCallback`
 /// share — a fresh, GL-context-free `RenderState` locked twice (once per
 /// side), never a real rendered frame.
@@ -6524,7 +6498,7 @@ mod live_profiling_tests {
     /// lifecycle itself, not upload-byte attribution, so a zero
     /// [`UploadByteCounts`] is simply the input, not a placeholder; see
     /// `render_state_level_wiring_of_a_real_upload_byte_counts_value`
-    /// below for the Task 125.6 case that pins non-zero attribution
+    /// below for the case that pins non-zero attribution
     /// flowing through the same API.
     #[test]
     fn token_lifecycle_through_the_render_state_shared_by_show_and_the_paint_callback() {
@@ -6565,7 +6539,7 @@ mod live_profiling_tests {
     /// `show()` call starts a new one — exactly what a skipped paint
     /// callback looks like from `RenderState`'s side, without needing an
     /// actual skipped GL frame. The superseded token's classification
-    /// (Task 125.5 regression fix) must survive into the finalized
+    /// must survive into the finalized
     /// unpainted record and the cumulative raw/resolved totals.
     #[test]
     fn an_uninvoked_callback_leaves_its_token_finalized_as_unpainted_by_the_next_start() {
@@ -6599,7 +6573,7 @@ mod live_profiling_tests {
         );
     }
 
-    /// Regression test (Task 125.5 review): the flush signal a boundary
+    /// Regression test: the flush signal a boundary
     /// crossing latches is observable through the SAME
     /// `Arc<Mutex<RenderState>>` API `show()` and the paint callback
     /// share, regardless of which side's finalization crosses it --
@@ -6662,12 +6636,12 @@ mod live_profiling_tests {
         );
     }
 
-    /// Task 125.6: a real, non-zero, multi-category [`UploadByteCounts`]
+    /// A real, non-zero, multi-category [`UploadByteCounts`]
     /// completed through the SAME `Arc<Mutex<RenderState>>` API `show()`
     /// and the pane's paint callback share must reach both
     /// `upload_totals()` (the per-buffer-category breakdown) and
     /// `class_upload_totals()` (the per-resolved-class breakdown) intact
-    /// -- proving the `RenderState`-level plumbing this subtask's
+    /// -- proving the `RenderState`-level plumbing the
     /// production call site (`FreminalTerminalWidget::show`'s paint
     /// callback) relies on, independent of any real GL draw.
     #[test]
@@ -6711,7 +6685,7 @@ mod live_profiling_tests {
 
 #[cfg(test)]
 mod image_pixels_changed_tests {
-    //! Regression coverage for Task 100.12: a Kitty `a=c` animation compose
+    //! Regression coverage for a Kitty `a=c` animation compose
     //! overwrites an existing frame's pixels in place (a new
     //! `Arc<Vec<u8>>`) without changing any cell or `run_mode`, so neither
     //! `content_changed` nor `image_frame_changed` fires and the full-rebuild
@@ -6850,16 +6824,15 @@ mod image_pixels_changed_tests {
 
 #[cfg(test)]
 mod build_bounded_damage_tests {
-    //! Task 124.14b-i introduced [`build_bounded_damage`]'s union of the
-    //! changed-row list (124.14a) with the selection's current/previous
-    //! screen-row span; Task 124.14b-ii adds the command-block hover's
-    //! current/previous screen-row span as a fourth and fifth source. These
+    //! [`build_bounded_damage`] unions the changed-row list with the
+    //! selection's and the command-block hover's current/previous
+    //! screen-row spans. These
     //! tests exercise that union directly, at the pure-function level,
     //! rather than through the full `show()` pipeline (which needs a GL
     //! context). A no-fold, no-scroll-skip `FoldLayout`/`RowMap` pair is
     //! used throughout so snapshot row == rendered row == screen row,
     //! isolating the union/merge logic from the row-translation logic
-    //! 124.14a's own tests already cover.
+    //! the row-translation tests already cover.
     use super::*;
     use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
     use crate::gui::terminal::frame_dirty::ChangedRows;
@@ -6931,7 +6904,7 @@ mod build_bounded_damage_tests {
     /// selection needs to avoid leaving a stale highlight on screen. Uses
     /// two non-adjacent single-row spans so the result is provably two
     /// separate rects, not a bounding box spanning the rows between them
-    /// (124.14a's design decision, still load-bearing here).
+    /// (still load-bearing here).
     #[test]
     fn selection_only_change_damages_both_current_and_previous_rows() {
         let layout = identity_layout(20);
@@ -6957,7 +6930,7 @@ mod build_bounded_damage_tests {
         );
     }
 
-    /// Task 125.17: a selection that stays attached to its text while the
+    /// A selection that stays attached to its text while the
     /// window slides beneath it (eviction at scrollback capacity) is painted
     /// on different screen rows each frame. The bounded damage must cover
     /// both extents -- the rows the highlight left AND the rows it moved to --
@@ -7051,7 +7024,7 @@ mod build_bounded_damage_tests {
         );
     }
 
-    // ── Task 124.14b-ii: command-block hover spans ─────────────────────────
+    // ── command-block hover spans ─────────────────────────
 
     /// A hover-only change (no row change, no selection change) must still
     /// produce bounded damage, and that damage must cover BOTH the current
@@ -7060,8 +7033,7 @@ mod build_bounded_damage_tests {
     /// from one command block to another needs to avoid leaving a stale
     /// tint on the block the pointer just left. Uses two non-adjacent
     /// single-row spans so the result is provably two separate rects, not
-    /// a bounding box spanning the rows between them (124.14a's design
-    /// decision, still load-bearing here).
+    /// a bounding box spanning the rows between them (still load-bearing here).
     #[test]
     fn hover_only_change_damages_both_current_and_previous_rows() {
         let layout = identity_layout(20);
@@ -7148,7 +7120,7 @@ mod build_bounded_damage_tests {
 
     /// Overlapping sources across two *different* sources -- a hover span
     /// that overlaps the current selection's span -- must also merge into
-    /// ONE rect. This is the case 124.14b-ii adds on top of 124.14b-i:
+    /// ONE rect. This is the cross-source case:
     /// selection and hover are independent sources that can legitimately
     /// highlight the same rows at once (selecting text inside the block
     /// the pointer is hovering), and the union must not double-present
@@ -7180,7 +7152,7 @@ mod build_bounded_damage_tests {
         );
     }
 
-    // ── Task 124.14d: search-highlight rows ─────────────────────────────
+    // ── Search-highlight rows ─────────────────────────────
 
     /// A search-only change (no row change, no selection, no hover) must
     /// still produce bounded damage, covering BOTH the current highlight
@@ -7240,7 +7212,7 @@ mod build_bounded_damage_tests {
         );
     }
 
-    /// The load-bearing case for Task 124.14d's `EmptyBoundedDamage`
+    /// The load-bearing case for the `EmptyBoundedDamage`
     /// parameter: search is the sole bounded source, and its own
     /// current/previous highlight-row union is empty (no visible matches
     /// before or after -- e.g. a query edit that still matches nothing).
@@ -7334,7 +7306,7 @@ mod build_bounded_damage_tests {
 
 #[cfg(test)]
 mod full_pane_rebuild_damage_rect_tests {
-    //! Task 124.21 finding 2's fix: [`full_pane_rebuild_damage_rect`] builds
+    //! [`full_pane_rebuild_damage_rect`] builds
     //! the damage rect a full pane rebuild reports instead of escalating to
     //! `PaneFrameDamage::Full`. These tests exercise it directly at the
     //! pure-function level rather than through the full `show()` pipeline
@@ -7509,7 +7481,7 @@ mod full_pane_rebuild_damage_rect_tests {
     }
 }
 
-/// Task 132.C2: the two full-rebuild damage decisions `show()` used to make
+/// The two full-rebuild damage decisions `show()` used to make
 /// inline ([`decide_full_rebuild`] and [`pane_damage_for_full_rebuild`]),
 /// which needed a live egui `Ui` and so were untested. The end-to-end
 /// "OSC 4 in one pane of two" test lives in `frame_dirty.rs`, next to the
@@ -7722,7 +7694,7 @@ mod full_rebuild_decision_tests {
 
 #[cfg(test)]
 mod progress_bar_geometry_tests {
-    //! Issue #507 phase B2: [`progress_bar_track_rect`], [`progress_fill_rect`],
+    //! [`progress_bar_track_rect`], [`progress_fill_rect`],
     //! and [`merge_progress_damage`] exercised directly at the pure-function
     //! level, mirroring `full_pane_rebuild_damage_rect_tests` above.
     use super::*;
@@ -7889,7 +7861,7 @@ mod progress_bar_geometry_tests {
 
 #[cfg(test)]
 mod gutter_hover_trigger_tests {
-    //! 73.5: the gutter strip is the sole hover trigger; hovering output
+    //! The gutter strip is the sole hover trigger; hovering output
     //! cells does not tint a command block.
     use super::*;
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
@@ -8101,7 +8073,7 @@ impl InputSuppressors {
 
 #[cfg(test)]
 mod url_hover_pane_bounds_tests {
-    //! Issue #510: a URL on a pane's top row must not stay "hovered" once
+    //! A URL on a pane's top row must not stay "hovered" once
     //! the pointer moves into a sibling pane stacked above it. Every pane
     //! runs against the same window-wide `PointerMoved` queue, so
     //! `view_state.mouse_position` alone cannot be trusted to mean "over
@@ -8129,7 +8101,7 @@ mod url_hover_pane_bounds_tests {
     fn pointer_above_the_pane_is_rejected_not_clamped_to_row_zero() {
         let rect = terminal_rect();
         // A position belonging to a sibling pane stacked above this one:
-        // above `rect.min.y`. Before the #510 fix this clamped to row 0
+        // above `rect.min.y`. This used to clamp to row 0
         // instead of being rejected outright.
         let pos = egui::pos2(25.0, -40.0);
         assert_eq!(
@@ -8472,7 +8444,7 @@ mod overlay_suppress_input_tests {
         assert!(!suppress, "fresh widget should not suppress input");
     }
 
-    /// Issue #453: a pane-border drag-to-resize must suppress terminal
+    /// A pane-border drag-to-resize must suppress terminal
     /// input the same way a modal/menu overlay does. The `suppress_input`
     /// flag is computed as:
     ///   `ui_overlay_open || border_drag_active || self.overlay_was_open_last_frame`
@@ -8500,7 +8472,7 @@ mod overlay_suppress_input_tests {
         );
     }
 
-    /// Issue #453 root cause: a pane-border drag sensor sits geometrically
+    /// Root cause: a pane-border drag sensor sits geometrically
     /// inside the adjacent pane's `terminal_rect`, so the same press+drag
     /// also starts/extends a phantom text selection in that pane.
     ///
@@ -8571,7 +8543,7 @@ mod overlay_suppress_input_tests {
         assert_eq!(cleared.end, None);
     }
 
-    /// Issue #453 review: the release-click that ends a pane-border drag
+    /// The release-click that ends a pane-border drag
     /// must not leak through to the terminal on the same frame
     /// `border_drag_active` goes false, mirroring the existing overlay
     /// one-frame release tail. `suppress_input` is computed as:
@@ -8814,7 +8786,7 @@ mod placeholder_tests {
 
 #[cfg(test)]
 mod pane_render_cache_repaint_delay_tests {
-    //! Subtask 121.12: [`PaneRenderCache::request_repaint_after`] /
+    //! [`PaneRenderCache::request_repaint_after`] /
     //! [`PaneRenderCache::take_pending_repaint_delay`] — the per-pane
     //! aggregation seam every in-frame repaint requester now folds through,
     //! instead of calling `ui.ctx().request_repaint_after()` directly.
@@ -8875,7 +8847,7 @@ mod pane_render_cache_repaint_delay_tests {
 
 #[cfg(test)]
 mod terminal_rect_origin_tests {
-    //! Subtask 122.15, adapted by Task 124.3a's review: proves
+    //! Proves
     //! `PublishedFrameState::pane_terminal_origin` — which now derives its
     //! answer from `PanePointerReportInputs.terminal_rect.min` rather than
     //! a second, parallel `pane_terminal_origins` map (removed as a
@@ -8972,7 +8944,7 @@ mod terminal_rect_origin_tests {
 
 #[cfg(test)]
 mod pane_cursor_focus_geometry_tests {
-    //! Task 127.5: what each pane's cursor looks like once focus is wired in.
+    //! What each pane's cursor looks like once focus is wired in.
     //!
     //! `FreminalTerminalWidget::show` needs a live egui `Ui` and a GL context,
     //! so it cannot be driven from a unit test. These tests instead drive the

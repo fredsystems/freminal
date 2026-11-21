@@ -7,7 +7,7 @@
 //!
 //! A terminal application may push the current title any number of times,
 //! and each title can be up to the OSC payload limit.  An unbounded stack is
-//! therefore a memory-exhaustion vector (GHSA-jh4m-7w5g-j4qg), so the stack
+//! therefore a memory-exhaustion vector, so the stack
 //! has a fixed maximum depth and drops the **oldest** entry when full.
 //!
 //! The depth and overflow policy follow the reference implementations:

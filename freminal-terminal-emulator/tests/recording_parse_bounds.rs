@@ -1,4 +1,4 @@
-//! Bounds tests for `parse_recording_from_bytes` (issue #556).
+//! Bounds tests for `parse_recording_from_bytes`.
 //!
 //! Every count, length and offset in a `.frec` file is attacker-controlled. Each
 //! test here crafts a file whose declared size disagrees with the bytes present
@@ -117,7 +117,7 @@ fn well_formed_file_still_parses() {
 
 #[test]
 fn seek_index_entry_count_far_beyond_file_is_rejected() {
-    // The #556 reproducer's count: asked the allocator for 0x2000000000060 bytes.
+    // A fuzz reproducer's count: asked the allocator for 0x2000000000060 bytes.
     let mut frame = Frame::valid();
     frame.declared_entry_count = 0x2000_0000_0006;
     assert_invalid_format(

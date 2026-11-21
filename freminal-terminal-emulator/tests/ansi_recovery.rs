@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Phase 13: Root parser recovery (switching between parsers and error handling)
+//! Root parser recovery (switching between parsers and error handling)
 
 use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 

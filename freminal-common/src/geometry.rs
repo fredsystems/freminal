@@ -9,8 +9,8 @@
 //! dependency on a rendering toolkit** — in particular, no `egui`. It exists
 //! so that `freminal/src/gui/panes` (the built-in multiplexer's pane-tree
 //! layout and hit-testing) can express its layout maths without pulling
-//! `egui::Rect` / `egui::Pos2` into pure geometry code. See Task 122
-//! ("Orchestration Extraction"), subtask 122.2, and
+//! `egui::Rect` / `egui::Pos2` into pure geometry code. See
+//! `Documents/DESIGN_DECISIONS.md`, "Orchestration Extraction", and
 //! `Documents/DECOUPLING_FRAMEWORK.md` for the broader context that motivates
 //! keeping toolkit types out of non-rendering logic.
 //!
@@ -18,14 +18,13 @@
 //! it **deliberately mirrors that operation's float semantics exactly** —
 //! see the doc comments on [`Rect::contains`], [`Rect::center`],
 //! [`Rect::width`] and [`Rect::height`] for the precise behaviour and why it
-//! matters. Subtask 122.3 migrates `panes/mod.rs`'s production geometry onto
-//! these types as a no-behaviour-change refactor, and its existing tests
-//! assert exact widths, heights, and boundary hit-tests; any divergence from
-//! `egui`/`emath` here would silently break that migration.
+//! matters. `panes/mod.rs`'s production geometry is expressed in these types
+//! as a no-behaviour-change refactor, and its tests assert exact widths,
+//! heights, and boundary hit-tests; any divergence from `egui`/`emath` here
+//! would silently break them.
 //!
 //! The API is **intentionally minimal**: only the operations actually used
-//! by `panes/mod.rs` are provided (see subtask 122.2's exhaustive usage
-//! count). It is grown on demand by later subtasks, not spread out
+//! by `panes/mod.rs` are provided. It is grown on demand, not spread out
 //! speculatively — do not add `shrink`, `expand`, `translate`, `intersect`,
 //! `union`, `from_min_size`, edge accessors (`left`/`right`/`top`/`bottom`),
 //! or arithmetic operator impls here unless a real call site needs them.
@@ -147,8 +146,8 @@ impl Rect {
     /// epsilon (`edge_epsilon`, `1.0` at its only production call site,
     /// `app_impl.rs:3556`). A one-ULP shift will not cross a 1.0 epsilon on
     /// its own, so this is parity **by construction** rather than a fix for
-    /// an observed bug: subtask 122.3 is a no-behaviour-change refactor, and
-    /// the cheapest way to guarantee that is to compute what `emath`
+    /// an observed bug: the pane geometry migration is a no-behaviour-change
+    /// refactor, and the cheapest way to guarantee that is to compute what `emath`
     /// computes rather than to argue about which differences are too small
     /// to matter.
     // `clippy::manual_midpoint` wants `f32::midpoint`, which on the targets

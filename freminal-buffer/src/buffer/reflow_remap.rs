@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! [`ReflowRemap`] — how a width-changing reflow moved every row (Task 125.14).
+//! [`ReflowRemap`] — how a width-changing reflow moved every row.
 //!
 //! Reflow re-wraps logical lines, so the row count and the row boundaries
 //! change. Every stored [`RowNumber`] that referred to a pre-reflow row (prompt

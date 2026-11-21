@@ -200,7 +200,7 @@ pub(crate) struct RealPlacement {
     /// This placement's id (`p=`; 0 if unspecified).
     pub placement_id: u32,
     /// Screen origin: the top-left cell row where the image was stamped, as a
-    /// stable logical row number (Task 125.14). It stays attached to that row
+    /// stable logical row number. It stays attached to that row
     /// as scrollback is evicted, and is translated through a reflow by
     /// `TerminalHandler::apply_buffer_reflow_remap`. Convert to a retained
     /// buffer index with `Buffer::row_index_of`; `None` means the row has
@@ -220,11 +220,11 @@ pub(crate) struct RealPlacement {
     /// Horizontal cell offset (`H=`) from the parent, for a relative
     /// placement. `0` for a non-relative placement. Retained so a
     /// virtual-parent child's position can be re-derived at render time
-    /// (Task 100.4b) from the parent's live placeholder cells.
+    /// from the parent's live placeholder cells.
     pub h_offset: i32,
     /// Vertical cell offset (`V=`) from the parent. `0` for non-relative.
     pub v_offset: i32,
-    /// Unique placement-instance id (Task 100.18), minted once when this
+    /// Unique placement-instance id, minted once when this
     /// placement was first stamped/registered. Stable across frames — a
     /// virtual-parent relative child re-derives its per-cell stamps on
     /// every call to `inject_virtual_parent_relatives`, and must reuse
@@ -276,12 +276,12 @@ pub struct TerminalHandler {
     /// Optional channel for writing responses back to the PTY.
     write_tx: Option<Sender<PtyWrite>>,
     /// Replies dropped because `write_tx` was bounded and full, or because
-    /// queuing them would exceed the reply byte budget (`reply_budget`)
-    /// (GHSA-6cxq-f7hx-92v2, 148.C9).  Diagnostic counter; atomic so replies can be
-    /// counted from the `&self` write helpers.
+    /// queuing them would exceed the reply byte budget (`reply_budget`).
+    /// Diagnostic counter; atomic so replies can be counted from the `&self`
+    /// write helpers.
     dropped_replies: AtomicU64,
     /// Bytes of replies currently queued on `write_tx` and not yet written by
-    /// the PTY writer thread, shared with that thread (148.C9).  The handler
+    /// the PTY writer thread, shared with that thread.  The handler
     /// adds a reply's length when it queues it and the writer subtracts it
     /// once written; a reply that would push the total past
     /// `MAX_QUEUED_REPLY_BYTES` is dropped.  `None` (headless, tests) means
@@ -305,9 +305,8 @@ pub struct TerminalHandler {
     /// [`Self::drain_command_events`].
     ///
     /// Populated by [`Self::handle_osc_ftcs`] when an `OSC 133 D` marker
-    /// arrives.  The GUI consumes these (in subtask 72.9) and routes them to
-    /// the corresponding pane's `recent_commands` and to the notification
-    /// system (Task 76).
+    /// arrives.  The GUI consumes these and routes them to the corresponding
+    /// pane's `recent_commands` and to the notification system.
     pending_command_events: Vec<CommandBlock>,
     /// Last graphic character written (for REP — CSI b).
     last_graphic_char: Option<TChar>,
@@ -355,7 +354,7 @@ pub struct TerminalHandler {
     /// is unset.  Screen switches touch neither stack; RIS and DECSTR clear
     /// both.
     pointer_shape_stack: ScreenScoped<PointerShapeStack>,
-    /// Current progress state reported via OSC 9;4 (issue #507).
+    /// Current progress state reported via OSC 9;4.
     ///
     /// Defaults to inactive/0%. Updated by applying successive
     /// [`freminal_common::buffer_states::progress::ProgressUpdate`]s to the
@@ -390,7 +389,7 @@ pub struct TerminalHandler {
     virtual_placements: ScreenScoped<HashMap<(u64, u32), VirtualPlacement>>,
     /// First-class real (cell-stamped) placements, one map per screen, keyed by
     /// (`image_id`, `placement_id`). Enables relative placements (parent link)
-    /// and cascade delete (Task 100.4a).  Per screen for the same reason as
+    /// and cascade delete.  Per screen for the same reason as
     /// `virtual_placements`.
     real_placements: ScreenScoped<HashMap<(u64, u32), RealPlacement>>,
     /// Per screen, the buffer's row base when that screen's `real_placements`
@@ -675,7 +674,7 @@ impl TerminalHandler {
             .unwrap_or_default()
     }
 
-    /// Get the current progress state reported via OSC 9;4 (issue #507).
+    /// Get the current progress state reported via OSC 9;4.
     ///
     /// Returns inactive/0% when no progress report has been received, or
     /// after [`Self::expire_stale_progress`] has reset a stale one.
@@ -738,7 +737,7 @@ impl TerminalHandler {
     /// Set the configured cursor shape / blink style, and apply it.
     ///
     /// Used to seed the style from `config.cursor` when a pane is spawned and
-    /// to apply a live Settings change (issue #406).  Sets both the current
+    /// to apply a live Settings change.  Sets both the current
     /// style and the configured baseline that [`Self::full_reset`] (RIS) and
     /// [`Self::soft_reset`] (DECSTR) restore the current style to.  A
     /// program's own DECSCUSR / `XTCBlink` request changes only the current
@@ -845,8 +844,7 @@ impl TerminalHandler {
     /// state.
     ///
     /// Table 5-9 also predates these, which freminal resets because the
-    /// reference terminals do (the reset table in
-    /// `Documents/PLAN_VERSION_130_0.md` records each source):
+    /// reference terminals do (sources in parentheses):
     /// - the cursor style → the configured one
     ///   ([`Self::set_configured_cursor_visual_style`]) (xterm, Ghostty);
     /// - `modifyOtherKeys` → level 0 (xterm, Ghostty, `WezTerm`);
@@ -856,8 +854,7 @@ impl TerminalHandler {
     ///   (xterm, Ghostty, `WezTerm`);
     /// - **both** OSC 22 pointer-shape stacks and **both** kitty keyboard
     ///   stacks (main and alternate) → empty (kitty's `do_screen_reset`);
-    /// - the OSC 9;4 progress state, which is freminal-private (issue
-    ///   #507).
+    /// - the OSC 9;4 progress state, which is freminal-private.
     ///
     /// ## Saved character set
     /// Table 5-9 resets the DECSC state to home position with default
@@ -1043,7 +1040,7 @@ impl TerminalHandler {
         // Insert an image cell at the current cursor position.
         //
         // Stamp the placeholder cell with the virtual placement's own
-        // `placement_instance` (Task 100.20) — minted once at
+        // `placement_instance` — minted once at
         // `register_virtual_placement` time and stable across every
         // placeholder cell that resolves to this same virtual placement, so
         // two independent `a=p,U=1` registrations of the same image with
@@ -1057,10 +1054,10 @@ impl TerminalHandler {
             placement_id: Some(placement_id),
             z_index: 0,
             // Unicode placeholder cells are not an `a=p`/`a=T` display path —
-            // source-crop (Task 100.9) does not apply here.
+            // source-crop does not apply here.
             source_crop: None,
             placement_instance: vp.placement_instance,
-            // Sub-cell X/Y offset (Task 100.19) only applies to the a=p/a=T
+            // Sub-cell X/Y offset only applies to the a=p/a=T
             // display path's own quad, not placeholder-resolved cells.
             subcell_offset: None,
         };
@@ -1165,15 +1162,14 @@ impl TerminalHandler {
     }
 
     /// Share the queued-reply byte counter with the PTY writer thread, which
-    /// turns on the byte budget for replies sent through `write_tx` (148.C9).
+    /// turns on the byte budget for replies sent through `write_tx`.
     pub fn set_reply_budget(&mut self, queued_bytes: Arc<AtomicUsize>) {
         self.reply_budget = Some(queued_bytes);
     }
 
     /// Set the channel for PTY commands that are not replies (currently the
     /// DECCOLM resize).  Used when `write_tx` is the bounded reply queue, so a
-    /// resize is never blocked behind, or dropped with, queued replies
-    /// (GHSA-6cxq-f7hx-92v2).
+    /// resize is never blocked behind, or dropped with, queued replies.
     pub fn set_control_tx(&mut self, tx: Sender<PtyWrite>) {
         self.control_tx = Some(tx);
     }
@@ -1293,7 +1289,7 @@ impl TerminalHandler {
     /// naive `scrollback.extend(visible)` fuses the last scrollback row and the
     /// first visible row into one. Every row from the visible window onward
     /// then counts one too low, which put search highlights a row above their
-    /// match and dropped matches on the first visible row entirely (#463).
+    /// match and dropped matches on the first visible row entirely.
     ///
     /// The separator is driven by the scrollback flatten's row count, not by
     /// whether it produced any characters: a single blank scrollback row
@@ -1302,7 +1298,7 @@ impl TerminalHandler {
     ///
     /// Pass `scroll_offset = 0` when calling from the PTY thread.
     ///
-    /// ## Task 124.C6: does not touch the visible-window merge cache
+    /// ## Does not touch the visible-window merge cache
     ///
     /// The visible half is flattened via
     /// [`Buffer::visible_as_tchars_and_tags_full_merge`], not
@@ -1321,7 +1317,7 @@ impl TerminalHandler {
     /// new, unstable set of epochs, indefinitely, with no second search
     /// required. See that method's doc comment for the full explanation.
     ///
-    /// ## Task 125.17: the corpus carries the rows it was cut from
+    /// ## The corpus carries the rows it was cut from
     ///
     /// The returned [`SearchCorpus`] pairs the characters with the buffer's
     /// [`BufferExtent`], so corpus row `i` is buffer row `extent.row_base + i`.
@@ -1472,7 +1468,7 @@ impl TerminalHandler {
     ///
     /// Also derives and injects the per-cell stamps for every relative
     /// placement whose parent is a VIRTUAL (Unicode placeholder) placement
-    /// (Task 100.4b) — these are never written into the buffer itself, so
+    /// — these are never written into the buffer itself, so
     /// they must be computed fresh from the parent's current placeholder
     /// cell positions on every call. This makes such a child follow its
     /// parent through scroll and reflow with no buffer mutation.
@@ -1494,10 +1490,10 @@ impl TerminalHandler {
 
     /// Derive and inject the per-cell placement stamps for every
     /// `real_placements` entry whose parent is a VIRTUAL (Unicode
-    /// placeholder) placement (Task 100.4b).
+    /// placeholder) placement.
     ///
-    /// A real-parent relative child was already stamped into the buffer by
-    /// Task 100.4a and appears in `placements` from the base call; this only
+    /// A real-parent relative child was already stamped into the buffer and
+    /// appears in `placements` from the base call; this only
     /// handles the virtual-parent case, which is registered with a
     /// placeholder origin and no stamped cells.
     ///
@@ -1526,8 +1522,8 @@ impl TerminalHandler {
                 continue;
             };
             if !self.active_virtual_placements().contains_key(&parent_key) {
-                // Real-parent child — already stamped into the buffer by
-                // Task 100.4a; nothing to derive here.
+                // Real-parent child — already stamped into the buffer;
+                // nothing to derive here.
                 continue;
             }
 
@@ -1588,16 +1584,16 @@ impl TerminalHandler {
                         placement_id: Some(child_pid),
                         z_index: child.z_index,
                         // Virtual-parent relative placements don't currently
-                        // carry crop data (out of Task 100.9 scope — see
-                        // `stamp_relative_placement_at_real_parent` for the
-                        // real-parent path, which does).
+                        // carry crop data (source-crop is not supported
+                        // there — see `stamp_relative_placement_at_real_parent`
+                        // for the real-parent path, which does).
                         source_crop: None,
                         // Stable across frames: this child's `RealPlacement`
                         // was minted its own `placement_instance` once, at
-                        // registration time (Task 100.18), so re-deriving
-                        // its synthetic per-cell stamp on every frame here
-                        // does not create a new (and therefore
-                        // re-bucketed) instance each call.
+                        // registration time, so re-deriving its synthetic
+                        // per-cell stamp on every frame here does not create
+                        // a new (and therefore re-bucketed) instance each
+                        // call.
                         placement_instance: child.placement_instance,
                         subcell_offset: None,
                     });
@@ -3219,7 +3215,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // OSC 9;4 — progress state (issue #507)
+    // OSC 9;4 — progress state
     // ------------------------------------------------------------------
 
     #[test]
@@ -3304,7 +3300,7 @@ mod tests {
         assert_eq!(
             handler.progress(),
             ProgressReport::default(),
-            "soft_reset must clear progress to inactive/0% (issue #507)"
+            "soft_reset must clear progress to inactive/0%"
         );
         assert!(
             handler.progress_updated_at.is_none(),
@@ -4613,7 +4609,7 @@ mod tests {
         assert_eq!(handler.buffer().cursor().pos.y, 4);
     }
 
-    /// Task 125.C6: DECSC saves a screen position (xterm `CursorSave`), so
+    /// DECSC saves a screen position (xterm `CursorSave`), so
     /// output that scrolls the screen between DECSC and DECRC must not move the
     /// restored cursor off its screen row.
     #[test]
@@ -4936,8 +4932,8 @@ mod tests {
 
     #[test]
     fn reset_keeps_shell_histfile() {
-        // `$HISTFILE` describes the process, not the screen (maintainer
-        // decision, Task 131 reset table), so RIS keeps it.
+        // `$HISTFILE` describes the process, not the screen (a maintainer
+        // decision), so RIS keeps it.
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_osc(&AnsiOscType::ShellInfoHistFile(PathBuf::from(
             "/home/user/.zsh_history",
@@ -5479,7 +5475,7 @@ mod tests {
 
     #[test]
     fn irm_insert_wide_char_shifts_by_two() {
-        // Regression (Task 111.9): inserting a double-width character in IRM
+        // Regression: inserting a double-width character in IRM
         // insert mode must open TWO columns, not one, so existing content
         // shifts by the glyph's display width and the cursor advances by 2.
         let mut handler = TerminalHandler::new(20, 5);

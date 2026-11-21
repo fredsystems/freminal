@@ -3,12 +3,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Style-profile tuning gallery (subtask 112.3a).
+//! Style-profile tuning gallery.
 //!
 //! A standalone developer tool — **not** part of the shipping product — used
 //! to dial in the Modern / Retro [`StyleProfile`] geometry and lock the chrome
-//! aesthetic before it is applied app-wide (112.4) and rolled out per surface
-//! (112.6–112.9).
+//! aesthetic before it is applied app-wide and rolled out per surface.
 //!
 //! Run with:
 //!
@@ -26,8 +25,7 @@
 //!
 //! When the look is signed off, copy the geometry values back into
 //! [`StyleProfile::defaults`] (in `freminal-common`) and record them in
-//! `Documents/DESIGN_DECISIONS.md`, "UI Chrome Styling and Bundled Assets
-//! (Tasks 111, 112)".
+//! `Documents/DESIGN_DECISIONS.md`, "UI Chrome Styling and Bundled Assets".
 
 use freminal::gui::chrome_style::build_visuals;
 use freminal_common::gui_theme::{GuiTheme, StyleProfile};
@@ -35,7 +33,7 @@ use freminal_common::themes::{self, ThemePalette};
 use freminal_windowing::{App, WindowConfig, WindowHandle, WindowId};
 
 /// All built-in themes, in registry order, so every theme can be audited
-/// (112.3f/g) — not a curated subset.
+/// — not a curated subset.
 fn palettes() -> &'static [&'static ThemePalette] {
     themes::all_themes()
 }
@@ -258,7 +256,7 @@ impl App for ChromeGallery {
         // Apply the draft style as the window's GLOBAL visuals so that
         // top-level popup surfaces (combo dropdowns, context menus) — which
         // do not inherit a local `ui.scope` style — also follow the theme.
-        // This is what 112.4 will do for the real app via the per-frame hook.
+        // The real app does the same via the per-frame hook.
         let visuals = build_visuals(&self.draft, self.palette(), self.bg_opacity);
         ctx.set_visuals(visuals);
         ctx.global_style_mut(|style| {
@@ -301,7 +299,7 @@ impl App for ChromeGallery {
 
 fn main() -> Result<(), freminal_windowing::Error> {
     let config = WindowConfig {
-        title: "Freminal — Chrome Style Gallery (112.3a)".to_owned(),
+        title: "Freminal — Chrome Style Gallery".to_owned(),
         inner_size: Some((1100, 760)),
         position: None,
         transparent: false,

@@ -122,7 +122,7 @@ pub enum OscTarget {
     /// OSC 777 — urxvt-style desktop notification of the form
     /// `notify;TITLE;BODY`.  One-way, fire-and-forget.
     Notify777,
-    /// OSC 99 — kitty stateful desktop notification (Task 99).
+    /// OSC 99 — kitty stateful desktop notification.
     Notify99,
     Unknown,
     ITerm2,
@@ -317,9 +317,9 @@ pub enum AnsiOscType {
         /// The notification body text.
         body: String,
     },
-    /// OSC 99 — kitty stateful desktop notification (Task 99), carrying the
+    /// OSC 99 — kitty stateful desktop notification, carrying the
     /// fully-parsed [`crate::buffer_states::osc_notify_99::Osc99Command`].
-    /// Chunk reassembly / transport / GUI are handled downstream (Tasks 99.3+).
+    /// Chunk reassembly / transport / GUI are handled downstream.
     Notify99(crate::buffer_states::osc_notify_99::Osc99Command),
     /// OSC 99 chunk the parser refused (an oversized sequence or too many
     /// metadata items).  Carries only the best-effort `i=` and `d=` it held,
@@ -327,7 +327,7 @@ pub enum AnsiOscType {
     /// of assembling the rest of it into a truncated notification.  Subject to
     /// the same support gate as [`AnsiOscType::Notify99`].
     Notify99Rejected(crate::buffer_states::osc_notify_99::Osc99RejectedChunk),
-    /// OSC 9;4 — ConEmu-style progress-state update (issue #507).
+    /// OSC 9;4 — ConEmu-style progress-state update.
     ///
     /// Parsed from `OSC 9 ; 4 ; s [ ; v ] ST` by the OSC 9 handler. Carries
     /// the wire-form [`ProgressUpdate`], which the terminal handler resolves

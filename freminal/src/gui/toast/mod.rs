@@ -36,7 +36,7 @@
 //! starts an exit fade, and `Closed` follows when the fade completes).
 //! Unkeyed toasts never produce events.
 //!
-//! Toasts are drawn by a fully-owned OpenGL pass (issue #433), not egui
+//! Toasts are drawn by a fully-owned OpenGL pass, not egui
 //! widgets: [`ToastStack::show`] measures/shapes each toast's text on the
 //! main thread (`renderer::toast_text_pass::ToastTextRenderer`), lays it out
 //! via [`layout_toasts`](layout::layout_toasts), and hands the resulting pill quads and text runs
@@ -69,7 +69,7 @@ use self::hit::{PointerOver, ToastClickPart, ToastTarget};
 //
 // The animation model and layout function below (`Toast::anim`, `ToastAnim`,
 // `layout_toasts`, and their supporting types/constants) are wired into the
-// fully-owned toast `PaintCallback` by [`ToastStack::show`] (issue #433).
+// fully-owned toast `PaintCallback` by [`ToastStack::show`].
 
 /// Duration of the entry (fade + slide + scale in) animation.
 const ANIM_IN: Duration = Duration::from_millis(300);
@@ -142,8 +142,8 @@ impl ToastKind {
     /// [`ChromeIcon::Bell`]: there is no dedicated "information" glyph in the
     /// bundled set either, and an informational toast is conceptually a
     /// notification, which the bell glyph reads as clearly at toast size.
-    /// Adding a dedicated glyph per kind is out of scope for this subtask —
-    /// `ChromeIcon` variants are not extended here.
+    /// Adding a dedicated glyph per kind is out of scope — `ChromeIcon`
+    /// variants are not extended here.
     const fn icon(self) -> ChromeIcon {
         match self {
             Self::Error | Self::Warning => ChromeIcon::Warning,
@@ -154,7 +154,7 @@ impl ToastKind {
     /// Solid background fill for the toast pill, derived from the active
     /// theme.
     ///
-    /// Issue #433 visual redesign: the pill fill is the theme's neutral,
+    /// The pill fill is the theme's neutral,
     /// fully-opaque window fill (the same color menus and dialogs use), *not*
     /// a saturated per-kind tint. The notification kind is expressed by the
     /// left accent bar and the semantic icon color, not by the whole
@@ -396,7 +396,7 @@ impl Toast {
     /// past nominal life, it is the [`ANIM_OUT`] following the moment hover
     /// ended (plus the [`HOVER_HOLD`] grace). Keeping this in lock-step with
     /// [`Self::anim`] guarantees a toast is never removed while `anim` still
-    /// shows it fading (review finding #2).
+    /// shows it fading.
     fn is_expired(&self, now: Instant) -> bool {
         // A closing toast lives exactly as long as its exit fade, whatever
         // its lifetime or hover state.
@@ -443,7 +443,7 @@ impl Toast {
     /// 3. **Post-hover exit** (hovered past its nominal life, hover now
     ///    ended): fades opacity `1 -> 0` linearly over [`ANIM_OUT`] measured
     ///    from the end of the [`HOVER_HOLD`] grace. This is the case the old
-    ///    model got wrong — it popped instantly (review finding #2).
+    ///    model got wrong — it popped instantly.
     /// 4. **End-of-life exit** (within the last [`ANIM_OUT`] of nominal life,
     ///    never hover-extended): fades opacity `1 -> 0` over the remaining
     ///    time.
@@ -640,7 +640,7 @@ pub(super) struct ToastStack {
     entries: Vec<Toast>,
     next_id: u64,
     /// Cached "does the pointer-motion repaint gate need to treat toasts as
-    /// live" signal (subtask 121.14): `true` while any toast is
+    /// live" signal: `true` while any toast is
     /// mid-animation, or while the pointer is over a toast (so a hover fill
     /// or hand cursor is cleared by the motion that leaves it, not up to a
     /// settled-cadence frame later). Recomputed at the end of every
@@ -696,12 +696,12 @@ pub(super) struct ToastFrameResources<'a> {
     pub font_manager: &'a mut FontManager,
 }
 
-/// [`ToastStack::show`]'s return value (subtask 121.14): bundles the
-/// repaint delay it needs (subtask 121.12) with the laid-out pill hit-rects,
+/// [`ToastStack::show`]'s return value: bundles the
+/// repaint delay it needs with the laid-out pill hit-rects,
 /// so the caller can cache both without a second pass over the stack.
 pub(super) struct ToastShowOutcome {
     /// The delay `App::update` should schedule for this window this frame
-    /// (subtask 121.12) — see [`ToastStack::show`]'s doc.
+    /// — see [`ToastStack::show`]'s doc.
     pub(super) repaint_delay: Option<Duration>,
     /// Every toast's `hit_rect_logical`, converted to `egui::Rect` (logical
     /// points, window space) — see [`ToastStack::show`]'s doc for why the
@@ -770,7 +770,7 @@ impl ToastStack {
     }
 
     /// Whether the stack currently has no toasts. Used by the frame-damage
-    /// aggregation (#435): a visible toast animates its own region each
+    /// aggregation: a visible toast animates its own region each
     /// frame, so its presence forces a full-frame present.
     pub(super) const fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -779,7 +779,7 @@ impl ToastStack {
     /// Whether any toast on the stack is currently mid-animation (entry/exit
     /// fade+slide+scale) or under the pointer (so its hover fill and cursor
     /// need a frame when the pointer leaves), as of the most recent
-    /// [`Self::show`] call or [`Self::push`] (subtask 121.14).
+    /// [`Self::show`] call or [`Self::push`].
     ///
     /// Mere presence (`!is_empty()`) is NOT sufficient grounds to treat a
     /// toast as needing continuous repaints — a toast spends most of its
@@ -1047,7 +1047,7 @@ impl ToastStack {
             let evicted = self.entries.remove(index);
             self.record_closed(evicted.key);
         }
-        // Subtask 121.14: eagerly mark the stack as animating. A freshly
+        // Eagerly mark the stack as animating. A freshly
         // pushed toast is always at the start of its entry animation (age
         // 0 < `ANIM_IN`), so this is exact, not merely conservative. It
         // closes the priming gap between this `push()` and the next
@@ -1066,7 +1066,7 @@ impl ToastStack {
     /// detail line is rasterized at. See [`Self::show`].
     const DETAIL_SIZE_PTS: f32 = 12.0;
 
-    /// Render the stack as a fully-owned GL overlay (issue #433): measures
+    /// Render the stack as a fully-owned GL overlay: measures
     /// and shapes every toast's text on the main thread, lays it out via
     /// [`layout_toasts`](layout::layout_toasts), and hands the result to a single `PaintCallback`
     /// that draws every pill, then every text run, on top of everything
@@ -1095,11 +1095,10 @@ impl ToastStack {
     /// go (see [`Self::take_events`]).
     ///
     /// Returns a [`ToastShowOutcome`] bundling the repaint delay this call
-    /// needs to keep expiry/animation going without further input (subtask
-    /// 121.12: `Some(16ms)` while any toast is animating, `Some(250ms)` if
-    /// the stack is non-empty but settled, `None` when empty) and the laid-
-    /// out pill hit-rects (subtask 121.14, logical points, window space —
-    /// same rects [`Self::interact`] hit-tests against). THE CALLER MUST
+    /// needs to keep expiry/animation going without further input (`Some(16ms)` while any toast is
+    /// animating, `Some(250ms)` if the stack is non-empty but settled, `None`
+    /// when empty) and the laid-out pill hit-rects (logical points, window
+    /// space — same rects [`Self::interact`] hit-tests against). THE CALLER MUST
     /// SCHEDULE THE RETURNED DELAY AND CACHE THE RETURNED RECTS — this
     /// method deliberately does NOT call `ctx.request_repaint_after()`
     /// itself, because that would be invisible to `effective_repaint_delay`'s
@@ -1178,7 +1177,7 @@ impl ToastStack {
         // allocated, so they fall through to the terminal untouched. Toasts
         // are not a typing modal, so this deliberately does NOT touch the
         // `ui_overlay_open` / `suppress_input` global gate — only the exact
-        // click that lands on a toast is consumed. (Review finding #3.)
+        // click that lands on a toast is consumed.
         //
         // `interact` also tracks the press, recolours the hovered/pressed
         // button in `outputs` (so it must run before the quads below are
@@ -1197,7 +1196,7 @@ impl ToastStack {
             .iter()
             .flat_map(|o| std::iter::once(o.pill).chain(o.button_quads.iter().copied()))
             .collect();
-        // Subtask 121.14: the same hit rects `hit_test` above just tested the
+        // The same hit rects `hit_test` above just tested the
         // pointer against, in the same logical-point/window-space coordinates
         // `PublishedFrameState`'s `chrome_head_rects`/`chrome_border_rects`
         // use — cached by the caller for `App::pointer_motion_needs_repaint`
@@ -1220,10 +1219,10 @@ impl ToastStack {
         // Report the delay needed so expiry/animation happens even without
         // input: a fast (16ms, ~60fps) cadence while any toast is animating
         // (entry/exit fade+slide+scale), otherwise a slow (250ms) cadence
-        // just to catch expiry. The caller schedules this (subtask 121.12) —
+        // just to catch expiry. The caller schedules this —
         // see this method's doc comment for why.
         //
-        // Also caches `is_animating` (subtask 121.14) from the SAME
+        // Also caches `is_animating` from the SAME
         // `entries.is_empty()` / `any_animating` decision, so the two never
         // disagree. A pointer over a toast keeps the flag set (without
         // changing the delay): the toast shows a hand cursor and possibly a
@@ -1302,7 +1301,7 @@ mod tests {
         assert!(s.entries.is_empty());
     }
 
-    // ── Subtask 121.14: `ToastStack::is_animating` / `cached_is_animating` ──
+    // ── `ToastStack::is_animating` / `cached_is_animating` ──
     //
     // `ToastStack::show` registers a GL `PaintCallback` and needs the
     // window's `FontManager` and toast render state, so it is not driven
@@ -1325,7 +1324,7 @@ mod tests {
         let mut s = ToastStack::default();
         assert!(!s.is_animating());
         s.error("something failed", None);
-        // Subtask 121.14: exact, not conservative — a freshly pushed toast
+        // Exact, not conservative — a freshly pushed toast
         // is always at the start of its entry animation.
         assert!(s.is_animating());
     }
@@ -1354,7 +1353,7 @@ mod tests {
 
     #[test]
     fn background_is_neutral_opaque_window_fill() {
-        // Issue #433 redesign: the pill fill is the theme's neutral, fully
+        // The pill fill is the theme's neutral, fully
         // opaque `window_fill` — the same for every kind (the kind shows in
         // the accent bar / icon, not the whole background). It must NOT be a
         // saturated per-kind blend, and it must NOT be translucent even when
@@ -1406,7 +1405,7 @@ mod tests {
 
     #[test]
     fn push_positioned_stores_the_given_placement() {
-        // Regression (adversarial review, slice 2): the placement passed to
+        // Regression: the placement passed to
         // `push_positioned` must survive `push` -> `Toast::new` onto the
         // stored `Toast`. Without this assertion, silently dropping the
         // placement and always storing `TOP_RIGHT` — the exact hardcoded
@@ -1650,7 +1649,7 @@ mod tests {
 
     #[test]
     fn anim_fades_out_after_hover_extends_past_nominal_life() {
-        // Review finding #2: a toast hovered past its nominal duration must
+        // A toast hovered past its nominal duration must
         // still fade out over ANIM_OUT once the pointer leaves — not pop.
         let created = Instant::now();
         // Last hovered well past the 6s Info life (so age > total), and the
@@ -2280,7 +2279,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    //  138.C14: lifetime clamp, eviction order, replace edge cases
+    //  lifetime clamp, eviction order, replace edge cases
     // -----------------------------------------------------------------
 
     #[test]

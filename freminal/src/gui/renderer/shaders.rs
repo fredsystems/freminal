@@ -110,14 +110,14 @@ pub(super) const POST_VERT_SRC: &str = include_str!("./shaders/post.vert");
 pub(super) const POST_PASSTHROUGH_FRAG_SRC: &str = include_str!("./shaders/post_passthrough.frag");
 
 // ---------------------------------------------------------------------------
-//  Toast pass (issue #433)
+//  Toast pass
 // ---------------------------------------------------------------------------
 //
 // SDF rounded-rect pill with a soft drop shadow, a solid neutral gradient
 // fill, an optional left accent bar, and a neutral chrome border ring. Used
 // by the toast-notification overlay. Non-instanced: one expanded quad
 // (6 vertices) per toast, all pill parameters duplicated across the 6
-// vertices. (The issue #433 visual redesign removed the former outer glow.)
+// vertices. (There is no outer glow.)
 //
 // Vertex layout — `TOAST_VERTEX_FLOATS = 25` floats per vertex, stride
 // `25 * size_of::<f32>()` = 100 bytes:

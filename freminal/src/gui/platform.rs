@@ -22,7 +22,7 @@
 //!
 //! The beep and cwd functions are best-effort: if the platform has no
 //! supported path, they silently no-op (beep) or return `None` (cwd) and emit
-//! a trace log.  See subtasks 71.14 (bell) and 71.16 (CWD).
+//! a trace log.
 
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
@@ -163,8 +163,7 @@ pub fn read_cwd(pid: u32) -> Option<String> {
 /// autofs trigger would otherwise block `is_dir` (and the GUI) indefinitely.
 pub const SPAWN_CWD_DEADLINE: Duration = Duration::from_millis(250);
 
-/// Most helper threads that may be stuck on a blocked filesystem call at once
-/// (148.RC3).
+/// Most helper threads that may be stuck on a blocked filesystem call at once.
 ///
 /// A hung mount makes every [`with_deadline`] call block the GUI for the full
 /// deadline and leak a thread until the syscall returns.  Once this many probes

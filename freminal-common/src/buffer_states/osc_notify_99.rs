@@ -1549,7 +1549,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Pinned behaviour (Task 129.3): must survive the tokenizer migration
+    // Pinned behaviour: must survive the tokenizer migration
     // ------------------------------------------------------------------
 
     #[test]
@@ -1599,7 +1599,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Metadata item cap (Task 129.3)
+    // Metadata item cap
     // ------------------------------------------------------------------
 
     fn repeated_metadata(count: usize) -> Vec<u8> {
@@ -1652,7 +1652,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // What a rejected chunk reports (138.C7 P4)
+    // What a rejected chunk reports
     // ------------------------------------------------------------------
 
     /// The rejected-chunk report of a sequence that must be refused.

@@ -3,20 +3,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Per-pane, per-frame dirty-tracking decision extracted from `show` by Task
-//! 122, subtask 122.11.
+//! Per-pane, per-frame dirty-tracking decision extracted from `show`.
 //!
 //! [`evaluate_frame_dirty_state`] decides, for one pane in one frame, which
 //! vertex-rebuild path [`FreminalTerminalWidget::show`](super::widget::FreminalTerminalWidget::show)
 //! should take: the cheap cursor-only patch, or a re-evaluation of the full
-//! rebuild triggers. This is a pure move — relocated here by cleanup entry
-//! 122.C3 because leaving it in `widget.rs` (where subtask 122.11 correctly
-//! extracted it as a block, but left it in place) grew that file to 5,796
-//! lines, overtaking `app_impl.rs` as the largest GUI file and working
-//! against Task 122's goal. No logic, control flow, field, signature, or
-//! doc-comment text changed; the only edits are visibility (`pub(super)`,
-//! needed so `widget.rs` can still call into this sibling module) and `use`
-//! statements.
+//! rebuild triggers. It lives in its own module because leaving it in `widget.rs` made that
+//! file the largest GUI file by a wide margin. Everything is `pub(super)`
+//! so `widget.rs` can still call into this sibling module.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -87,32 +81,29 @@ pub(super) struct FrameDirtyObservations {
 /// non-cursor-only frame triggers a full rebuild — the common steady-state
 /// frame (nothing changed at all) takes neither branch.
 ///
-/// [`Self::Bounded`] (Task 124.14) means **"full vertex rebuild, bounded
+/// [`Self::Bounded`] means **"full vertex rebuild, bounded
 /// damage"**, not a bounded rebuild: the caller still runs the exact same
 /// full-rebuild code as [`Self::ReevaluateFullRebuild`] (`upload_verts`
 /// stays a whole-buffer write because no instance buffer has a fixed
-/// per-row stride; Task 125 measured a fixed-stride relayout and refuted it,
+/// per-row stride; a fixed-stride relayout was measured and refuted,
 /// see `Documents/DESIGN_DECISIONS.md`, "Performance Parity and the
-/// `RowStore` (Task 125)"), but it may report
+/// `RowStore`"), but it may report
 /// [`crate::gui::renderer::PaneFrameDamage::Region`] instead of `Full` for
 /// the frame's damage, because the caller already knows content changed
 /// only within a known set of rows and no other full-repaint-forcing
-/// trigger fired. This variant was named `Rows` until Task 124.14b-i added
-/// a second source (`selection_changed`); it was renamed the same commit,
-/// since `Rows` would otherwise lie about carrying a damage bound that no
-/// longer comes only from rows. This is produced when the content change is
-/// attributable *purely* to some combination of [`ChangedRows::Rows`] (Task
-/// 124.14a), `selection_changed` (Task 124.14b-i), `hover_changed` (Task
-/// 124.14b-ii), and `search_changed` (Task 124.14d) — including
+/// trigger fired. This variant is not called `Rows` because the damage bound
+/// no longer comes only from rows (`selection_changed`, `hover_changed` and
+/// `search_changed` contribute too). This is produced when the content change is
+/// attributable *purely* to some combination of [`ChangedRows::Rows`],
+/// `selection_changed`, `hover_changed`, and `search_changed` — including
 /// [`ChangedRows::None`] with only a selection, hover, and/or search change
 /// and no row change at all. `ChangedRows::All`, `theme_changed`,
 /// `resolved_colors_changed`, `screen_inversion_changed`, `dims_changed`, `folds_changed`, and every other independently-global
 /// trigger (`text_blink_changed`, `image_frame_changed`,
 /// `image_pixels_changed`) still yield [`Self::ReevaluateFullRebuild`]
-/// (124.21's exhaustive audit, narrowed by one entry each at 124.14b-i,
-/// 124.14b-ii, and 124.14d; the remaining one is 124.C5's image-pixels
-/// boundary and must stay unbounded until that subtask, if ever, extends
-/// it).
+/// (the exhaustive audit of genuinely-global triggers in
+/// `Documents/DESIGN_DECISIONS.md`, "Damage Model"; image pixel mutation
+/// has no known row extent and must stay unbounded until one exists).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VertexRebuild {
     /// Patch just the cursor quad in the existing decoration buffer
@@ -120,9 +111,9 @@ pub(super) enum VertexRebuild {
     CursorOnly,
     /// Not the cursor-only fast path; content changed, but the change is
     /// provably bounded — to the window rows named by
-    /// [`DirtyTrackingOutcome::changed_rows`] (Task 124.14a), to the
-    /// current/previous selection's screen-row span (Task 124.14b-i), to
-    /// the current/previous command-block hover span (Task 124.14b-ii), or
+    /// [`DirtyTrackingOutcome::changed_rows`], to the
+    /// current/previous selection's screen-row span, to
+    /// the current/previous command-block hover span, or
     /// any combination of the three — and no other full-repaint trigger
     /// fired. The caller runs the exact same full rebuild as
     /// [`Self::ReevaluateFullRebuild`] but may report a bounded
@@ -154,8 +145,8 @@ pub(super) enum VertexRebuild {
 ///
 /// [`Self::any`] is consumed to fold this into `content_changed`.
 /// [`Self::Rows`] (or [`Self::None`] alongside a selection, hover, and/or
-/// search change, Tasks 124.14b-i/124.14b-ii/124.14d) is also consumed
-/// directly (Task 124.14), via [`DirtyTrackingOutcome::changed_rows`]: when
+/// search change) is also consumed
+/// directly, via [`DirtyTrackingOutcome::changed_rows`]: when
 /// the only content trigger this frame is [`Self::Rows`] and/or
 /// `selection_changed` and/or `hover_changed` and/or `search_changed`,
 /// [`evaluate_frame_dirty_state`] selects [`VertexRebuild::Bounded`], and
@@ -187,7 +178,7 @@ impl ChangedRows {
     }
 
     /// The literal changed-row count for a [`VertexRebuild::Bounded`]
-    /// frame, as recorded by the live render-work profiler (Task 125.5):
+    /// frame, as recorded by the live render-work profiler:
     /// [`Self::Rows`]'s length, or `0` for [`Self::None`] (a
     /// selection/hover/search-only bounded frame with no row-epoch change
     /// at all — see `crate::gui::renderer::profiling::RenderWorkClass::Bounded`'s
@@ -280,9 +271,9 @@ pub(super) struct DirtyTrackingOutcome {
     /// [`crate::gui::renderer::PaneFrameDamage::Region`] from it instead of
     /// forcing a full-pane repaint for a bounded set of changed rows.
     ///
-    /// Task 124.14: this is [`ChangedRows::Rows`] or [`ChangedRows::None`]
-    /// (the latter when a selection-only and/or hover-only change, Tasks
-    /// 124.14b-i/124.14b-ii, is the sole trigger) whenever [`Self::rebuild`]
+    /// This is [`ChangedRows::Rows`] or [`ChangedRows::None`]
+    /// (the latter when a selection-only and/or hover-only change
+    /// is the sole trigger) whenever [`Self::rebuild`]
     /// is [`VertexRebuild::Bounded`] — that variant is selected below
     /// precisely because this field is one of those two shapes and no
     /// other full-repaint trigger fired — so the caller may read it
@@ -304,7 +295,7 @@ pub(super) struct DirtyTrackingOutcome {
     /// Despite the name inherited from `compute_command_block_hover_rows`'s
     /// doc, this is already **screen**-row space, not rendered-row space:
     /// that function's own final step calls `layout.rendered_to_screen`
-    /// before returning (124.14b-ii recon), because its result is consumed
+    /// before returning, because its result is consumed
     /// directly as an index into the screen-indexed `rendered_shaped_lines`
     /// array at the `widget.rs` call site — the same array `selection`'s
     /// already-screen-space `screen_selection_rendered` indexes. So unlike
@@ -509,7 +500,7 @@ pub(super) struct CursorFrameInputs {
 /// Decide, for one pane in one frame, what has changed since the previous
 /// frame and therefore what must be rebuilt.
 ///
-/// Extracted from `show` by subtask 122.11. It folds the per-frame dirty
+/// It folds the per-frame dirty
 /// observations ([`FrameDirtyObservations`]) against the cached previous-frame
 /// values and yields a [`DirtyTrackingOutcome`] saying which vertex buffers
 /// need rebuilding ([`VertexRebuild`]), whether the cursor is drawn, and what
@@ -565,10 +556,9 @@ pub(super) fn evaluate_frame_dirty_state(
 
     // ── History: why this used to be an `Arc::ptr_eq` test ──────────
     //
-    // Before Task 124.12, content changes were detected via `Arc::ptr_eq`
+    // Content changes were once detected via `Arc::ptr_eq`
     // against `cache.last_rendered_visible` / `cache.last_rendered_line_widths`
-    // rather than the snapshot's own `content_changed` flag (issue #439
-    // fix #4). The reason was that `content_changed` is a **sticky bool**
+    // rather than the snapshot's own `content_changed` flag. The reason was that `content_changed` is a **sticky bool**
     // baked into the published snapshot at build time: it cannot survive
     // the ~14 unrendered snapshots the PTY thread publishes between the GUI
     // frames that actually get drawn. Re-reading the SAME published `Arc`
@@ -578,7 +568,7 @@ pub(super) fn evaluate_frame_dirty_state(
     //
     // `Arc::ptr_eq` "fixed" the staleness (a settled screen re-observes the
     // same allocation and correctly reports "unchanged") but introduced its
-    // own defect, confirmed by Task 123's measurement: `flatten_visible`
+    // own defect, confirmed by measurement: `flatten_visible`
     // allocates a fresh `Arc` on *every* re-flatten, including one that
     // reproduces byte-identical content (e.g. a cursor-blink repaint, or a
     // TUI redrawing an unchanged line by idiom). Pointer inequality then
@@ -588,8 +578,7 @@ pub(super) fn evaluate_frame_dirty_state(
     //
     // The fix is not a better predicate over the same two types (a sticky
     // bool, an allocation pointer) — it is a third type that is neither: a
-    // per-row content epoch (`TerminalSnapshot::row_epochs`, Tasks
-    // 124.10-124.11), a globally-monotonic stamp bumped only when a row's
+    // per-row content epoch (`TerminalSnapshot::row_epochs`), a globally-monotonic stamp bumped only when a row's
     // *merged* content actually differs from what it replaced. It is
     // level-triggered like the pointer test (so it survives unrendered
     // snapshots, unlike the bool) but does not bump on a byte-identical
@@ -604,7 +593,7 @@ pub(super) fn evaluate_frame_dirty_state(
     // Terminal-content colours (OSC 4 palette, OSC 10/11/17/19 dynamic
     // colours) are baked per-vertex exactly as the theme is, so a change in
     // the resolved set stales every vertex of THIS pane. Detection is by
-    // pointer: the PTY side (`ColorState`, Task 132.9) keeps handing out the
+    // pointer: the PTY side (`ColorState`) keeps handing out the
     // same `Arc<ResolvedColors>` until a content colour actually changes, so
     // `Arc::ptr_eq` is both cheap and free of false positives. A fresh `Arc`
     // with byte-identical contents WOULD count as a change -- that is
@@ -627,7 +616,7 @@ pub(super) fn evaluate_frame_dirty_state(
     // (`effective_fg` / `effective_bg`), so toggling it stales every vertex of
     // THIS pane even though no row content, theme or palette changed. Without
     // this term a bare `?5h` left the pane in its old colours until something
-    // else forced a rebuild (Task 132.C1).
+    // else forced a rebuild.
     //
     // Damage classification (`freminal-damage-model`): BOUNDABLE-NOW at pane
     // level -- the complete extent is "every vertex of this pane", i.e. the
@@ -640,7 +629,7 @@ pub(super) fn evaluate_frame_dirty_state(
     // The background opacity picks the pane base colour under DECSCNM
     // (`pane_base_color`), which decides which cell backgrounds are baked
     // into the instance buffer, so a change stales every vertex of THIS pane
-    // (147 PR review R16). Compared by bits: the value is copied from config,
+    // Compared by bits: the value is copied from config,
     // never computed, so equal means bit-identical.
     //
     // Damage classification (`freminal-damage-model`): BOUNDABLE-NOW at pane
@@ -662,7 +651,7 @@ pub(super) fn evaluate_frame_dirty_state(
     // the cached background/foreground vertex buffers are stale even
     // if `visible_chars` is byte-identical.
     let folds_changed = fold_epoch != cache.previous_fold_epoch;
-    // The primary content-change signal (Task 124.12): diff this frame's
+    // The primary content-change signal: diff this frame's
     // per-row epochs against the epochs recorded at the last full rebuild.
     // `theme_changed`, `resolved_colors_changed`, `screen_inversion_changed`,
     // `dims_changed` and `folds_changed` stay separate ORs because they are pane-wide triggers,
@@ -677,7 +666,7 @@ pub(super) fn evaluate_frame_dirty_state(
         || folds_changed
         || rows_changed.any();
 
-    // Apply the eviction rules to the stored selection first (Task 125.17):
+    // Apply the eviction rules to the stored selection first:
     // an evicted endpoint clamps to the oldest retained row, a selection with
     // nothing left (or in another screen's row namespace) is cleared. The
     // content-change auto-clear below is a separate rule and is unchanged.
@@ -685,7 +674,7 @@ pub(super) fn evaluate_frame_dirty_state(
 
     // Clear the selection when actual terminal text content changes so
     // stale highlights don't linger over shifted text. We use
-    // `rows_changed.any()` here (Task 124.12; previously `snap.content_changed`)
+    // `rows_changed.any()` here (rather than the old `snap.content_changed`)
     // as the cheap pre-filter, then confirm against a chars-only comparison
     // before actually discarding anything — see below for why the
     // confirmation step still exists and still deliberately ignores the
@@ -698,7 +687,7 @@ pub(super) fn evaluate_frame_dirty_state(
     // coordinates are stable logical row numbers, so they remain valid
     // across scroll offset changes.
     //
-    // Eviction (Task 125.17): at scrollback capacity
+    // Eviction: at scrollback capacity
     // `enforce_scrollback_limit` drops rows from the top of the buffer and
     // every retained index shifts down. A selection stored as retained
     // indices used to drift onto different text (or freeze while
@@ -715,9 +704,9 @@ pub(super) fn evaluate_frame_dirty_state(
     // for a just-completed selection. Without this flag, PTY output
     // that arrives on the same frame as the release would set
     // `rows_changed.any()` and immediately wipe the just-committed
-    // selection (defect 2, Task 116.2).
+    // selection.
     //
-    // Before Task 124.12 the pre-filter was the sticky `snap.content_changed`
+    // The pre-filter used to be the sticky `snap.content_changed`
     // bool, which is edge-triggered per *snapshot build* while the GUI
     // renders only a subset of the snapshots the PTY thread produces. A
     // change that reverted before the next rendered frame -- a prompt
@@ -730,7 +719,7 @@ pub(super) fn evaluate_frame_dirty_state(
     //     snapshot C: text X, changed = true  -> rendered (Y != X at build C)
     //
     // Acting on that wiped selections for no reason, intermittently, whenever
-    // a mouse release happened to land across such a flicker (#470). The
+    // a mouse release happened to land across such a flicker. The
     // confirmation comparison below existed to catch exactly this, and it
     // still does — `rows_changed` inherits the same false-positive shape
     // (it is level-triggered against the last *rendered* frame, so it
@@ -768,7 +757,7 @@ pub(super) fn evaluate_frame_dirty_state(
         view_state.selection.clear();
     }
     // Reset the per-frame edge flag unconditionally so it does not
-    // persist into subsequent frames (Task 116.2).
+    // persist into subsequent frames.
     view_state.selection_committed_this_frame = false;
 
     // The selection's logical extent this frame (stable row numbers).
@@ -777,7 +766,7 @@ pub(super) fn evaluate_frame_dirty_state(
     // Check whether search highlight state has changed since last frame.
     // Compares a fingerprint of everything that determines the highlight
     // geometry, not just the match count and focused index -- see
-    // `SearchState::render_epoch` and issue #463.
+    // `SearchState::render_epoch`.
     let search_epoch = view_state.search_state.render_epoch();
     let search_changed = search_epoch != cache.previous_search_epoch;
 
@@ -843,7 +832,7 @@ pub(super) fn evaluate_frame_dirty_state(
     });
 
     // Has the selection changed since the last rebuild? Two comparisons, and
-    // both are needed (Task 125.17):
+    // both are needed:
     //
     // - the logical one, which sees any edit to the selection itself;
     // - the window-relative one, which sees a selection that did NOT change
@@ -923,7 +912,7 @@ pub(super) fn evaluate_frame_dirty_state(
         1.0
     };
 
-    // ── Kitty animated image playback (Task 100.2c) ─────────────────
+    // ── Kitty animated image playback ─────────────────
     // Advance the GUI-side wall-clock frame selector for every
     // animated image visible in this snapshot. A frame change forces
     // the full-rebuild path below (via `image_frame_changed`) so the
@@ -932,7 +921,7 @@ pub(super) fn evaluate_frame_dirty_state(
     let anim_tick = view_state.tick_image_animations(&snap.images);
     let image_frame_changed = !anim_tick.changed.is_empty();
 
-    // ── Store-level image pixel mutation detection (Task 100.12) ────
+    // ── Store-level image pixel mutation detection ────
     // A Kitty `a=c` animation compose overwrites an existing frame's
     // pixels in place (a new `Arc<Vec<u8>>` for that frame) without
     // touching any cell or `run_mode`, so `content_changed` and
@@ -984,8 +973,8 @@ pub(super) fn evaluate_frame_dirty_state(
 
     // A pane whose render state was never built has nothing on screen to
     // preserve, so neither bounded path (cursor-only or row-bounded) may
-    // claim the rest of the pane is intact. 124.21 lists this among the
-    // eight genuinely-global triggers. Read once and shared by both
+    // claim the rest of the pane is intact. This is one of the
+    // genuinely-global triggers. Read once and shared by both
     // decisions below rather than re-locking.
     //
     // The signal is `cursor_vert_range` being unset, NOT `deco_verts` being
@@ -1009,7 +998,7 @@ pub(super) fn evaluate_frame_dirty_state(
         && cursor_state_changed
         && !never_built;
 
-    // Task 124.14: a full rebuild whose damage is provably bounded, rather
+    // A full rebuild whose damage is provably bounded, rather
     // than the whole pane. `content_changed` ORs six independent triggers
     // together (`theme_changed`, `resolved_colors_changed`,
     // `screen_inversion_changed`, `dims_changed`, `folds_changed`,
@@ -1018,14 +1007,14 @@ pub(super) fn evaluate_frame_dirty_state(
     // `ChangedRows::All` answer -- no baseline, or a window-size change --
     // is not a row list at all, so there is nothing to bound to) and none
     // of the other full-repaint triggers this decision already checks
-    // for `cursor_only` fired either. Those are exactly 124.21's audit
-    // boundary, narrowed by one entry each at 124.14b-i, 124.14b-ii, and
-    // 124.14d: `selection_changed`, `hover_changed`, and `search_changed`
-    // are now folded INTO the bound rather than vetoing it (each one's
+    // for `cursor_only` fired either. Those are exactly the audited
+    // boundary of genuinely-global triggers, minus these three:
+    // `selection_changed`, `hover_changed`, and `search_changed`
+    // are folded INTO the bound rather than vetoing it (each one's
     // screen-row extent is known at the decision point -- `hover_changed`'s
-    // exactly as 124.14b-i's recon found it BOUNDABLE-NOW, and the
-    // gutter-escape hazard that recon also raised was investigated and
-    // disproved before implementation: the hover tint is baked into the
+    // extent is classified BOUNDABLE-NOW, and the possible
+    // gutter-escape hazard was investigated and
+    // disproved: the hover tint is baked into the
     // background instance buffer inside `terminal_rect`, same as selection,
     // not painted over the gutter strip; `search_changed`'s screen-row
     // extent is the union of `PaneRenderCache::search_damage`'s previous
@@ -1034,7 +1023,7 @@ pub(super) fn evaluate_frame_dirty_state(
     // re-translating `MatchSpan`s a second time -- and the caller unions
     // all three into `changed_rows` rather than treating any of them as
     // full-repaint-forcing). `image_frame_changed` and
-    // `image_pixels_changed` are explicitly excluded (124.C5).
+    // `image_pixels_changed` are explicitly excluded.
     // `text_blink_changed` has no per-row bitmap. Both stay full-repaint
     // triggers here, deliberately.
     //
@@ -1109,7 +1098,7 @@ pub(super) fn evaluate_frame_dirty_state(
 
 #[cfg(test)]
 mod evaluate_frame_dirty_state_tests {
-    //! Unit tests for [`evaluate_frame_dirty_state`] (Task 122.11), calling
+    //! Unit tests for [`evaluate_frame_dirty_state`], calling
     //! the real decision function rather than re-implementing its boolean
     //! logic inline. The property that matters most — and the one every
     //! test here is built around — is that [`VertexRebuild::CursorOnly`]
@@ -1155,7 +1144,7 @@ mod evaluate_frame_dirty_state_tests {
     /// Every snapshot shares ONE `Arc<ResolvedColors>` (a per-thread
     /// singleton), because that is what production does: the PTY side
     /// reuses the same `Arc` until a content colour actually changes, and
-    /// the resolved-colour trigger (Task 132.10) compares by pointer. Tests
+    /// the resolved-colour trigger compares by pointer. Tests
     /// that build two snapshots to model "the same screen, one frame apart"
     /// must therefore not get two unrelated `Arc`s from
     /// `TerminalSnapshot::empty()`.
@@ -1194,7 +1183,7 @@ mod evaluate_frame_dirty_state_tests {
         cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
         cache.last_rendered_row_epochs = Some(Arc::clone(&snap.row_epochs));
         cache.previous_selection = None;
-        // Must agree with `previous_selection` (Task 124.14b-i) -- see that
+        // Must agree with `previous_selection` -- see that
         // field's doc comment. A "settled" cache that disagreed on this
         // pair would be describing a state `show()` itself can never
         // produce (the two are always written together).
@@ -1204,8 +1193,8 @@ mod evaluate_frame_dirty_state_tests {
         // with that state's fingerprint.
         cache.previous_search_epoch = SearchState::default().render_epoch();
         cache.previous_command_block_hover_rows = None;
-        // Must agree with `previous_command_block_hover_rows` (Task
-        // 124.14b-ii) -- see that field's doc comment. A "settled" cache
+        // Must agree with `previous_command_block_hover_rows` -- see that
+        // field's doc comment. A "settled" cache
         // that disagreed on this pair would be describing a state `show()`
         // itself can never produce (the two are always written together).
         cache.previous_cursor_blink_phase = CursorBlinkPhase::from_blink_on(cursor_blink_on);
@@ -1346,14 +1335,12 @@ mod evaluate_frame_dirty_state_tests {
         assert!(!outcome.observations.hover_changed);
     }
 
-    /// OBLIGATION 1 of Task 123 (see `Documents/DESIGN_DECISIONS.md`, "Damage
-    /// Model (Task 124)") confirmed the
-    /// always-new-`Arc` finding that was Task 124.1's premise: a re-flatten
+    /// Regression guard for the always-new-`Arc` problem (see
+    /// `Documents/DESIGN_DECISIONS.md`, "Damage Model"): a re-flatten
     /// that produces byte-identical content in a freshly-allocated `Arc`
     /// used to be reported as a content change, forcing a full vertex
-    /// rebuild. Tasks 124.10-124.12 fixed it, and this test — inverted, not
-    /// deleted, per this subtask's mandate — is now the regression guard
-    /// for the fix.
+    /// rebuild. The per-row content epoch fixed it, and this test — inverted,
+    /// not deleted — is now the regression guard for the fix.
     ///
     /// This test isolates the single variable. It starts from a settled
     /// frame, then swaps in a `visible_chars` `Arc` whose *contents* are
@@ -1365,7 +1352,7 @@ mod evaluate_frame_dirty_state_tests {
     /// them. The only thing that changed is the `visible_chars` allocation.
     ///
     /// The upstream cause is unchanged, and still un-fixed by this task
-    /// (that is the bandwidth half, Task 125): in `freminal-buffer`,
+    /// (that is the bandwidth half): in `freminal-buffer`,
     /// `rows_as_tchars_and_tags_incremental` returns the cached `Arc`s
     /// unchanged **only** on its no-op path (`reuse_available` and no row
     /// in the window needed rebuilding). Both the incremental fast path and
@@ -1389,7 +1376,7 @@ mod evaluate_frame_dirty_state_tests {
     /// [`a_changed_row_epoch_is_reported_as_exactly_that_row`] for the
     /// paired control proving this is not "nothing ever changes").
     ///
-    /// What this saves, per Task 123's harness: a full rebuild is ~52 GL
+    /// What this saves, as measured by the GL recording harness: a full rebuild is ~52 GL
     /// calls and ~200 KB of buffer uploads per frame at 80x24, versus a
     /// cursor-only frame's ~48 calls and under a kilobyte. The waste
     /// avoided is overwhelmingly bandwidth, not call count.
@@ -1509,7 +1496,7 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(diff_row_epochs(Some(&epochs), &epochs), ChangedRows::None);
     }
 
-    // ── ChangedRows::bounded_row_count (Task 125.5's live profiling) ────
+    // ── ChangedRows::bounded_row_count (live profiling) ─────────────────
 
     #[cfg(feature = "frame-profiling")]
     #[test]
@@ -1550,8 +1537,7 @@ mod evaluate_frame_dirty_state_tests {
         );
     }
 
-    /// The justification for deleting `last_rendered_line_widths` (Task
-    /// 124.12): a line-width-only change (e.g. a DECDWL/DECDHL toggle) is
+    /// The justification for deleting `last_rendered_line_widths`: a line-width-only change (e.g. a DECDWL/DECDHL toggle) is
     /// folded into the epoch, so it is still caught even when
     /// `visible_chars` stays pointer-identical to what was last rendered —
     /// no separate pointer test is needed.
@@ -1589,7 +1575,7 @@ mod evaluate_frame_dirty_state_tests {
         );
     }
 
-    /// Item 4 of Task 124.12's scope: the selection auto-clear's
+    /// The selection auto-clear's
     /// confirmation stays a chars-only comparison, so an SGR-only repaint
     /// (identical text, different attributes) must not clear a committed
     /// selection even though the epoch — which deliberately folds in
@@ -1840,7 +1826,7 @@ mod evaluate_frame_dirty_state_tests {
         );
     }
 
-    // ── VertexRebuild::Bounded boundary (Task 124.14a) ────────────────────
+    // ── VertexRebuild::Bounded boundary ────────────────────
 
     /// The base case `VertexRebuild::Bounded` exists for: exactly one
     /// changed row, nothing else different, must select the bounded-damage
@@ -1883,12 +1869,11 @@ mod evaluate_frame_dirty_state_tests {
     }
 
     /// A selection-only change -- no row changed at all, only the
-    /// selection -- must also select `VertexRebuild::Bounded` (Task
-    /// 124.14b-i), and `changed_rows` legitimately reports `None` in this
+    /// selection -- must also select `VertexRebuild::Bounded`, and `changed_rows` legitimately reports `None` in this
     /// case: there is no row list to name, but the frame is still bounded
-    /// via the selection's screen-row span alone. Before 124.14b-i this
-    /// exact input (no row change, selection changed) fell through to
-    /// `ReevaluateFullRebuild` -- see the now-inverted
+    /// via the selection's screen-row span alone. This
+    /// exact input (no row change, selection changed) used to fall through to
+    /// `ReevaluateFullRebuild` -- see the
     /// `selection_change_alongside_a_row_change_now_yields_bounded` and
     /// `selection_change_beats_cursor_change` below for the paired cases
     /// this test's sibling boundary tests still guard.
@@ -1923,7 +1908,7 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(
             outcome.rebuild,
             VertexRebuild::Bounded,
-            "124.14b-i: a selection change with no row change must still \
+            "a selection change with no row change must still \
              take the bounded-damage full rebuild -- ChangedRows::None is \
              an acceptable changed_rows value here because the selection's \
              own screen-row span is what bounds the damage"
@@ -1988,7 +1973,7 @@ mod evaluate_frame_dirty_state_tests {
         );
     }
 
-    // ── Task 125.17: selection across eviction ───────────────────────────
+    // ── Selection across eviction ───────────────────────────
 
     /// [`base_snapshot`] whose oldest retained row is numbered `base`:
     /// `total_rows` stays 5 (the scrollback-capacity case, where eviction
@@ -2021,7 +2006,7 @@ mod evaluate_frame_dirty_state_tests {
         cache
     }
 
-    /// The case this subtask exists for. The window slides under a selection
+    /// The window slides under a selection
     /// that has NOT changed (same logical rows) -- eviction at scrollback
     /// capacity: `row_base` advances, `total_rows` is frozen, and every
     /// retained index drops by one, so the highlight must move up one screen
@@ -2220,8 +2205,8 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(outcome.screen_selection, None);
     }
 
-    /// The hover analogue of `selection_clear_alone_yields_bounded_rebuild`
-    /// (Task 124.14b-ii): a previously-recorded hover
+    /// The hover analogue of `selection_clear_alone_yields_bounded_rebuild`:
+    /// a previously-recorded hover
     /// (`cache.previous_command_block_hover_rows` is `Some`) disappears
     /// entirely this frame, with no row change and no selection change.
     /// `hover_changed` still fires, so this must still take
@@ -2236,13 +2221,13 @@ mod evaluate_frame_dirty_state_tests {
     /// `build_bounded_damage` level in `widget.rs`'s
     /// `hover_only_change_damages_both_current_and_previous_rows`, which
     /// does not need a live geometry to exercise. Together the two tests
-    /// cover both directions this subtask's mandate names.
+    /// cover both directions.
     #[test]
     fn hover_clear_alone_yields_bounded_rebuild() {
         let snap = base_snapshot();
         let mut cache = settled_cache(&snap, true, solid());
         // Must agree with `previous_command_block_hover_rows` -- see that
-        // field's doc comment (Task 124.14b-ii).
+        // field's doc comment.
         cache.previous_command_block_hover_rows = Some((0, 0));
 
         let mut view_state = ViewState::new();
@@ -2257,7 +2242,7 @@ mod evaluate_frame_dirty_state_tests {
         assert!(
             !outcome.observations.selection_changed,
             "precondition: no selection changed -- isolates the hover-only \
-             case from 124.14b-i's selection-only case"
+             case from the selection-only case"
         );
         assert_eq!(
             outcome.changed_rows,
@@ -2267,7 +2252,7 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(
             outcome.rebuild,
             VertexRebuild::Bounded,
-            "124.14b-ii: a hover being cleared (Some -> None) must still \
+            "a hover being cleared (Some -> None) must still \
              take the bounded-damage path so the stale tint's rows are \
              repainted, not silently reused unchanged"
         );
@@ -2303,16 +2288,14 @@ mod evaluate_frame_dirty_state_tests {
         );
     }
 
-    /// 124.14b-i inverts this boundary from its 124.14a shape: a selection
+    /// A selection
     /// change alongside a genuine bounded row change now YIELDS
     /// `VertexRebuild::Bounded` rather than veto-ing it, because
     /// `build_bounded_damage` (`widget.rs`) now unions the selection's
     /// current/previous screen-row span into the damage alongside
     /// `changed_rows`, so the highlight is no longer left stale outside the
-    /// bound. Renamed from
-    /// `selection_change_alongside_a_row_change_still_yields_reevaluate_not_rows`
-    /// -- inverted per this subtask's mandate, not merely adjusted, because
-    /// 124.14b-i deliberately crosses the boundary that test pinned.
+    /// bound. (This used to veto the bounded path; the boundary was crossed
+    /// deliberately.)
     #[test]
     fn selection_change_alongside_a_row_change_now_yields_bounded() {
         let snap = base_snapshot();
@@ -2353,31 +2336,24 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(
             outcome.rebuild,
             VertexRebuild::Bounded,
-            "124.14b-i: selection_changed alongside a genuine bounded row \
+            "selection_changed alongside a genuine bounded row \
              change must now take VertexRebuild::Bounded -- \
              build_bounded_damage unions the selection's screen-row span \
              into the damage, so the highlight is no longer left stale"
         );
     }
 
-    /// 124.14b-ii inverts this boundary from its 124.14a/124.14b-i shape: a
-    /// hover change alongside a genuine bounded row change now YIELDS
+    /// A hover change alongside a genuine bounded row change now YIELDS
     /// `VertexRebuild::Bounded` rather than veto-ing it, because
     /// `build_bounded_damage` (`widget.rs`) now unions the hover's
     /// current/previous screen-row span into the damage alongside
     /// `changed_rows`, so the tint is no longer left stale outside the
-    /// bound. This crosses the boundary 124.14b-i's own recon pinned as
-    /// "must NOT be folded in alongside selection" -- that recon's
-    /// gutter-escape hazard (a hover-bounded frame would clip away the
-    /// gutter's own repaint, per Task 124.18) was investigated further and
-    /// disproved before 124.14b-ii was implemented: the hover tint is
-    /// baked into the background instance buffer *inside* `terminal_rect`,
-    /// the same surface selection paints to, not the gutter strip itself
-    /// (Task 124.14b recon correction).
-    /// Renamed from
-    /// `hover_change_alongside_a_row_change_still_yields_reevaluate_not_rows`
-    /// -- inverted per this subtask's mandate, not merely adjusted, because
-    /// 124.14b-ii deliberately crosses the boundary that test pinned.
+    /// bound. An earlier analysis feared a gutter-escape hazard (a
+    /// hover-bounded frame clipping away the gutter's own repaint); that was
+    /// disproved: the hover tint is baked into the background instance
+    /// buffer *inside* `terminal_rect`, the same surface selection paints
+    /// to, not the gutter strip itself. (This used to veto the bounded
+    /// path; the boundary was crossed deliberately.)
     #[test]
     fn hover_change_alongside_a_row_change_now_yields_bounded() {
         let snap = base_snapshot();
@@ -2416,23 +2392,20 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(
             outcome.rebuild,
             VertexRebuild::Bounded,
-            "124.14b-ii: hover_changed alongside a genuine bounded row \
+            "hover_changed alongside a genuine bounded row \
              change must now take VertexRebuild::Bounded -- \
              build_bounded_damage unions the hover's screen-row span into \
              the damage, so the tint is no longer left stale"
         );
     }
 
-    /// 124.14d inverts this boundary from its 124.14a/124.14b-i/124.14b-ii
-    /// shape: a search-highlight change alongside a genuine bounded row
+    /// A search-highlight change alongside a genuine bounded row
     /// change now YIELDS `VertexRebuild::Bounded` rather than veto-ing it,
     /// because `build_bounded_damage` (`widget.rs`) now unions the search
     /// overlay's current/previous highlight-row set into the damage
     /// alongside `changed_rows`, so search-match tinting is no longer left
-    /// stale outside the bound. Renamed from
-    /// `search_change_alongside_a_row_change_still_yields_reevaluate_not_rows`
-    /// -- inverted per this subtask's mandate, not merely adjusted, because
-    /// 124.14d deliberately crosses the boundary that test pinned.
+    /// stale outside the bound. (This used to veto the bounded path; the
+    /// boundary was crossed deliberately.)
     #[test]
     fn search_change_alongside_a_row_change_now_yields_bounded() {
         let snap = base_snapshot();
@@ -2465,27 +2438,26 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(
             outcome.rebuild,
             VertexRebuild::Bounded,
-            "124.14d: search_changed alongside a genuine bounded row change \
+            "search_changed alongside a genuine bounded row change \
              must now take VertexRebuild::Bounded -- build_bounded_damage \
              unions the search overlay's highlight-row set into the \
              damage, so the tint is no longer left stale"
         );
     }
 
-    /// 124.C5's boundary, image-pixels half: a store-level pixel mutation
+    /// Image-pixels boundary: a store-level pixel mutation
     /// alongside a genuine bounded row change must still veto
     /// `VertexRebuild::Bounded`.
     ///
-    /// 124.C5 made row epochs sound for image *placement* damage (placing
-    /// an image over cells now bumps their row's epoch), but it did
-    /// **not** make them sound for image *pixel* damage: an animation
+    /// Row epochs are sound for image *placement* damage (placing
+    /// an image over cells bumps their row's epoch), but they are
+    /// **not** sound for image *pixel* damage: an animation
     /// frame advancing, or a Kitty `a=c` compose overwriting a frame's
     /// pixels in place, changes no cell, stamps no new placement, and
     /// bumps no epoch. The image quad's geometry is unchanged; only its
     /// texture contents differ. So `changed_rows` can name a completely
     /// unrelated row while the image itself is invisible to it -- images
-    /// must not ride on `changed_rows` until their own bound exists, which
-    /// this subtask does not build.
+    /// must not ride on `changed_rows` until their own bound exists.
     #[test]
     fn image_pixels_change_alongside_a_row_change_still_yields_reevaluate_not_rows() {
         let mut snap = base_snapshot();
@@ -2532,13 +2504,13 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(
             outcome.rebuild,
             VertexRebuild::ReevaluateFullRebuild,
-            "124.C5's boundary: image_pixels_changed must veto \
+            "image_pixels_changed must veto \
              VertexRebuild::Bounded even when the row change is otherwise \
              bounded -- pixel-only image damage bumps no row epoch"
         );
     }
 
-    /// 124.C5's boundary, image-frame half: an animated image's frame
+    /// Image-frame boundary: an animated image's frame
     /// advancing alongside a genuine bounded row change must still veto
     /// `VertexRebuild::Bounded`, for the same reason as the pixels test
     /// above -- advancing a frame changes no cell and bumps no row epoch,
@@ -2609,7 +2581,7 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(
             outcome.rebuild,
             VertexRebuild::ReevaluateFullRebuild,
-            "124.C5's boundary: image_frame_changed must veto \
+            "image_frame_changed must veto \
              VertexRebuild::Bounded even when the row change is otherwise \
              bounded -- frame-advance image damage bumps no row epoch"
         );
@@ -2639,7 +2611,7 @@ mod evaluate_frame_dirty_state_tests {
         assert!(outcome.observations.content_changed);
     }
 
-    // ── resolved-colour trigger (Task 132.10) ────────────────────────────
+    // ── resolved-colour trigger ────────────────────────────
 
     /// `snap` with a brand-new `Arc<ResolvedColors>` whose palette[1] differs
     /// from the original, leaving everything else untouched.
@@ -2752,7 +2724,7 @@ mod evaluate_frame_dirty_state_tests {
         assert!(outcome.observations.content_changed);
     }
 
-    /// Task 132.C2 (the 132.10 requirement): an OSC 4 change in ONE pane of
+    /// An OSC 4 change in ONE pane of
     /// two must produce damage bounded to THAT pane, not a full-window
     /// repaint. Runs the real chain end to end -- `evaluate_frame_dirty_state`
     /// -> `decide_full_rebuild` -> `pane_damage_for_full_rebuild` ->
@@ -2909,7 +2881,7 @@ mod evaluate_frame_dirty_state_tests {
         assert!(cache.previous_theme.is_none());
     }
 
-    // ── screen-inversion (DECSCNM) trigger (Task 132.C1) ──────────────────
+    // ── screen-inversion (DECSCNM) trigger ──────────────────
 
     /// `snap` identical except for its `screen_inversion`.
     fn with_screen_inversion(
@@ -3064,7 +3036,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn a_background_opacity_change_forces_full_rebuild() {
         // Opacity picks the pane base colour under DECSCNM, which decides the
-        // baked cell backgrounds (147 PR review R16).
+        // baked cell backgrounds.
         let snap = base_snapshot();
         let mut cache = settled_cache(&snap, true, solid());
         cache.previous_bg_opacity = Some(0.5);
@@ -3144,7 +3116,7 @@ mod evaluate_frame_dirty_state_tests {
         assert!(outcome.observations.content_changed);
     }
 
-    // ── content-changed selection auto-clear (issue #470) ────────────────
+    // ── content-changed selection auto-clear ────────────────
 
     /// Put a committed (not in-progress) selection on `view_state`.
     fn with_committed_selection(view_state: &mut ViewState) {
@@ -3172,15 +3144,14 @@ mod evaluate_frame_dirty_state_tests {
         snap.row_epochs = Arc::from(epochs);
     }
 
-    /// The #470 regression, re-expressed against the epoch-based pre-filter
-    /// (Task 124.12) that replaced the old sticky `content_changed` bool as
+    /// A spurious-clear regression, expressed against the epoch-based
+    /// pre-filter that replaced the old sticky `content_changed` bool as
     /// the auto-clear's trigger. `rows_changed` is level-triggered against
     /// the last *rendered* frame, so — like the bool it replaced — a row
     /// epoch that differs does not by itself prove the *rendered* text
     /// moved: a change that reverts before the next rendered frame still
     /// shows up as "changed" here. That must not discard a selection; the
-    /// confirmation comparison against `last_rendered_visible` (unchanged
-    /// by this subtask, see item 4 of its scope) is what actually decides.
+    /// confirmation comparison against `last_rendered_visible` is what actually decides.
     #[test]
     fn spurious_row_epoch_change_does_not_discard_a_selection() {
         let mut snap = base_snapshot();
@@ -3248,7 +3219,7 @@ mod evaluate_frame_dirty_state_tests {
         assert!(view_state.selection.has_selection());
     }
 
-    /// The Task 116 guarantee: output landing on the same frame as the mouse
+    /// Output landing on the same frame as the mouse
     /// release must not wipe the just-committed selection.
     #[test]
     fn selection_committed_this_frame_survives_a_genuine_content_change() {
@@ -3273,7 +3244,7 @@ mod evaluate_frame_dirty_state_tests {
     fn search_change_beats_cursor_change() {
         // The search match count changed AND the cursor blinked: the tint
         // is baked into vertices the fast path never touches, so
-        // `search_changed` must veto `CursorOnly` -- but, since 124.14d,
+        // `search_changed` must veto `CursorOnly` -- but
         // it now yields `VertexRebuild::Bounded` rather than
         // `ReevaluateFullRebuild`, because the search overlay's own
         // highlight-row union bounds the damage.
@@ -3301,7 +3272,7 @@ mod evaluate_frame_dirty_state_tests {
     /// A selection was made AND the cursor blinked on the same frame. The
     /// highlight is baked into vertices the fast path never touches, so
     /// `selection_changed` must veto `CursorOnly` -- that half of this
-    /// test's original purpose is unchanged. What DID change (124.14b-i):
+    /// test's original purpose is unchanged. What DID change:
     /// `selection_changed` alone no longer forces the *unbounded*
     /// `ReevaluateFullRebuild` -- it now takes `VertexRebuild::Bounded`,
     /// since `build_bounded_damage` can name the selection's screen-row
@@ -3337,7 +3308,7 @@ mod evaluate_frame_dirty_state_tests {
             outcome.rebuild,
             VertexRebuild::Bounded,
             "selection vetoes the CursorOnly fast path (unchanged), and \
-             takes the bounded-damage path (124.14b-i) rather than the \
+             takes the bounded-damage path rather than the \
              unbounded ReevaluateFullRebuild it used to fall back to"
         );
         assert!(outcome.observations.selection_changed);
@@ -3546,7 +3517,7 @@ mod evaluate_frame_dirty_state_tests {
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
     }
 
-    /// The blink-phase pin (127.6): a non-focused cursor does not blink, so
+    /// The blink-phase pin: a non-focused cursor does not blink, so
     /// the raw clock flipping to its off half must NOT register as a cursor
     /// state change -- otherwise a hollow/steady cursor would cost a
     /// cursor-only frame and a repaint every half second. The outcome
@@ -3705,7 +3676,7 @@ mod evaluate_frame_dirty_state_tests {
         })
     }
 
-    /// Task 127.C2: a cursor move that arrives on a skipped frame must still
+    /// A cursor move that arrives on a skipped frame must still
     /// be reported by the next frame. The skipped frame draws nothing, so its
     /// cursor must not become the baseline; otherwise the next, otherwise
     /// unchanged, frame sees "no change" and the old cursor stays on screen.
@@ -3898,7 +3869,7 @@ mod evaluate_frame_dirty_state_tests {
     }
 
     /// Control: a focused pane with the trail enabled still glides toward a
-    /// moved cursor (focused behaviour is unchanged by Task 127.6).
+    /// moved cursor (focused behaviour is unchanged).
     #[test]
     fn focused_pane_animates_trail_after_cursor_move() {
         let (animating, view_state) = move_cursor_with_trail(CursorFocus::Focused);

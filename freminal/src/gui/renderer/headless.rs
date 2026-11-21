@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Headless GL driver for the recording harness (Task 123, 123.7).
+//! Headless GL driver for the recording harness.
 //!
 //! This module drives [`TerminalRenderer`] directly, **below** the GUI event
 //! layer. It does not reproduce `App::update`, event triage, damage
@@ -26,8 +26,7 @@
 //! It cannot supply the rate, and nothing here should be fused with a rate
 //! into a single CPU figure.
 //!
-//! 123.7's original plan text describes the driver as constructing
-//! `RenderState`. It cannot: `RenderState`'s fields are `pub(super)` within
+//! One might expect the driver to construct `RenderState`. It cannot: `RenderState`'s fields are `pub(super)` within
 //! `gui::terminal`, unreachable from here, and it exposes no accessor for
 //! its `TerminalRenderer`/`GlyphAtlas`. This module constructs
 //! [`TerminalRenderer`] and [`GlyphAtlas`] directly instead — the same thing
@@ -66,8 +65,8 @@ use freminal_common::themes::CATPPUCCIN_MOCHA;
 ///
 /// The content is generated from the cell coordinates, never randomly, so
 /// that a given [`SyntheticFrame`] produces a byte-identical call log on
-/// every run. That reproducibility is what makes 123.8's exact-count
-/// assertions possible at all — a randomised grid would force the
+/// every run. That reproducibility is what makes the exact-count
+/// workload assertions possible at all — a randomised grid would force the
 /// assertions down to ranges, and a range wide enough to be stable is
 /// usually wide enough to miss the regression it was meant to catch.
 ///
@@ -199,14 +198,14 @@ pub struct SyntheticFrame {
     pub cursor: CursorPresence,
     /// Whether this frame draws a toast overlay.
     pub toast: ToastPresence,
-    /// The OSC 11 pane base fill (Task 132.11) as 8-bit `[r, g, b]`, or
+    /// The OSC 11 pane base fill as 8-bit `[r, g, b]`, or
     /// `None` for no override (the theme's background, no fill drawn).
     pub base_fill: Option<[u8; 3]>,
     /// Extra pixels `(right, bottom)` added to the viewport beyond the cell
     /// grid, modelling the sub-cell remainder a real pane's `terminal_rect`
     /// has to the right of and below its last cell. Defaults to `(0, 0)`.
     pub remainder_px: (u32, u32),
-    /// Whether the screen is in reverse video (DECSCNM, Task 147.27). When
+    /// Whether the screen is in reverse video (DECSCNM). When
     /// [`ScreenInversion::Reversed`] the pane's base fill is the resolved
     /// foreground, derived exactly as a real pane derives it; the explicit
     /// [`Self::base_fill`] override is ignored.
@@ -341,7 +340,7 @@ pub enum HeadlessDriverError {
 }
 
 /// Drives [`TerminalRenderer`] (plus the toast passes) without a GUI event
-/// loop, for use with the GL recording facade (Task 123).
+/// loop, for use with the GL recording facade.
 ///
 /// See the module documentation for what this driver does and does not
 /// represent.
@@ -649,7 +648,7 @@ pub fn record_frame(frame: &SyntheticFrame) -> Result<Vec<GlCall>, HeadlessDrive
 /// texture — is a large, fixed cost that would otherwise swamp the
 /// per-frame figures and make them meaningless at small frame counts.
 /// Separating one-time from per-frame cost is exactly the distinction
-/// 123.14's reporting rests on, and the reason it reports frame rate and
+/// the reporting rests on, and the reason it reports frame rate and
 /// per-frame cost as a pair rather than a single total.
 ///
 /// # Errors

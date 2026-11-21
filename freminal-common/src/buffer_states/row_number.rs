@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! [`RowNumber`] — a stable logical row identifier (Task 125.14).
+//! [`RowNumber`] — a stable logical row identifier.
 //!
 //! A buffer row's *index* is its position in the retained row storage, and it
 //! changes whenever rows are evicted from the front. A [`RowNumber`] is the

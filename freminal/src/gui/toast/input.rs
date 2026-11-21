@@ -109,9 +109,8 @@ pub(super) struct ToastLayoutMetrics {
     /// The theme's corner radius, scaled to physical pixels.
     pub corner_radius: f32,
     /// The neutral chrome border width (from the theme's `window_stroke`,
-    /// Modern 1.0 / Retro 1.5 pt), scaled to physical pixels. Issue #433
-    /// redesign: replaces the removed glow as the pill's separation from the
-    /// terminal, and gives Modern/Retro a subtly different border weight.
+    /// Modern 1.0 / Retro 1.5 pt), scaled to physical pixels. Replaces the removed glow as the pill's
+    /// separation from the terminal, and gives Modern/Retro a subtly different border weight.
     pub border_width: f32,
 }
 

@@ -56,11 +56,11 @@ Commit 2253483f (v0.3.0-v0.7.0) and the v0.8.0-v0.12.0 retirement are the templa
    Correct any existing section the audit found stale. Format specs go to their own reference
    document, not `DESIGN_DECISIONS.md`.
 4. **Repoint every inbound reference**, including code comments, tests, benches, `flake.nix`,
-   CI scripts, skills, `agents.md` and other docs. A comment citing the plan for its reasoning
-   points at the new `DESIGN_DECISIONS.md` section by title; a comment citing a subtask only
-   for provenance keeps the number and drops the filename (`Task 72.9`). Bare task numbers
-   with no filename stay. Fix comments that state things the audit found no longer true.
-   These are comment-only edits; they ride in the same change.
+   CI scripts, skills, `agents.md` and other docs. Source and build files follow
+   `freminal-source-comments`: no plan or task references at all, so a comment that leaned on
+   the plan states its reason inline or points at the new `DESIGN_DECISIONS.md` section by
+   title. Fix comments that state things the audit found no longer true. These are
+   comment-only edits; they ride in the same change.
 5. **Fix `MASTER_PLAN.md`.** Version rows: `(retired — see DESIGN_DECISIONS.md)`. Task rows:
    `See DESIGN_DECISIONS.md` (or the reference doc that now holds the content). Correct any
    status or Completion Tracking discrepancy the audit found (merge PRs from

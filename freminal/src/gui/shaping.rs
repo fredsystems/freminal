@@ -82,7 +82,7 @@ pub struct ShapedGlyph {
     /// The source Unicode scalar this glyph was shaped from.
     ///
     /// Used to route box-drawing / block-element codepoints to the procedural
-    /// renderer (Task #410). `'\0'` when the source char is unavailable (e.g.
+    /// renderer. `'\0'` when the source char is unavailable (e.g.
     /// ligature clusters spanning multiple chars, or placeholder glyphs).
     pub source_char: char,
 }
@@ -125,21 +125,21 @@ pub struct ShapedLine {
 /// only re-shape rows whose content hash changed.  Cache hits return an `Arc`
 /// clone (refcount bump) instead of a deep clone.
 ///
-/// Subtask 124.6 (lever 1) adds a second, content-addressed cache
-/// (`RunCache`) alongside the line cache. The line cache is keyed by line
+/// A second, content-addressed cache
+/// (`RunCache`) sits alongside the line cache. The line cache is keyed by line
 /// index, so a one-line scroll invalidates every line even though most of
 /// their runs are byte-identical to runs shaped a moment ago at a different
-/// index (see `Documents/DESIGN_DECISIONS.md`, "Damage Model (Task 124)" /
+/// index (see `Documents/DESIGN_DECISIONS.md`, "Damage Model" /
 /// "Shaping: run-level cache"). The run cache is keyed by
 /// `(face_id, ligatures, run text)` instead, so it can still hit across that
 /// shift.
 pub struct ShapingCache {
     /// Per-line cache: `(hash, shaped_line)`.
     entries: Vec<Option<(u64, Arc<ShapedLine>)>>,
-    /// Subtask 124.16: cumulative hit/miss tally across every
+    /// Cumulative hit/miss tally across every
     /// [`Self::shape_visible`] call since the last [`Self::reset_stats`].
     stats: ShapingCacheStats,
-    /// Subtask 124.6: content-addressed run-level glyph-template cache.
+    /// Content-addressed run-level glyph-template cache.
     run_cache: RunCache,
 }
 
@@ -198,7 +198,7 @@ struct RunCacheKey {
 type GlyphTemplate = Arc<[ShapedGlyph]>;
 
 /// Two-generation, content-addressed cache of [`GlyphTemplate`]s, owned by
-/// [`ShapingCache`] (subtask 124.6, lever 1).
+/// [`ShapingCache`].
 ///
 /// Bounded without an arbitrary capacity: only the current and immediately
 /// previous **miss-bearing** `shape_visible` call's generation are kept. A
@@ -235,31 +235,31 @@ impl RunCache {
     }
 }
 
-/// Subtask 124.16: per-line shaping cache hit/miss tally.
+/// Per-line shaping cache hit/miss tally.
 ///
 /// [`ShapingCache::shape_visible`] already decides, per line, whether to
 /// reuse an `Arc<ShapedLine>` or re-shape from scratch, but it returned only
 /// `Vec<Arc<ShapedLine>>` — the outcome was computed and thrown away. That
-/// made it the fifth and last collapse point in the chain Task 124's
-/// defect table lists, and the reason 124.6's two levers could not be
+/// made it the fifth and last collapse point in the damage-model
+/// chain, and the reason a content-addressed run cache could not be
 /// justified or sized. This surfaces it.
 ///
 /// Counting only. Nothing here influences which branch is taken, and the
 /// counters are always compiled (not feature-gated) so a measurement can
 /// never diverge from the code path it claims to describe — the same
-/// rationale subtask 122.5 recorded for `PaneResolution`'s diagnostic terms.
+/// rationale `PaneResolution`'s diagnostic terms follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ShapingCacheStats {
     /// Lines served by an `Arc` refcount bump.
     pub hits: u64,
     /// Lines re-segmented and re-shaped through harfrust.
     pub misses: u64,
-    /// Subtask 124.6: runs served from `RunCache` (current or previous
+    /// Runs served from `RunCache` (current or previous
     /// generation) as a template clone, without a `harfrust` shape call.
     /// Only counted for runs belonging to a line that missed the line-level
     /// cache — a line hit never touches the run cache at all.
     pub run_hits: u64,
-    /// Subtask 124.6: runs that missed `RunCache` entirely and were shaped
+    /// Runs that missed `RunCache` entirely and were shaped
     /// fresh through `harfrust`.
     pub run_misses: u64,
 }
@@ -321,7 +321,7 @@ impl Default for ShapingCache {
 impl ShapingCache {
     /// Create a new empty shaping cache.
     ///
-    /// Not `const` (unlike before subtask 124.6): `RunCache`'s `HashMap`
+    /// Not `const`: `RunCache`'s `HashMap`
     /// fields have no `const` constructor.
     #[must_use]
     pub fn new() -> Self {
@@ -338,7 +338,7 @@ impl ShapingCache {
     /// of the events a hit-rate measurement most wants to see the cost of,
     /// and zeroing the tally here would hide it. Use [`Self::reset_stats`].
     ///
-    /// Also clears `Self::run_cache` (subtask 124.6): a font rebuild can
+    /// Also clears `Self::run_cache`: a font rebuild can
     /// reuse the same `FaceId` values for entirely different font data, so
     /// leaving stale run-cache entries keyed on those `FaceId`s behind would
     /// serve glyph templates shaped against the old font.
@@ -347,14 +347,14 @@ impl ShapingCache {
         self.run_cache.clear();
     }
 
-    /// Subtask 124.16: the cumulative hit/miss tally.
+    /// The cumulative hit/miss tally.
     #[must_use]
     pub const fn stats(&self) -> ShapingCacheStats {
         self.stats
     }
 
-    /// Subtask 124.16: zero the hit/miss tally, leaving cached lines (and,
-    /// per subtask 124.6, cached runs) intact.
+    /// Zero the hit/miss tally, leaving cached lines (and,
+    /// cached runs) intact.
     ///
     /// Separate from [`Self::clear`] so a measurement can prime the cache and
     /// then count only the frames it cares about.
@@ -402,7 +402,7 @@ impl ShapingCache {
         // Track the character offset into the global flat array for tag lookup.
         let mut global_offset: usize = 0;
 
-        // Subtask 124.6: whether `self.run_cache` has already rotated for
+        // Whether `self.run_cache` has already rotated for
         // THIS call. A call rotates at most once, on its first line miss —
         // a call where every line hits (e.g. an identical full-screen
         // redraw) never touches this and never rotates, so a generation
@@ -469,7 +469,7 @@ impl ShapingCache {
     /// Shape `runs` (all belonging to one line-cache-missed line), consulting
     /// [`Self::run_cache`] per run instead of shaping every one from scratch.
     ///
-    /// Subtask 124.6, lever 1. Only ever called from the line-cache-miss
+    /// Only ever called from the line-cache-miss
     /// branch of [`Self::shape_visible`] — a run belonging to a line that hit
     /// the line-level cache never reaches here, since the whole
     /// `Arc<ShapedLine>` (all its runs included) is reused by refcount bump.
@@ -800,7 +800,7 @@ fn shape_runs(
 
 /// Shape a single line of synthetic text in a uniform color.
 ///
-/// Used by the widget layer to build fold-placeholder rows (Task 72.10b-3):
+/// Used by the widget layer to build fold-placeholder rows:
 /// rows that are not present in the snapshot buffer but need to render real
 /// glyphs through the same shaping pipeline as buffer text so atlas
 /// rasterisation, font fallback, and ligature features behave identically.
@@ -919,8 +919,8 @@ pub fn shape_placeholder_line(
 /// [`ShapingCache::shape_run_via_run_cache`] uses on a run-cache miss, so the
 /// two paths cannot silently diverge — this one just never consults or
 /// populates the cache, since callers of this function (placeholder-line
-/// shaping, tests) have no `ShapingCache` to share it through (subtask
-/// 124.6's point 5: no global/static cache state).
+/// shaping, tests) have no `ShapingCache` to share it through (there is
+/// deliberately no global/static cache state).
 fn shape_single_run(
     run: &TextRun,
     font_manager: &FontManager,
@@ -954,7 +954,7 @@ fn shape_run_canonical(
 ) -> Vec<ShapedGlyph> {
     let is_emoji_face = run.face_id == FaceId::Emoji;
 
-    // Try to shape via the cached shaper data + ShapePlan (Task #430).
+    // Try to shape via the cached shaper data + ShapePlan.
     // `shape_cached` builds the buffer and guesses its segment properties
     // (script, direction) itself before looking up or building the matching
     // cached `ShapePlan`.
@@ -1047,7 +1047,7 @@ fn build_shaped_glyphs(
     let num_chars = char_widths.len();
 
     // Char-index → source char, for routing box-drawing codepoints to the
-    // procedural renderer (Task #410).
+    // procedural renderer.
     let run_chars: Vec<char> = run_text.chars().collect();
 
     // Pre-compute cumulative column offsets so we can look up the column of
@@ -1208,7 +1208,7 @@ mod tests {
     }
 
     /// Helper: build a minimal `TextRun` with default metadata, for the
-    /// run-cache unit tests (subtask 124.6). Each character is 1 cell wide.
+    /// run-cache unit tests. Each character is 1 cell wide.
     fn make_run(text: &str, col_start: usize, face_id: FaceId) -> TextRun {
         let width = text.chars().count();
         TextRun {
@@ -1344,7 +1344,7 @@ mod tests {
         let cell_w = fm.cell_width() as f32;
 
         // U+1F600 (😀) must route to the emoji face. With the bundled Noto
-        // Color Emoji floor (Task #402) there is always an emoji face, so this
+        // Color Emoji floor there is always an emoji face, so this
         // is now deterministic rather than environment-dependent.
         let chars = vec![TChar::from('😀')];
         let tags = vec![make_tag(0, 10)];
@@ -1455,7 +1455,7 @@ mod tests {
         assert_eq!(r2[0].runs[0].glyphs.len(), 1);
     }
 
-    // -- Run cache (subtask 124.6, lever 1) --
+    // -- Run cache --
     //
     // These drive `ShapingCache::shape_run_via_run_cache` directly (rather
     // than through `shape_visible`) to pin the run cache's key semantics and
@@ -1669,7 +1669,7 @@ mod tests {
     }
 
     // -- Differential regression: cached-hit output vs. uncached
-    // `shape_single_run` output, field-by-field (subtask 124.6 review fix) --
+    // `shape_single_run` output, field-by-field --
     //
     // These compare two independently-computed PRODUCTION outputs rather
     // than reimplementing any shaping math: `expected` always comes from
@@ -1900,7 +1900,7 @@ mod tests {
 
         cache.clear();
 
-        // Subtask 124.6: `clear()` must drop both run-cache generations, not
+        // `clear()` must drop both run-cache generations, not
         // just the line cache — a font rebuild can reuse a `FaceId` for
         // entirely different font data.
         let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
@@ -1935,7 +1935,7 @@ mod tests {
         assert_eq!(stats.run_misses, 0);
     }
 
-    // -- Ligature-breaking conditions (Task 5.6) --
+    // -- Ligature-breaking conditions --
 
     #[test]
     fn color_change_mid_sequence_breaks_into_separate_runs() {
@@ -2216,7 +2216,7 @@ mod tests {
         assert_eq!(glyphs[1].cell_width, 2);
     }
 
-    // -- Bundled-font ligature smoke test (Task 111.6) --
+    // -- Bundled-font ligature smoke test --
 
     /// Shape `text` as a single same-format ASCII run through the REAL bundled
     /// font and return the sequence of shaped glyph IDs.
@@ -2247,7 +2247,7 @@ mod tests {
     ///
     /// This is the test that would have caught the `MesloLGS`
     /// "ligature-feature-on-but-font-has-no-ligatures" bug that motivated the
-    /// `CaskaydiaCove` swap (Task 111). It loads the *real* bundled face and
+    /// `CaskaydiaCove` swap. It loads the *real* bundled face and
     /// asserts that known ligating sequences are shaped to a *different* set of
     /// glyphs with ligatures on than with ligatures off.
     ///
@@ -2309,7 +2309,7 @@ mod tests {
         assert!(glyphs[0].x_px.abs() < f32::EPSILON);
     }
 
-    // --- Task #430: cached-plan output-identity vs an uncached one-shot shape ---
+    // --- cached-plan output-identity vs an uncached one-shot shape ---
 
     /// One shaped glyph's full identity: glyph id, source cluster, and the
     /// positional data (advances + offsets). Positions are included because
@@ -2384,7 +2384,7 @@ mod tests {
         glyph_identities(&output)
     }
 
-    /// Regression guard for the core claim of Task #430: caching the
+    /// Regression guard for the core claim of the plan cache: caching the
     /// `ShaperData` and the compiled `ShapePlan` and shaping with the cached
     /// plan must produce IDENTICAL output — glyph ids, source clusters, AND
     /// positional data (advances + offsets) — to an uncached one-shot shape
@@ -2421,7 +2421,7 @@ mod tests {
         }
 
         // Emoji routes to a different face (FaceId::Emoji) entirely — the
-        // bundled Noto Color Emoji floor (Task #402) guarantees one is
+        // bundled Noto Color Emoji floor guarantees one is
         // always loaded, so this is deterministic across hosts.
         let uncached_emoji =
             shape_uncached_reference("😀", FaceId::Emoji, &fm, LigatureShaping::Disabled);
@@ -2598,7 +2598,7 @@ mod tests {
     /// ligatures off and on.
     ///
     /// The literals were captured from rustybuzz 0.20.1 before the harfrust
-    /// migration (issue #530). Any change to these numbers means shaping output
+    /// migration. Any change to these numbers means shaping output
     /// changed and must be explained, not re-pinned.
     ///
     /// The corpus covers plain Latin, ligating/contextual sequences (`calt`),
@@ -2679,7 +2679,7 @@ mod tests {
     /// `.notdef` (glyph 0); that still pins cluster and advance behaviour.
     ///
     /// Values captured from rustybuzz 0.20.1 at commit 602af317 (the
-    /// pre-migration tree) for issue #530 review finding M1. A difference
+    /// pre-migration tree) as a migration check. A difference
     /// means harfrust shapes differently and must be explained, not
     /// re-pinned.
     const GOLDEN_BUNDLED_SHAPING_EXTENDED: &[ExtendedGoldenCase] = &[
@@ -3142,8 +3142,8 @@ mod tests {
     }
 }
 
-/// Subtask 124.16: the shaping cache's hit rate on the four workloads that
-/// decide 124.6.
+/// The shaping cache's hit rate on the four workloads that
+/// decide whether a run-level cache is worthwhile.
 ///
 /// These are a **measurement**, kept as tests so the numbers cannot rot
 /// silently the way the 2026-07-29 pointer-motion table did. Each asserts
@@ -3151,7 +3151,7 @@ mod tests {
 /// and platform-independent.
 ///
 /// The headline results are recorded in `Documents/DESIGN_DECISIONS.md`,
-/// "Damage Model (Task 124)" / "Shaping: run-level cache".
+/// "Damage Model" / "Shaping: run-level cache".
 #[cfg(test)]
 mod shaping_cache_hit_rate {
     use super::{FormatTag, ShapingCache, ShapingCacheStats};
@@ -3163,7 +3163,7 @@ mod shaping_cache_hit_rate {
     /// A `width` x `height` grid of newline-separated ASCII, generated from
     /// cell coordinates so every row is distinct and the content is
     /// reproducible (the same property `SyntheticFrame` relies on in the
-    /// Task 123 harness — no randomness, so a hit count is exact).
+    /// GL call-recording harness — no randomness, so a hit count is exact).
     /// No trailing newline: `split_into_lines` would read one as a final
     /// empty line, giving `height + 1` lines and quietly shifting every hit
     /// count in this module by one.
@@ -3217,7 +3217,7 @@ mod shaping_cache_hit_rate {
 
     /// A full-screen redraw of **identical** content costs nothing.
     ///
-    /// This is the workload the whole of Task 124 exists for: a TUI that
+    /// This is the workload the damage model exists for: a TUI that
     /// rewrites unchanged bytes every tick. The shaping stage already
     /// handles it correctly, which is a genuine finding — it means shaping
     /// is *not* where that workload's cost lives.
@@ -3234,9 +3234,9 @@ mod shaping_cache_hit_rate {
         assert_eq!(warm.misses, 0, "an identical redraw must re-shape nothing");
         assert_eq!(warm.hit_rate(), Some(1.0));
 
-        // Subtask 124.6: a 100%-line-hit call never touches the run cache at
+        // A 100%-line-hit call never touches the run cache at
         // all (a line hit reuses the whole `Arc<ShapedLine>`, runs included).
-        // This is the fact that keeps 124.6 from being justified on this
+        // This is the fact that keeps a run cache from being justified on this
         // workload — the run cache has nothing to contribute here because
         // the line cache already handles it perfectly.
         assert_eq!(warm.run_hits, 0);
@@ -3247,8 +3247,7 @@ mod shaping_cache_hit_rate {
     /// A single-character edit re-shapes exactly one row.
     ///
     /// Note what this does *not* say. The row is the granule: one changed
-    /// character re-shapes every run on its line, which is 124.6's second
-    /// lever. But it does not spill into neighbouring rows.
+    /// character re-shapes every run on its line, which a run-level cache addresses. But it does not spill into neighbouring rows.
     #[test]
     fn a_single_character_edit_reshapes_exactly_one_row() {
         let (mut fm, mut cache) = fixture();
@@ -3268,13 +3267,12 @@ mod shaping_cache_hit_rate {
     }
 
     /// **A scroll by one line still misses the LINE cache completely, but
-    /// subtask 124.6's run cache now reuses all 23 unchanged rows.**
+    /// the run cache now reuses all 23 unchanged rows.**
     ///
     /// This is the inverted form of the original
-    /// `a_scroll_by_one_line_hits_nothing`, which pinned the pre-124.6
-    /// defect as a regression guard (per the idiom Task 123 used for 124.9
-    /// and 124.1). `ShapingCache`'s LINE cache is still keyed by line index —
-    /// unchanged by this subtask — so scrolling by one row still shifts
+    /// `a_scroll_by_one_line_hits_nothing`, which pinned the pre-run-cache
+    /// defect as a regression guard. `ShapingCache`'s LINE cache is still keyed by line index —
+    /// unchanged — so scrolling by one row still shifts
     /// every line's content into a different slot and every line still
     /// misses at that layer (asserted below, exactly as before). But this
     /// grid fixture's uniform single-tag format puts every row in exactly

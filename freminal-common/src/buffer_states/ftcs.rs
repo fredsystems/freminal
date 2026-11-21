@@ -284,8 +284,7 @@ pub fn parse_ftcs_params(body: &[u8]) -> Option<FtcsMarker> {
 /// - An **unknown** marker (any other letter, e.g. `Z`, or a future FTCS
 ///   addition like `E`) or an empty body means freminal does not recognise the
 ///   sequence at all. That is a genuine gap — a new/malformed OSC 133 variant —
-///   and the caller should log it so the unhandled surface can be audited (see
-///   `MASTER_PLAN` v0.16.0 crash reporting).
+///   and the caller should log it so the unhandled surface can be audited.
 ///
 /// This is intentionally a separate, allocation-free classifier rather than a
 /// richer return type on [`parse_ftcs_params`], so the "should I act on this?"
@@ -720,7 +719,7 @@ mod tests {
         assert!(!is_known_ftcs_marker(b"A=1")); // a pair is not a marker letter
     }
 
-    // ── Tokenizer-specific behaviour (Task 129.8) ───────────────────────
+    // ── Tokenizer-specific behaviour ───────────────────────
 
     #[test]
     fn parse_d_exit_code_with_leading_zeros() {

@@ -897,7 +897,7 @@ fn save_restore_position() {
 #[test]
 fn restore_without_save_homes_the_cursor() {
     // RestoreCursor without a prior SaveCursor must not panic; it behaves as
-    // if a default cursor at home had been saved (131.C2, xterm
+    // if a default cursor at home had been saved (xterm
     // `CursorRestoreFlags` with nothing saved).
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -1600,7 +1600,7 @@ fn cursor_visual_style_set() {
 
 #[test]
 fn set_configured_cursor_visual_style_seeds_and_can_be_overridden_by_decscusr() {
-    // Regression test for issue #406: `set_configured_cursor_visual_style` is the seam
+    // Regression test: `set_configured_cursor_visual_style` is the seam
     // used to apply `config.cursor` at pane-spawn time and on a live
     // Settings change. It must take effect immediately (like `set_theme`),
     // and a subsequent DECSCUSR output from the running program must still
@@ -3356,7 +3356,7 @@ fn test_new_columns_get_default_stops_after_resize() {
     assert_eq!(handler.buffer().cursor().pos.x, 112);
 }
 
-// ── 7.21b — Comprehensive Tab Stop Test Suite (Subtask 21.6) ─────────
+// ── Comprehensive Tab Stop Test Suite ────────────────────────────────
 
 #[test]
 fn test_tab_at_last_column_does_not_advance_past_width() {
@@ -3783,7 +3783,7 @@ fn test_screen_alignment_resets_scroll_region() {
 
 #[test]
 fn alt_screen_47_first_entry_is_blank_and_leave_shows_primary() {
-    // ?47 only switches screens (Task 131.6): a first-ever alternate screen
+    // ?47 only switches screens: a first-ever alternate screen
     // is blank (it is not cleared on entry; a later entry would show the
     // persisted content), and leaving shows the primary content again.
     use freminal_common::buffer_states::{

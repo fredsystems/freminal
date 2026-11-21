@@ -1,4 +1,4 @@
-# cargo-nextest configuration (issue #538).
+# cargo-nextest configuration.
 #
 # nextest runs every test in its own process, scheduled across all cores and
 # all test binaries at once. `cargo test` instead runs the test binaries one

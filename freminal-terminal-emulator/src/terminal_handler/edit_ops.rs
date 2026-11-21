@@ -18,8 +18,7 @@ use crate::ansi_components::csi_commands::el::EraseLineMode;
 /// `ptyx.h`), so its effective REP maximum is 65535 repeats; `CASE_REP` in
 /// `charproc.c` then prints the character through the normal text path.
 /// Larger counts are clamped to this, as in xterm; unclamped, a hostile stream
-/// could request an arbitrarily large allocation and amount of work
-/// (GHSA-2746-x3cj-58c7).
+/// could request an arbitrarily large allocation and amount of work.
 const REP_MAX_COUNT: usize = 65_535;
 
 /// Number of characters written per `Buffer::insert_text` call while

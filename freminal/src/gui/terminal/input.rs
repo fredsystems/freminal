@@ -179,9 +179,9 @@ pub(super) fn resend_scroll_window(
 /// `super_key`, not `ctrl`.
 ///
 /// `hyper` and `meta` remain `false`: egui has no producer for them at all,
-/// so they stay an unsourced permanent gap (tracked under Task 114).
+/// so they stay an unsourced permanent gap.
 /// `caps_lock`/`num_lock` are likewise hardcoded `false` — ambient OS
-/// lock-key state was reverted (see freminal#380 / winit#1426, egui#3653);
+/// lock-key state was reverted (see winit#1426, egui#3653);
 /// it cannot be sourced correctly and uniformly across platforms.
 pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers, super_held: bool) -> KeyModifiers {
     KeyModifiers {
@@ -190,18 +190,18 @@ pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers, super_held: bool) -
         alt: m.alt,
         super_key: super_held || m.mac_cmd,
         // hyper, meta: egui has no producer for these at all — remain a
-        // permanent gap (Task 114).
+        // permanent gap.
         hyper: false,
         meta: false,
-        // caps_lock/num_lock: not sourced — see freminal#380
-        // (winit#1426, egui#3653).
+        // caps_lock/num_lock: not sourced (ambient lock-key state cannot be read
+        // correctly across platforms; see winit#1426, egui#3653).
         caps_lock: false,
         num_lock: false,
     }
 }
 
-/// Map a blocked physical `winit` [`KeyCode`](winit::keyboard::KeyCode) (Task
-/// 114.5/114.7's intercepted set) to its Kitty Keyboard Protocol codepoint.
+/// Map a blocked physical `winit` [`KeyCode`](winit::keyboard::KeyCode) (the
+/// intercepted set) to its Kitty Keyboard Protocol codepoint.
 ///
 /// Returns `None` for any key outside the blocked set (defensive — the
 /// `on_raw_key_event` intercept in `freminal-windowing` already filters to
@@ -214,8 +214,8 @@ pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers, super_held: bool) -
 /// physical labeling) collapses to it.
 ///
 /// `ISO_Level3_Shift`/`ISO_Level5_Shift` have no `winit::keyboard::KeyCode`
-/// variant at all (114.5 finding) and are therefore not representable here —
-/// they remain a documented permanent gap (Task 114.9), same tier as
+/// variant at all and are therefore not representable here —
+/// they remain a documented permanent gap, same tier as
 /// hyper/meta.
 #[must_use]
 pub const fn kitty_keycode_to_codepoint(key: winit::keyboard::KeyCode) -> Option<u32> {
@@ -345,20 +345,20 @@ fn legacy_keypad_bytes(
 }
 
 /// Convert a queued [`RawKeyMods`](freminal_windowing::RawKeyMods) into
-/// [`KeyModifiers`] for encoding a raw (egui-blocked) key event (Task 114.7).
+/// [`KeyModifiers`] for encoding a raw (egui-blocked) key event.
 ///
 /// Mirrors [`egui_mods_to_key_modifiers`], but for the raw-key path: `shift`,
 /// `ctrl`, and `alt` come from the queued `RawKeyMods` (reliable — sourced
 /// from `state.egui.modifiers()` at intercept time). `super_key` deliberately
 /// does NOT come from `RawKeyMods.super_key` — that field is
 /// `egui::Modifiers::command`, which equals `ctrl` on Linux/Windows and so
-/// over-reports super (114.7 binding decision). Instead it comes from the
+/// over-reports super. Instead it comes from the
 /// caller-supplied `super_pressed`, the active pane's real physical
-/// Super/Command hold-state (Task 101.2 tracking), read fresh on the render
+/// Super/Command hold-state, read fresh on the render
 /// path where this is called. `hyper`/`meta` remain `false` (permanent gap,
 /// same as `egui_mods_to_key_modifiers`); `caps_lock`/`num_lock` are
-/// likewise hardcoded `false` — not sourced, see freminal#380
-/// (winit#1426, egui#3653).
+/// likewise hardcoded `false` — not sourced (ambient lock-key state cannot
+/// be read correctly across platforms; see winit#1426, egui#3653).
 /// Cross-frame physical Super/Command hold-state, tracked per side.
 ///
 /// egui delivers the physical Super/Windows key only as discrete
@@ -400,7 +400,7 @@ pub const fn raw_mods_to_key_modifiers(
     }
 }
 
-/// Drain queued raw key events (Task 114.7) for the active pane, encoding
+/// Drain queued raw key events for the active pane, encoding
 /// each into a [`TerminalInput::KittyFunctional`] and sending it through the
 /// existing [`send_terminal_inputs`] funnel.
 ///
@@ -444,7 +444,7 @@ pub const fn raw_mods_to_key_modifiers(
 /// click, which is why that path carries a tail). Gating on the
 /// current-frame `border_drag_active` is therefore sufficient.
 ///
-/// ## Broadcast (Task 74)
+/// ## Broadcast
 ///
 /// Mirrors the encoded bytes to `key_broadcast_targets` when broadcast input
 /// is active, matching how other genuine keyboard input is fanned out
@@ -537,7 +537,7 @@ pub fn drain_pending_raw_keys(
 }
 
 /// The physical held-key tracking state (currently just physical Super) that
-/// should carry across a focus change (Task 114.8).
+/// should carry across a focus change.
 ///
 /// On focus-loss we clear held-key tracking: the terminal may miss the
 /// release of a key held at the moment focus left (the user releases it in
@@ -693,8 +693,8 @@ pub(in crate::gui) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingMo
 ///
 /// 1. If the PTY cursor row falls inside a completed block's
 ///    `[command_start_row, end_row]` range, that block is chosen.  This is
-///    the future-facing path for when scrollback-cursor navigation (Task
-///    72.x) or pane gutter clicks (Task 73) let the user point at a
+///    the future-facing path for when scrollback-cursor navigation or
+///    pane gutter clicks let the user point at a
 ///    specific historical block.
 /// 2. Otherwise, the most recently completed block is chosen — i.e. the
 ///    last block in `command_blocks` whose `end_row` is set.  In normal
@@ -845,8 +845,8 @@ fn send_extract_output_range(
 ///
 /// **All bound keys are consumed** — they are never forwarded to the PTY,
 /// regardless of whether the action is handled here or deferred.
-// Clippy `too_many_lines` fires at 106 lines after Task 70.N expanded the
-// in-body `if let Err` blocks to `send_or_log!` macro calls (which rustfmt
+// Clippy `too_many_lines` fires at 106 lines because the
+// in-body `if let Err` blocks are `send_or_log!` macro calls (which rustfmt
 // formats on multiple lines). The function is a flat `match` over
 // `KeyAction` variants — splitting it would just move the match into helper
 // functions that each forward one variant, which adds indirection without
@@ -863,7 +863,7 @@ pub(super) fn dispatch_binding_action(
     match action {
         // `KeyAction::Paste` is intentionally NOT handled here. It is deferred
         // to `dispatch_deferred_action` (via the `other` arm below) so the
-        // smart paste guard (Task 77) can analyze the clipboard with access to
+        // smart paste guard can analyze the clipboard with access to
         // the live config and the per-window confirm dialog, which are not
         // reachable at this input-layer call site.
         KeyAction::Copy if let Some((start, end)) = view_state.selection.normalised() => {
@@ -1017,7 +1017,7 @@ pub(super) fn dispatch_binding_action(
 
 pub(super) fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     if key >= Key::A && key <= Key::Z {
-        // 122.C2: this was `assert_eq!(name.len(), 1)` -- a panic in
+        // This used to be `assert_eq!(name.len(), 1)` -- a panic in
         // production code, which `agents.md` forbids and which the
         // `unwrap_used` / `expect_used` lints do not catch. The invariant
         // holds for every `egui::Key` in `A..=Z` today, but it rests on a
@@ -1262,7 +1262,7 @@ pub(super) fn send_mouse_report(bytes: Vec<u8>, input_tx: &Sender<InputEvent>) {
 
 /// Mirror an already-encoded keyboard byte sequence to every broadcast target.
 ///
-/// Used by Task 74 broadcast-input mode: the active pane's encoded
+/// Used by broadcast-input mode: the active pane's encoded
 /// `InputEvent::Key` payload is replayed to every other leaf pane in the tab.
 /// Each pane independently applies its own bracketed-paste / cursor-key mode,
 /// so we replay the raw encoded bytes rather than re-encoding per pane.
@@ -1502,12 +1502,11 @@ pub(super) struct InputCarryState {
     /// units.
     pub(super) scroll_amount: f32,
     /// Physical Super/Command hold-state, tracked per side across frames
-    /// (Task 101.2 — see [`SuperKeyState`]).
+    /// (See [`SuperKeyState`]).
     pub(super) super_state: SuperKeyState,
     /// The modifiers in effect for typed text that arrives with no key event
     /// before it in the batch: the frame's final modifiers, as of the last
-    /// call. Within a batch the modifiers of the preceding `Event::Key` win
-    /// (Task 147 PR review R18).
+    /// call. Within a batch the modifiers of the preceding `Event::Key` win.
     pub(super) text_modifiers: Modifiers,
 }
 
@@ -1532,7 +1531,7 @@ pub(super) struct WriteInputParams<'a, 'rec> {
     pub(super) view_state: &'a mut ViewState,
     pub(super) character_size_x: f32,
     pub(super) character_size_y: f32,
-    /// `ctx.pixels_per_point()` for this frame. Task 124.3a: needed to
+    /// `ctx.pixels_per_point()` for this frame. Needed to
     /// convert a logical-point pointer offset into the physical-pixel
     /// coordinates `MouseEncoding::SgrPixels` (`?1016`) reports; the
     /// button/wheel arms below still encode reports directly (motion
@@ -1576,7 +1575,7 @@ pub(super) struct WriteInputResult {
 /// Finalizes an in-progress text-selection drag on primary-button release.
 ///
 /// Shared by both the in-rect release path and the out-of-rect
-/// split-pane-boundary release path (Task 116.3, defect 3) so the
+/// split-pane-boundary release path so the
 /// finalize logic — collapse-or-keep, the per-frame commit flag, and the
 /// selection-event recording — is not duplicated. Always uses the
 /// already-tracked `view_state.selection.end` (set by the last in-rect
@@ -1631,8 +1630,7 @@ fn finalize_selection_drag(
         // on this release. Mark the per-frame edge
         // flag so the content-changed auto-clear in
         // `show()` cannot wipe it if PTY output also
-        // arrived on this same frame (defect 2,
-        // Task 116.2).
+        // arrived on this same frame.
         view_state.selection_committed_this_frame = true;
         tracing::debug!(
             target: "freminal::selection",
@@ -1693,7 +1691,7 @@ fn finalize_selection_drag(
 /// click-to-focus in the caller). All keyboard, text, paste, copy, scroll, and mouse-tracking
 /// events are suppressed — they are never forwarded to the inactive pane's PTY.
 ///
-/// ## Broadcast input (Task 74)
+/// ## Broadcast input
 ///
 /// `key_broadcast_targets` lists the input senders of the *other* panes in
 /// the tab when broadcast mode is active on the active pane. Genuine keyboard
@@ -1812,14 +1810,14 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             continue;
         }
 
-        // ── Physical Super/Command hold-state (Task 101.2) ───────────────
+        // ── Physical Super/Command hold-state ───────────────
         // egui delivers the physical Super/Windows key only as discrete
         // `SuperLeft`/`SuperRight` press/release events — there is no
         // `Modifiers` bit for it on Linux/Windows. Track the hold-state
         // across frames so `egui_mods_to_key_modifiers` can set `super_key`
         // for keys pressed while Super is held. This is purely observational
         // — it does not consume the event, so any future encoding of the
-        // Super key itself (Task 101.3) still sees it.
+        // Super key itself still sees it.
         if let Event::Key {
             key: Key::SuperLeft,
             pressed,
@@ -1872,7 +1870,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                 };
                 let modes = InputModes::from_snapshot(snap);
                 send_terminal_inputs(std::slice::from_ref(&ti), input_tx, &modes, &release_meta);
-                // Broadcast (Task 74): mirror the KKP release sequence to the
+                // Broadcast: mirror the KKP release sequence to the
                 // other panes. Each pane shares the same KKP mode here, so
                 // re-encoding with the active pane's modes is correct.
                 if !key_broadcast_targets.is_empty() {
@@ -2433,7 +2431,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     view_state.mouse_position = None;
                     last_reported_mouse_pos = None;
                 }
-                // Task 114.8: clear the held-key tracking (physical Super) on
+                // Clear the held-key tracking (physical Super) on
                 // focus-loss so stale "held" state cannot leak into a later
                 // key report. Per the transition-only binding decision we emit
                 // NO synthetic release for it — the next real key rebuilds
@@ -2488,7 +2486,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     },
                 );
 
-                // Task 124.3a: PTY motion-report encoding and sending moved
+                // PTY motion-report encoding and sending moved
                 // out of this arm into the out-of-frame immediate-report
                 // hook (`terminal::pty_mouse_report::on_pointer_moved`).
                 // This arm keeps only the terminal-owned bookkeeping that
@@ -2504,7 +2502,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                 // arm. A single physical motion event must still produce
                 // at most one PTY report; this arm now never produces one.
                 //
-                // Review correction #5: this must compare at the SAME
+                // This must compare at the SAME
                 // granularity `handle_pointer_moved` would use for the
                 // active encoding (pixel for `SgrPixels`, cell otherwise)
                 // — always comparing cell coordinates here, regardless of
@@ -2606,7 +2604,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                 // buttons) so they do not start text selections or generate
                 // spurious mouse reports at row 0.
                 //
-                // Task 116.3 (defect 3, split-pane boundary): the one
+                // Split-pane boundary: the one
                 // exception is a primary-button RELEASE that is finalizing
                 // an in-progress selection drag. A drag that started in
                 // this pane can be released after the pointer has moved
@@ -2804,7 +2802,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                             // selection. Sharing the coordinate space across
                             // press/drag/release avoids that race. Shared
                             // with the out-of-rect split-pane-boundary
-                            // release path above (Task 116.3, defect 3) via
+                            // release path above via
                             // `finalize_selection_drag`.
                             finalize_selection_drag(view_state, snap, recording_ctx);
                         }
@@ -2962,7 +2960,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                 error!("Failed to send key input to PTY consumer: {e}");
             }
 
-            // Broadcast (Task 74): mirror this keyboard/paste payload to every
+            // Broadcast: mirror this keyboard/paste payload to every
             // other pane in the tab. The encoded bytes already carry the
             // active pane's bracketed-paste / cursor-key wrapping.
             broadcast_key_bytes(key_broadcast_targets, &encoded);
@@ -3086,7 +3084,7 @@ mod fold_target_tests {
 
     #[test]
     fn block_lookups_resolve_rows_against_the_snapshot_row_base() {
-        // Task 125.14: the block stores logical numbers 105..=110; at a row
+        // The block stores logical numbers 105..=110; at a row
         // base of 100 those are buffer indices 5..=10.
         let mut snap = snap_with(vec![completed(1, 105, 110)], 7);
         snap.row_base = RowNumber::new(100);
@@ -3104,7 +3102,7 @@ mod fold_target_tests {
         assert_eq!(block_output_range(block, snap.row_base), Some((6, 10)));
     }
 
-    /// Task 125.C12: `cursor_pos.y` is relative to the live window, not an
+    /// `cursor_pos.y` is relative to the live window, not an
     /// index into the buffer. With scrollback the cursor's buffer row is
     /// `total_rows - term_height + cursor_pos.y`.
     #[test]
@@ -3491,7 +3489,7 @@ mod scroll_window_tests {
 
 #[cfg(test)]
 mod broadcast_tests {
-    //! Tests for [`broadcast_key_bytes`] — the Task 74 keyboard-input
+    //! Tests for [`broadcast_key_bytes`] — the keyboard-input
     //! fan-out helper. These verify the bytes are mirrored verbatim to
     //! every target channel and that a closed/disconnected target does
     //! not abort the fan-out to the remaining targets.
@@ -3546,7 +3544,7 @@ mod broadcast_tests {
 
 #[cfg(test)]
 mod key_modifiers_tests {
-    //! Tests for [`egui_mods_to_key_modifiers`] — the Task 101.2 `super_key`
+    //! Tests for [`egui_mods_to_key_modifiers`] — the `super_key`
     //! wiring. Covers the Linux/Windows path (tracked `super_held` hold-state)
     //! and the macOS path (`Modifiers::mac_cmd`), and confirms `Modifiers::command`
     //! is no longer folded into `ctrl`.
@@ -3564,7 +3562,7 @@ mod key_modifiers_tests {
 
     #[test]
     fn focus_loss_clears_held_super() {
-        // Task 114.8: on focus-loss, held-key tracking (physical Super) is
+        // On focus-loss, held-key tracking (physical Super) is
         // cleared so a phantom-held Super cannot leak into a later report.
         assert!(!held_keys_after_focus_change(false, true));
         assert!(!held_keys_after_focus_change(false, false));
@@ -3572,7 +3570,7 @@ mod key_modifiers_tests {
 
     #[test]
     fn focus_gain_preserves_held_super() {
-        // Task 114.8: focus-gain does not fabricate or drop held state — the
+        // Focus-gain does not fabricate or drop held state — the
         // current value carries through (real modifiers arrive via the
         // compositor's ModifiersChanged).
         assert!(held_keys_after_focus_change(true, true));
@@ -3613,7 +3611,7 @@ mod key_modifiers_tests {
 
 #[cfg(test)]
 mod input_modes_s8c1t_tests {
-    //! Task 147.3: S8C1T reaches `InputModes` through the snapshot.
+    //! S8C1T reaches `InputModes` through the snapshot.
 
     use super::*;
     use freminal_common::buffer_states::modes::mouse::MouseEncoding;
@@ -3642,7 +3640,7 @@ mod input_modes_s8c1t_tests {
         );
     }
 
-    // Task 147.4: the encoders honour it, end to end from the snapshot.
+    // The encoders honour it, end to end from the snapshot.
 
     fn snapshot_after(select_mode: &[u8]) -> TerminalSnapshot {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
@@ -3738,7 +3736,7 @@ mod input_modes_s8c1t_tests {
 
 #[cfg(test)]
 mod modifier_keys_as_keys_tests {
-    //! Tests for the Task 101.3 KKP "modifier keys as keys" GUI-side wiring:
+    //! Tests for the KKP "modifier keys as keys" GUI-side wiring:
     //! [`egui_key_to_terminal_input`] must map the 8 physical modifier-key
     //! `egui::Key` variants to their corresponding `TerminalInput` variants
     //! so KKP flag 2 release-forwarding (see `write_input_to_terminal`) can
@@ -3778,7 +3776,7 @@ mod modifier_keys_as_keys_tests {
 
 #[cfg(test)]
 mod raw_key_tests {
-    //! Tests for the Task 114.7 egui-blocked raw-key delivery path:
+    //! Tests for the egui-blocked raw-key delivery path:
     //! [`kitty_keycode_to_codepoint`]'s codepoint table and
     //! [`drain_pending_raw_keys`]'s end-to-end encoding through
     //! `send_terminal_inputs`.
@@ -4066,7 +4064,7 @@ mod raw_key_tests {
 
 #[cfg(test)]
 mod application_keypad_tests {
-    //! Task 147.5: application keypad mode (DECKPAM) sends the VT220 `SS3`
+    //! Application keypad mode (DECKPAM) sends the VT220 `SS3`
     //! form on the live raw-key path, honouring S8C1T.
 
     use super::*;
@@ -4197,9 +4195,9 @@ mod application_keypad_tests {
 
 #[cfg(test)]
 mod finalize_selection_drag_tests {
-    //! Regression tests for [`finalize_selection_drag`] (Task 116.1 /
-    //! 116.2) and [`SelectionState::finalize_interrupted_drag`] reachability
-    //! (Task 116.3). `finalize_selection_drag` takes no `TerminalSnapshot`
+    //! Regression tests for [`finalize_selection_drag`] and
+    //! [`SelectionState::finalize_interrupted_drag`] reachability.
+    //! `finalize_selection_drag` takes no `TerminalSnapshot`
     //! and no x/y — it always uses the already-tracked
     //! `view_state.selection.end`, so these tests build synthetic
     //! `ViewState`s directly rather than deriving a release position.
@@ -4208,7 +4206,7 @@ mod finalize_selection_drag_tests {
 
     #[test]
     fn finalize_selection_drag_keeps_tracked_end_and_sets_committed_flag() {
-        // Defect 1 (116.1) + defect 2 (116.2): the tracked `selection.end`
+        // The tracked `selection.end`
         // must survive finalize verbatim (no re-derivation), and finalizing
         // a real (non-empty) selection must set the per-frame commit flag
         // so the content-changed auto-clear cannot wipe it this frame.
@@ -4323,11 +4321,11 @@ mod finalize_selection_drag_tests {
     }
 }
 
-/// Task 124.3a: proves `write_input_to_terminal`'s `Event::PointerMoved`
+/// Proves `write_input_to_terminal`'s `Event::PointerMoved`
 /// arm never sends a PTY motion report anymore — that responsibility moved
 /// entirely to the out-of-frame immediate-report hook
 /// (`terminal::pty_mouse_report`, see its own tests for the delivery side).
-/// This is the "no duplicate frame-time report" half of Task 124.3a's
+/// This is the "no duplicate frame-time report" half of the
 /// requirement: the OLD frame-path site is proven to send nothing, so it
 /// can never fire alongside the hook for the same motion.
 #[cfg(test)]
@@ -4384,7 +4382,7 @@ mod pointer_moved_frame_path_tests {
     #[test]
     fn xtmseany_motion_sends_no_pty_bytes_from_the_frame_path() {
         // Under mouse tracking that WOULD have reported this motion
-        // pre-124.3a, the frame path must now send nothing at all — the
+        // before the immediate-report hook existed, the frame path must now send nothing at all — the
         // immediate-report hook is the sole sender.
         let snap = snapshot_with_tracking(MouseTrack::XtMseAny, MouseEncoding::Sgr);
         let sent = run_pointer_moved(&snap, egui::pos2(16.0, 16.0));
@@ -4405,7 +4403,7 @@ mod pointer_moved_frame_path_tests {
     fn no_tracking_motion_still_updates_selection_when_dragging() {
         // Regression: with mouse tracking off, the frame path must still
         // do its terminal-owned bookkeeping (selection-drag extension) —
-        // Task 124.3a only removed the PTY report, nothing else.
+        // only the PTY report was removed, nothing else.
         let snap = snapshot_with_tracking(MouseTrack::NoTracking, MouseEncoding::Sgr);
         let (input_tx, _input_rx) = crossbeam_channel::unbounded();
         let mut view_state = ViewState::new();
@@ -4456,7 +4454,7 @@ mod pointer_moved_frame_path_tests {
         );
     }
 
-    /// Review correction #5: `report_wanted`'s position-change comparison
+    /// `report_wanted`'s position-change comparison
     /// must be encoding-aware, matching `handle_pointer_moved`'s own
     /// granularity choice, not always cell-based. Under
     /// `MouseEncoding::SgrPixels`, two positions within the SAME cell but
@@ -4545,7 +4543,7 @@ mod pointer_moved_frame_path_tests {
     }
 }
 
-/// Task 147.24: Alt+text reaches the PTY with its `ESC` prefix, through the
+/// Alt+text reaches the PTY with its `ESC` prefix, through the
 /// real `Event::Text` path, from the `?1036` state the snapshot carries.
 #[cfg(test)]
 mod alt_text_tests {
@@ -4564,8 +4562,7 @@ mod alt_text_tests {
     }
 
     /// The bytes Alt contributes in front of its text on this host: the `ESC`
-    /// prefix everywhere but macOS, where Option composes and sends none
-    /// (Task 152).
+    /// prefix everywhere but macOS, where Option composes and sends none.
     fn alt_prefix() -> &'static [u8] {
         match HostPlatform::CURRENT {
             HostPlatform::MacOs => b"",
@@ -4930,7 +4927,7 @@ mod alt_text_tests {
     }
 }
 
-/// Task 147.C1: mouse reports are not key events, so they reach the PTY as
+/// Mouse reports are not key events, so they reach the PTY as
 /// the exact report bytes whatever the kitty keyboard flags are. Under flag 8
 /// (report all keys as escape codes) the key encoder would otherwise turn each
 /// byte of a report into its own `CSI u`.
@@ -5093,7 +5090,7 @@ mod mouse_report_raw_path_tests {
     }
 }
 
-/// Task 125.17: selection endpoints, the last click, the context-menu cell and
+/// Selection endpoints, the last click, the context-menu cell and
 /// the copy requests built from them are stable logical rows, converted from
 /// screen coordinates at the `snap.row_base` seam.
 #[cfg(test)]
@@ -5342,12 +5339,12 @@ mod logical_row_seam_tests {
 
 #[cfg(test)]
 mod key_encoding_characterisation_tests {
-    //! Cleanup entry 122.C1: characterisation tests for the two key-encoding
-    //! functions in this module.
+    //! Characterisation tests for the two key-encoding functions in this
+    //! module.
     //!
     //! [`control_key`] and [`egui_key_to_terminal_input`] look like duplicates
-    //! and are **not**. They are each correct for their own call site, and the
-    //! activation pass for Task 122 deliberately declined to de-duplicate them
+    //! and are **not**. They are each correct for their own call site, and they
+    //! were deliberately not de-duplicated
     //! because doing so is a semantic reconciliation, not a refactor.
     //!
     //! These tests exist so that any future attempt to merge them has to
@@ -5394,13 +5391,13 @@ mod key_encoding_characterisation_tests {
         );
         assert_ne!(
             ctrl, plain,
-            "122.C1: these two must stay observably different until the \
+            "these two must stay observably different until the \
              reconciliation is done deliberately"
         );
     }
 
     /// `control_key` maps every A-Z to `Ctrl(<uppercase byte>)`. This also
-    /// covers cleanup entry 122.C2: that branch previously carried
+    /// covers the A-Z branch, which previously carried
     /// `assert_eq!(name.len(), 1)` — a production panic — and now returns
     /// `None` instead. This test pins that the graceful path did not change
     /// any real encoding: all 26 still resolve.
@@ -5481,7 +5478,7 @@ mod key_encoding_characterisation_tests {
         );
         assert_ne!(
             control_covered, plain_covered,
-            "122.C1: the two functions cover different key sets by design"
+            "the two functions cover different key sets by design"
         );
     }
 }

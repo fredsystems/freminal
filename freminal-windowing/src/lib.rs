@@ -15,27 +15,27 @@ mod egui_integration;
 mod event_loop;
 mod frame_paint;
 mod gl_context;
-// Task 125.7: the asynchronous GPU timestamp-query foundation (bounded
-// ring lifecycle + capability detection). Feature-gated identically to
-// `frame-profiling` -- test/measurement infrastructure with no default-build
-// presence. Task 125.8 drives the ring from the terminal renderer (in the
-// `freminal` crate); Task 125.9 drives it from `paint_frame`'s head/band/tail
+// The asynchronous GPU timestamp-query foundation (bounded ring lifecycle +
+// capability detection). Feature-gated identically to `frame-profiling` --
+// test/measurement infrastructure with no default-build presence. The
+// terminal renderer (in the `freminal` crate) drives the ring for its own
+// upload/draw timing; here it is driven from `paint_frame`'s head/band/tail
 // phase markers and `EguiState::run_frame`. Independent of
 // `frame-profiling`: this measures actual GPU execution time via
 // `GL_TIMESTAMP` queries, not CPU wall-clock phases.
 #[cfg(feature = "gpu-profiling")]
 pub mod gpu_profiling;
-// Task 123 Phase 2. Double-gated: `gl-offscreen` keeps it out of production
+// Offscreen GL context for the pixel/readback harness. Double-gated: `gl-offscreen` keeps it out of production
 // builds entirely, and `target_os = "linux"` because the Mesa + Xvfb stack it
 // needs is Linux-only by design (the same precedent as `pkgs.perf` being
 // `stdenv.isLinux`-gated in `flake.nix`). `--all-features` on macOS or
 // Windows therefore still compiles, it just compiles nothing.
 #[cfg(all(target_os = "linux", feature = "gl-offscreen"))]
 pub mod gl_context_offscreen;
-// Task 124.19b. An offscreen egui-level pixel harness that drives
+// An offscreen egui-level pixel harness that drives
 // `frame_paint::paint_frame` itself (not just raw GL calls) against a
-// pbuffer, so a test can see what egui actually painted -- the Task 123
-// Phase 2 harness never constructs an `egui::Context` at all and so cannot
+// pbuffer, so a test can see what egui actually painted -- the raw-GL
+// harness never constructs an `egui::Context` at all and so cannot
 // see this class of bug. Double-gated identically to `gl_context_offscreen`,
 // the module it is built on, for the same reasons: test infrastructure only,
 // needs Mesa and an X server, and `target_os = "linux"` because that stack is
@@ -89,7 +89,7 @@ pub struct DamageRect {
 /// What the windowing layer requires the app's paint callback to redraw
 /// this frame, published once per frame via [`App::present_partial_flag`].
 ///
-/// Replaces the earlier `present_is_partial: Arc<AtomicBool>` (124.18).
+/// Replaces the earlier `present_is_partial: Arc<AtomicBool>`.
 /// A bare bool could only say "was the clear skipped"; it could not say
 /// *which* pixels the app's own paint callback is safe to leave untouched,
 /// which was unsound whenever the actual redraw region is a multi-frame
@@ -129,12 +129,12 @@ pub enum PresentRegion {
 /// tracks a short history of each recent frame's own declared damage and,
 /// when `buffer_age()` reports the buffer is `n` frames stale, unions the
 /// current damage with the previous `n - 1` frames' — see
-/// `frame_paint::DamageHistory` (124.18). When that reconstruction is
+/// `frame_paint::DamageHistory`. When that reconstruction is
 /// unavailable (non-EGL backends, a buffer stale beyond the retained
 /// history, an unqueryable age, a resize) the windowing layer falls back to
 /// a full frame regardless.
 ///
-/// [`FrameDamage::None`] (Task 124.2) is the third, stricter case: the app
+/// [`FrameDamage::None`] is the third, stricter case: the app
 /// proved that *nothing at all* changed this frame — not even a bounded
 /// rect. The windowing layer still runs the egui UI pass (so scheduling,
 /// platform output, and the app's own damage computation stay correct) but
@@ -189,18 +189,18 @@ pub enum ChromeDamage {
 
 /// Per-frame signals drained from the [`App`] immediately after
 /// [`App::update`] returns, consumed by the windowing layer to decide
-/// paint-order splitting (#436.4a) and chrome replay (#436.4b).
+/// paint-order splitting and chrome replay.
 #[derive(Debug, Clone)]
 pub struct FrameSignals {
     /// How much of the frame changed (see [`FrameDamage`]).
     pub frame_damage: FrameDamage,
     /// The terminal band's shape-index range within this frame's
-    /// `full_output.shapes` (#436.4a) — the contiguous `[start, end)` slice
+    /// `full_output.shapes` — the contiguous `[start, end)` slice
     /// painted separately from chrome. Defaults to `0..0` (empty) for an
     /// app that has not wired up the band range; in that case the whole
     /// shape list is treated as "tail" and painted in a single
-    /// `paint_primitives` call, byte-identical to the pre-#436.4a
-    /// single-call path.
+    /// `paint_primitives` call, byte-identical to the
+    /// single-call path taken before the band split existed.
     pub band_range: std::ops::Range<usize>,
     /// The delay the app itself requested via `ctx.request_repaint_after`
     /// during this frame's `update()`, if any. `None` when the app made no
@@ -341,7 +341,7 @@ pub trait App {
     }
 
     /// Drain the terminal band's shape-index range within this frame's
-    /// `full_output.shapes` (#436.4a).
+    /// `full_output.shapes`.
     ///
     /// The "terminal band" is the region of the frame — pane content, pane
     /// borders, and related overlays — that is rebuilt every frame and is
@@ -354,9 +354,8 @@ pub trait App {
     /// shape-index range within that layer's `PaintList`, and returns a
     /// clone of exactly that range here. This range is interpreted as an
     /// index range into `full_output.shapes` (the background layer drains
-    /// first, so the two coincide) — supersedes the shape-cloning approach
-    /// of the prior `take_terminal_band_shapes` (#436.2a), which is no
-    /// longer needed once `run_frame` slices by range directly.
+    /// first, so the two coincide) — slicing by range avoids having to
+    /// clone the band's shapes.
     ///
     /// Called by the windowing layer once per frame, after [`App::update`]
     /// returns for that window, mirroring [`App::take_frame_damage`].
@@ -367,7 +366,7 @@ pub trait App {
     /// behavior for an app that does not participate in this optimization
     /// (or has not yet wired it up): `run_frame` treats an empty range as
     /// "everything is tail", painting the whole frame in one call, exactly
-    /// as before #436.4a.
+    /// as before the band split existed.
     fn take_terminal_band_range(&mut self, _window_id: WindowId) -> std::ops::Range<usize> {
         0..0
     }
@@ -425,9 +424,8 @@ pub trait App {
         true
     }
 
-    /// Task 121 spike (issue: pointer motion over static terminal content
-    /// measured at 58fps vs. 1.95fps idle, 95% of those frames changing zero
-    /// pixels): should THIS `CursorMoved` event schedule a repaint?
+    /// Pointer motion over static terminal content was measured at 58fps vs.
+    /// 1.95fps idle, with 95% of those frames changing zero pixels: should THIS `CursorMoved` event schedule a repaint?
     ///
     /// `egui-winit` 0.35's `on_window_event` reports `repaint: true`
     /// unconditionally for `WindowEvent::CursorMoved` — the windowing layer
@@ -438,14 +436,14 @@ pub trait App {
     /// open overlays).
     ///
     /// Default `true` — conservative: an app that has not wired this up
-    /// keeps the pre-Task-121 "every pointer motion schedules a repaint"
+    /// keeps the "every pointer motion schedules a repaint"
     /// behavior exactly. This is purely a repaint-SCHEDULING gate (whether
     /// `event_loop` calls `window.request_redraw()` for this event at all);
     /// it does not affect `is_chrome_interactive_at`'s separate
     /// chrome-damage axis, and `MouseInput`/`MouseWheel`/`CursorEntered`/
     /// `CursorLeft` are deliberately NOT gated by this — only `CursorMoved`.
     ///
-    /// Task 124.3b: takes both the previous and the current pointer
+    /// Takes both the previous and the current pointer
     /// position ([`PointerMotionPositions`]) rather than the current
     /// position alone. Cell-granular suppression (URL hover, selection
     /// extent, the command-block gutter) needs to know whether motion
@@ -468,7 +466,7 @@ pub trait App {
     fn raw_input_hook(&mut self, _window_id: WindowId, _raw_input: &mut egui::RawInput) {}
 
     /// Called for keyboard keys that egui cannot deliver (keypad
-    /// operators/directional, media, print/pause/menu keys — see Task 114).
+    /// operators/directional, media, print/pause/menu keys).
     /// Delivered BEFORE egui-winit and only for that narrow blocked set; all
     /// other keys reach the app through egui as usual.
     ///
@@ -477,7 +475,7 @@ pub trait App {
     /// default implementation does nothing.
     fn on_raw_key_event(&mut self, _window_id: WindowId, _event: RawKeyEvent, _mods: RawKeyMods) {}
 
-    /// Task 124.3a: synchronous, PTY-agnostic pointer-motion observation,
+    /// Synchronous, PTY-agnostic pointer-motion observation,
     /// independent of repaint scheduling.
     ///
     /// Called from the `CursorMoved` fast path in `event_loop.rs`, on every
@@ -487,7 +485,7 @@ pub trait App {
     /// not one gating the other. This is what lets an app deliver an
     /// immediate PTY mouse-tracking report on every motion even on a frame
     /// the repaint gate suppresses (see `Documents/DESIGN_DECISIONS.md`,
-    /// "Damage Model (Task 124)" / "Pointer motion and PTY mouse reports are
+    /// "Damage Model" / "Pointer motion and PTY mouse reports are
     /// separate axes"). `freminal-windowing` itself knows nothing about mouse
     /// reports, PTY encoding, or terminal modes — this hook's only job is
     /// to deliver the raw pointer position and chorded modifiers to the app
@@ -496,7 +494,7 @@ pub trait App {
     /// The default implementation does nothing.
     fn on_pointer_moved(&mut self, _window_id: WindowId, _event: PointerMotionEvent) {}
 
-    /// Task 124.3a: synchronous, PTY-agnostic pointer-button press/release
+    /// Synchronous, PTY-agnostic pointer-button press/release
     /// observation.
     ///
     /// Called from the `MouseInput` arm of the same fast path, for every
@@ -513,7 +511,7 @@ pub trait App {
     /// The default implementation does nothing.
     fn on_pointer_button(&mut self, _window_id: WindowId, _event: PointerButtonEvent) {}
 
-    /// Task 124.3a (review correction): synchronous, PTY-agnostic
+    /// Synchronous, PTY-agnostic
     /// notification that pointer presence over this window was lost —
     /// either the pointer physically left the window (`CursorLeft`) or the
     /// window lost OS focus (`Focused(false)`).
@@ -623,7 +621,7 @@ pub struct PointerMotionEvent {
 }
 
 /// The previous and current pointer position for one `CursorMoved` event,
-/// delivered to [`App::pointer_motion_needs_repaint`] (Task 124.3b).
+/// delivered to [`App::pointer_motion_needs_repaint`].
 ///
 /// `previous` is captured by `event_loop.rs`'s `WindowState::pointer_history`
 /// (a `PointerMotionHistory`) **before** it records the current event's
@@ -688,7 +686,7 @@ pub struct RawKeyMods {
     pub super_key: bool,
 }
 
-/// A raw keyboard event for a key egui cannot deliver (Task 114).
+/// A raw keyboard event for a key egui cannot deliver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawKeyEvent {
     /// The physical key code (winit's `KeyCode`).
@@ -925,13 +923,12 @@ mod tests {
 
     /// Minimal `App` implementer that relies entirely on default method
     /// bodies, used to pin the default behavior of
-    /// `App::take_terminal_band_range` (#436.4a, superseding the removed
-    /// #436.2a `take_terminal_band_shapes`) — mirroring the pre-existing
+    /// `App::take_terminal_band_range` — mirroring the pre-existing
     /// `take_frame_damage` default — without constructing a full
     /// `freminal::gui::FreminalGui`, which is impractical headlessly (its
     /// windows are keyed by a real winit `WindowId`).
     ///
-    /// 122.6: `pointer_motion_needs_repaint` and `chrome_interactive` are
+    /// `pointer_motion_needs_repaint` and `chrome_interactive` are
     /// configurable so tests (here and in `event_loop.rs`, which has
     /// `pub(crate)` visibility onto this struct) can exercise BOTH the
     /// conservative trait defaults (`true`/`true` — `Default::default()`,
@@ -952,24 +949,23 @@ mod tests {
         pub pointer_motion_needs_repaint: bool,
         /// Overrides `App::is_chrome_interactive_at`'s return value.
         pub chrome_interactive: bool,
-        /// Task 124.3a: every `App::on_pointer_moved` call this instance has
+        /// Every `App::on_pointer_moved` call this instance has
         /// received, in order — lets a test prove the hook fired (and with
         /// what event) independent of whatever `pointer_motion_needs_repaint`
         /// answered for the same motion.
         pub pointer_moved_calls: Vec<PointerMotionEvent>,
-        /// Task 124.3a: every `App::on_pointer_button` call this instance
+        /// Every `App::on_pointer_button` call this instance
         /// has received, in order.
         pub pointer_button_calls: Vec<PointerButtonEvent>,
-        /// Task 124.3a (review correction): every
-        /// `App::on_pointer_presence_lost` call this instance has
+        /// Every `App::on_pointer_presence_lost` call this instance has
         /// received, in order.
         pub pointer_presence_loss_calls: Vec<PointerPresenceLoss>,
     }
 
     impl Default for DummyApp {
         /// Matches the trait's own conservative defaults (`true` for both
-        /// hooks) so every pre-122.6 `DummyApp::default()` (previously bare
-        /// `DummyApp`) construction site keeps its original meaning.
+        /// hooks) so `DummyApp::default()` (formerly a bare
+        /// `DummyApp`) construction sites keep their original meaning.
         fn default() -> Self {
             Self {
                 pointer_motion_needs_repaint: true,
@@ -1060,12 +1056,12 @@ mod tests {
         assert_eq!(app.take_terminal_requested_delay(window_id), None);
     }
 
-    // ── 122.6: `DummyApp`'s configurable overrides ───────────────────────
+    // ── `DummyApp`'s configurable overrides ──────────────────────────────
 
     #[test]
     fn dummy_app_default_matches_conservative_trait_defaults() {
         // `DummyApp::default()` must reproduce the exact behavior every
-        // pre-122.6 bare `DummyApp` construction relied on: the trait's own
+        // bare `DummyApp` construction relied on: the trait's own
         // conservative bodies at `lib.rs:332` (`is_chrome_interactive_at`)
         // and `lib.rs:355` (`pointer_motion_needs_repaint`), both `true`.
         let app = DummyApp::default();
@@ -1122,7 +1118,7 @@ mod tests {
         ));
     }
 
-    // ── Task 124.3a: `PointerButton::from_winit` ─────────────────────────
+    // ── `PointerButton::from_winit` ──────────────────────────────────────
 
     #[test]
     fn pointer_button_from_winit_converts_all_five_named_buttons() {
@@ -1141,7 +1137,7 @@ mod tests {
         // Review correction: Back/Forward must convert too, so a
         // physically-held Back/Forward button can still arm held-button
         // state and drive `?1002` motion reporting exactly as it did before
-        // Task 124.3a's hook existed (via the existing unsupported-button
+        // the hook existed (via the existing unsupported-button
         // fallback in `freminal::gui::mouse`'s encoders).
         assert_eq!(
             PointerButton::from_winit(winit::event::MouseButton::Back),
@@ -1164,14 +1160,14 @@ mod tests {
         );
     }
 
-    // ── Task 124.3a: `App::on_pointer_moved` / `App::on_pointer_button` ──
+    // ── `App::on_pointer_moved` / `App::on_pointer_button` ───────────────
     //
     // `take_terminal_band_range_default_is_empty_and_reset_on_read` and its
     // siblings above already establish that a type relying entirely on a
     // default trait-method body compiles and behaves conservatively; these
     // two hooks' default bodies are the same "does nothing" shape (see the
     // trait doc), so no separate default-body test is added here — instead
-    // these tests exercise the behavior specific to Task 124.3a via
+    // these tests exercise the behavior specific to them via
     // `DummyApp`'s recording override.
 
     #[test]
@@ -1218,7 +1214,7 @@ mod tests {
         assert_eq!(app.pointer_button_calls, vec![event]);
     }
 
-    // ── Task 124.3a (review correction): `App::on_pointer_presence_lost` ─
+    // ── `App::on_pointer_presence_lost` ──────────────────────────────────
 
     #[test]
     fn on_pointer_presence_lost_records_left_window() {

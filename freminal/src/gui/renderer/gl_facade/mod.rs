@@ -3,14 +3,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! The GL call boundary (Task 123; see `Documents/DESIGN_DECISIONS.md`, "GL
-//! Call Boundary and Measurement Harnesses (Task 123)").
+//! The GL call boundary (see `Documents/DESIGN_DECISIONS.md`, "GL Call
+//! Boundary and Measurement Harnesses").
 //!
 //! This module owns exactly one concept: the seam between freminal's
 //! renderer code and the concrete `glow::Context` it draws through. That
 //! seam exists so a future test can record every GL call freminal makes
-//! without a GPU, a display server, or a driver — see the plan document's
-//! "Phase 1 — call-recording harness" section for the full motivation.
+//! without a GPU, a display server, or a driver — see
+//! `Documents/DESIGN_DECISIONS.md`, "GL Call Boundary and Measurement
+//! Harnesses" for the full motivation.
 //!
 //! # `glow::HasContext` is sealed — do not retry implementing it
 //!
@@ -41,12 +42,10 @@
 //! This module now holds the `Gl` facade (`facade`, re-exported as
 //! [`Gl`]), the frozen call surface ([`surface`]) — the enumerated, audited
 //! list of every `glow::HasContext` method freminal calls, plus the
-//! test-time guard that keeps that enumeration honest until the migration
-//! lands — and, behind the `gl-recording` feature, the recording backend
-//! (`recording`). Migrating the five call sites above onto `Gl` is still
-//! 123.4/123.5.
+//! test-time guard that keeps that enumeration honest — and, behind the
+//! `gl-recording` feature, the recording backend (`recording`).
 
-// Task 123 subtask 123.6b: two pairs of `#[inline(never)]` wrappers whose
+// Two pairs of `#[inline(never)]` wrappers whose
 // emitted assembly is compared by `assets/ci/check-gl-dispatch-codegen.sh`
 // to prove the facade adds no per-call branch. Feature-gated because
 // `#[no_mangle]` symbols have no business in a production build.
@@ -59,7 +58,7 @@ pub mod surface;
 
 pub use facade::Gl;
 
-// The behavioural verification suite (subtask 123.3) drives the
+// The behavioural verification suite drives the
 // `Recording` arm end to end, so it only compiles where that arm exists.
 // It lives in its own file rather than inside `facade.rs` per
 // `module-cohesion`: `facade.rs` already carries 56 methods plus its own

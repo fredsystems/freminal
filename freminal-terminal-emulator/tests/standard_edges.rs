@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Phase 13: Standard parser edge cases (invalid bytes, partial ESC, UTF-8 oddities)
+//! Standard parser edge cases (invalid bytes, partial ESC, UTF-8 oddities)
 
 use freminal_terminal_emulator::ansi_components::standard::StandardParser;
 

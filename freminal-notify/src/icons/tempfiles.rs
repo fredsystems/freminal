@@ -552,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn the_icon_directory_prefix_keeps_its_pre_task_150_value() {
+    fn the_icon_directory_prefix_is_stable() {
         assert_eq!(ICON_DIR_PREFIX, "freminal-osc99-icons-");
     }
 

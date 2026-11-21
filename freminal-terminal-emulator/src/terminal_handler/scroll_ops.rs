@@ -345,7 +345,7 @@ impl TerminalHandler {
     /// at most one `ApplyPendingResize` marker is queued, so a marker can never
     /// apply an older size after a newer one: whichever size was stored last
     /// is the one the writer applies. Mixing slot markers with direct
-    /// `PtyWrite::Resize` messages would reorder them (PR #572 review).
+    /// `PtyWrite::Resize` messages would reorder them.
     /// Without a slot (headless, tests) the resize is sent directly.
     pub fn route_pty_resize(&self, size: FreminalTerminalSize) -> PtyResizeSend {
         let Some(slot) = &self.pending_resize else {

@@ -18,7 +18,7 @@
 # lands the icon in hicolor/scalable/apps -- so this script only touches the
 # desktop file.
 #
-# The .deb also gets the compiled xterm-freminal terminfo entry (Task 151) under
+# The .deb also gets the compiled xterm-freminal terminfo entry under
 # usr/share/terminfo, so TERM=xterm-freminal resolves for sudo and detached
 # processes.  The AppImage is deliberately left without it: it relies on
 # freminal's per-pane extraction.

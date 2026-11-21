@@ -1,5 +1,5 @@
 #version 330 core
-// Toast pass vertex shader (issue #433).
+// Toast pass vertex shader.
 //
 // Vertex layout — one vertex is 25 floats (see TOAST_VERTEX_FLOATS in
 // toast_pass.rs); all pill parameters are constant across a pill's 6

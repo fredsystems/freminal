@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! Handler-level tests for what DECSC / DECRC save and restore, and what DECRC
-//! does when nothing was saved (Tasks 131.C1 and 131.C2).
+//! does when nothing was saved.
 //!
 //! The reference is xterm's `CursorSave2` / `CursorRestoreFlags` (`cursor.c`):
 //! DECSC saves the position, the SGR rendition, DECOM and the character set,
@@ -194,7 +194,7 @@ fn decrc_keeps_the_live_hyperlink() {
     );
 }
 
-/// Task 147.6: DECSC saves the pending-wrap flag and DECRC restores it
+/// DECSC saves the pending-wrap flag and DECRC restores it
 /// (xterm `CursorSave` / `CursorRestore` keep `do_wrap`), so the next printed
 /// character wraps instead of overwriting the last column. Covers all three
 /// save paths: `ESC 7`, `CSI s`, and `?1048`.
@@ -260,7 +260,7 @@ fn decrc_after_a_narrowing_resize_keeps_pending_wrap_on_the_reflowed_cell() {
     feed(&mut h, "\x1b8");
 
     // The saved 'j' reflowed to the last column of the second row, so the
-    // cursor is still just past it (Task 147.18, Ghostty `Screen.resize`).
+    // cursor is still just past it (Ghostty `Screen.resize`).
     let row = pos(&h).1;
     assert_eq!(cell_at(&h, 4, row).into_utf8(), "j");
     assert_eq!(pos(&h).0, 5, "pending wrap at the new right edge");

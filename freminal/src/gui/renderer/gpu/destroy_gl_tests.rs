@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! Real-GL proof that [`TerminalRenderer::destroy`] and the retire queue
-//! actually delete GL objects (Task 125.C2).
+//! actually delete GL objects.
 //!
 //! The recording-facade tests in `renderer::retire` prove the right
 //! `delete_*` *calls* are issued; this proves the driver agrees -- every

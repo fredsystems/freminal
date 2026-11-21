@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Shell-history seeding for the Quick Command History Palette (Task 72.15).
+//! Shell-history seeding for the Quick Command History Palette.
 //!
 //! At pane spawn time, freminal reads the user's existing shell history file
 //! and pre-populates a per-pane "history seed" so the palette presents a
@@ -34,7 +34,7 @@
 //! ArcSwap CAS guarantees the OSC-driven load (seq=1) always wins over
 //! the env-derived load (seq=0) regardless of arrival order.
 //!
-//! Palette (Task 72.15 commit 2)
+//! Palette
 //!   ├── reads slot.load_full() — Arc<SeededHistory>
 //!   ├── if entries non-empty, presents seed entries (no timestamps/exit
 //!   │   codes)
@@ -1265,7 +1265,7 @@ mod tests {
         assert_eq!(loaded.entries.as_ref(), &vec!["ls".to_owned()]);
     }
 
-    // ---------- load_from_path hardening (Task 148.9) ----------
+    // ---------- load_from_path hardening ----------
 
     #[test]
     fn osc_load_normal_zsh_history_still_loads() {

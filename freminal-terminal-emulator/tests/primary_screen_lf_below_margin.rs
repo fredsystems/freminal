@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! LF below the bottom margin on the primary screen's last row does not
-//! scroll (Task 148.C3).
+//! scroll.
 //!
 //! xterm's `xtermIndex` (cursor.c) treats indexing below the scrolling region
 //! as cursor down, and `CursorDown` clamps at the last screen row, so nothing

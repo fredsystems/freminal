@@ -71,7 +71,7 @@ fn logical_coord_to_i32(v: f64) -> i32 {
 /// are one-shot responses to real events, not continuous streams, and are
 /// intentionally not throttled here.)
 ///
-/// This closes the issue #439 loophole where the cross-thread
+/// This closes a loophole where the cross-thread
 /// [`UserEvent::RequestRepaintAfter`] path (used by the PTY consumer thread)
 /// accepted an unclamped sub-16ms delay and `min`'d below any already-floored
 /// deadline, letting a bursty PTY output stream (btop, htop, vim, less) drive
@@ -88,7 +88,7 @@ fn clamp_repaint_delay(delay: std::time::Duration) -> std::time::Duration {
     delay.max(MIN_REPAINT_INTERVAL)
 }
 
-/// Task 121 spike: fallback wake interval used when pointer motion was
+/// Fallback wake interval used when pointer motion was
 /// suppressed, egui asked for an immediate repaint purely because of those
 /// suppressed events, and the app itself requested no delay at all.
 ///
@@ -97,8 +97,8 @@ fn clamp_repaint_delay(delay: std::time::Duration) -> std::time::Duration {
 /// cursor under btop/vim), and in that state an unbounded wait would stall the
 /// window until an unrelated event happened to arrive.
 ///
-/// Subtask 121.12 routed every in-frame freminal repaint need (bell flash,
-/// cursor trail, animated images, gutter hover, scrollbar damage) through
+/// Every in-frame freminal repaint need (bell flash,
+/// cursor trail, animated images, gutter hover, scrollbar damage) is routed through
 /// `app_requested_delay`, so the only remaining unrepresented need here is
 /// egui's OWN chrome animation — e.g. a hover/tooltip fade still settling
 /// after the pointer moved off chrome onto terminal content. egui's raw
@@ -107,10 +107,10 @@ fn clamp_repaint_delay(delay: std::time::Duration) -> std::time::Duration {
 /// stay bounded — `Duration::MAX` would freeze such a fade at partial alpha
 /// until an unrelated event arrived.
 ///
-/// 500ms (not the previous 250ms) is chosen to equal the cursor-blink period
+/// 500ms (not 250ms) is chosen to equal the cursor-blink period
 /// requested at `app_impl.rs`'s per-pane scheduling, so that turning the
 /// cursor blink OFF can never schedule MORE frames than leaving it on. The
-/// old 250ms produced exactly that perversity: blink-on floored at a 2fps
+/// 250ms would produce exactly that perversity: blink-on floored at a 2fps
 /// wake, blink-off (no `app_requested_delay` at all) fell back to 4fps —
 /// disabling the blink made the idle GUI repaint *more* often, not less.
 ///
@@ -126,7 +126,7 @@ fn clamp_repaint_delay(delay: std::time::Duration) -> std::time::Duration {
 const SUPPRESSED_POINTER_FALLBACK_DELAY: std::time::Duration =
     std::time::Duration::from_millis(500);
 
-/// Task 121 spike: decide the repaint delay to actually schedule, given what
+/// Decide the repaint delay to actually schedule, given what
 /// egui asked for and whether the only thing that happened since the previous
 /// frame was pointer motion the app classified as needing no frame.
 ///
@@ -145,7 +145,7 @@ const SUPPRESSED_POINTER_FALLBACK_DELAY: std::time::Duration =
 /// occasional redundant frame.
 ///
 /// Pure so the liveness-critical substitution is unit-testable without a live
-/// event loop — this is the highest-risk logic in the spike.
+/// event loop — this is the highest-risk logic here.
 fn effective_repaint_delay(
     suppressed_only: bool,
     repaint_delay: std::time::Duration,
@@ -160,7 +160,7 @@ fn effective_repaint_delay(
 
 /// Returns `true` for the narrow set of physical keys that egui 0.35 cannot
 /// deliver: print/pause/menu keys, keypad operators and digits, and the
-/// media keys winit's `KeyCode` exposes (Task 114). These are intercepted
+/// media keys winit's `KeyCode` exposes. These are intercepted
 /// BEFORE egui-winit sees them and routed to [`App::on_raw_key_event`]
 /// instead; every other key falls through to egui unchanged.
 const fn is_blocked_key(key_code: winit::keyboard::KeyCode) -> bool {
@@ -257,7 +257,7 @@ fn update_chrome_drag_latch(
     }
 }
 
-/// Task 124.3a: the mapping + convert-or-ignore decision the `MouseInput`
+/// The mapping + convert-or-ignore decision the `MouseInput`
 /// arm applies to build an `App::on_pointer_button` event, extracted as a
 /// pure function (mirroring `should_schedule_cursor_moved`'s existing
 /// precedent) so the mapping is unit-testable without a live `Handler`.
@@ -284,7 +284,7 @@ fn pointer_button_event_for(
     })
 }
 
-/// Task 121 spike: should THIS `CursorMoved` event actually schedule a
+/// Should THIS `CursorMoved` event actually schedule a
 /// repaint (i.e. set `WindowState::repaint_at`)?
 ///
 /// `chrome_drag_latched` (`chrome_drag_pressed_count > 0`) always forces
@@ -314,7 +314,7 @@ const fn should_schedule_cursor_moved(
 }
 
 /// Owns the "what was the last observed `CursorMoved` position" invariant
-/// for one window (Task 124.3b review). Previously a bare
+/// for one window. Formerly a bare
 /// `Option<egui::Pos2>` field (`last_cursor_pos`) mutated inline at three
 /// call sites (`CursorMoved`, `CursorLeft`, `MouseInput`'s chrome
 /// hit-test), with a free-standing `cursor_moved_positions` helper existing
@@ -336,7 +336,7 @@ impl PointerMotionHistory {
     /// [`PointerMotionPositions`] pair for `App::pointer_motion_needs_repaint`
     /// — `previous` is whatever was recorded before THIS call, `current` is
     /// `pos`. `None` in, `None` out: `pos` UNCONDITIONALLY overwrites the
-    /// recorded position (matching the pre-124.3b bare-field behavior
+    /// recorded position (matching the old bare-field behavior
     /// exactly — a conversion failure, `physical_to_logical_pos` returning
     /// `None` for a non-finite/non-positive scale factor, discards whatever
     /// prior position was known), and the caller's own conservative
@@ -372,7 +372,7 @@ struct WindowState {
     egui: EguiState,
     /// Next scheduled repaint time (if any).
     repaint_at: Option<Instant>,
-    /// Pointer-motion history (Task 124.3b review): owns the last-observed
+    /// Pointer-motion history: owns the last-observed
     /// `CursorMoved` position and builds the `PointerMotionPositions` pair
     /// `App::pointer_motion_needs_repaint` needs. `None`/cleared before the
     /// first `CursorMoved` (or after the pointer has left the window) — the
@@ -386,7 +386,7 @@ struct WindowState {
     /// regardless of the current pointer position, so a drag that moves off
     /// the sensor mid-drag is not mistaken for terminal-content motion.
     chrome_drag_pressed_count: u32,
-    /// Task 121 spike: whether the PREVIOUS `CursorMoved` event decided a
+    /// Whether the PREVIOUS `CursorMoved` event decided a
     /// repaint was needed (before the chrome-drag-latch override). Consulted
     /// by [`should_schedule_cursor_moved`] to edge-detect a needed ->
     /// not-needed transition, so the frame where the pointer stops mattering
@@ -396,7 +396,7 @@ struct WindowState {
     /// repaint (up to the ~500ms blink interval). `true` before the first
     /// `CursorMoved`, matching this trait method's conservative default.
     pointer_motion_needed_last: bool,
-    /// Task 121 spike: set when a `CursorMoved` was suppressed; cleared when
+    /// Set when a `CursorMoved` was suppressed; cleared when
     /// the next frame consumes it.
     ///
     /// Suppressed events are still handed to `on_window_event` (egui's pointer
@@ -632,7 +632,7 @@ impl<A: App> Handler<A> {
                 WindowOp::RequestRepaintAfter(id, delay) => {
                     if let Some(state) = self.windows.get_mut(&id.0) {
                         // Same 16ms floor as every other repaint-scheduling
-                        // path (issue #439). This same-thread `WindowOp` path
+                        // path. This same-thread `WindowOp` path
                         // has no sub-16ms caller today, but flooring it keeps
                         // the "no scheduling path can drive the GUI past
                         // ~60fps" invariant true for every caller, present and
@@ -708,7 +708,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         ) {
             if let Some(state) = self.windows.get_mut(&winit_id) {
                 let response = state.egui.on_window_event(&state.window, &event);
-                // Task 121 spike: whether THIS pointer event should schedule
+                // Whether THIS pointer event should schedule
                 // a repaint. Defaults to egui-winit's own opinion (always
                 // `true` for all five event kinds handled in this fast path
                 // — see `should_schedule_cursor_moved`'s doc) and is
@@ -724,7 +724,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         let logical_pos = physical_to_logical_pos(position, scale);
                         // `PointerMotionHistory::observe` unconditionally
                         // overwrites the recorded position with
-                        // `logical_pos` (matching the pre-124.3b bare-field
+                        // `logical_pos` (matching the old bare-field
                         // behavior exactly) and returns the
                         // `PointerMotionPositions` pair for THIS event, or
                         // `None` only when `logical_pos` itself is `None`
@@ -732,7 +732,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         // non-finite/non-positive scale factor).
                         let positions = state.pointer_history.observe(logical_pos);
 
-                        // Task 124.3a: the synchronous, PTY-agnostic motion
+                        // The synchronous, PTY-agnostic motion
                         // hook. Deliberately unconditional and independent
                         // of the repaint-scheduling decision computed below
                         // — `App::on_pointer_moved` runs on every motion
@@ -754,8 +754,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                             );
                         }
 
-                        // Task 121 spike (124.3b: now carries `previous` as
-                        // well as `current`): decide whether this
+                        // Decide (from `previous` as well as `current`) whether this
                         // pointer-motion event needs a repaint AT ALL.
                         // `positions.is_none()` (position could not be
                         // converted to logical points — a non-finite/
@@ -784,12 +783,12 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         // The pointer is gone — a stale position must not be
                         // used to wrongly classify a later event.
                         state.pointer_history.clear();
-                        // Task 121 spike: reset the edge-detect latch too —
+                        // Reset the edge-detect latch too —
                         // a stale "not needed" from before the pointer left
                         // must not suppress the first `CursorMoved` after it
                         // re-enters (at a possibly unrelated position).
                         state.pointer_motion_needed_last = true;
-                        // Task 124.3a (review correction): tell the app so
+                        // Tell the app so
                         // it can reset any held-button/report-baseline
                         // state that can no longer be trusted once the
                         // pointer has left the window.
@@ -813,7 +812,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                             is_over_chrome,
                         );
 
-                        // Task 124.3a: synchronous, PTY-agnostic held-button
+                        // Synchronous, PTY-agnostic held-button
                         // observation. Button press/release PTY report
                         // emission itself stays exactly where it is today,
                         // in the frame-time `Event::PointerButton` path.
@@ -839,7 +838,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     ),
                 }
 
-                // Task 121 spike: `suppressed_pointer_since_last_frame` must
+                // `suppressed_pointer_since_last_frame` must
                 // mean "the ONLY input since the last frame was pointer
                 // motion we classified as needing no frame". So ANY event
                 // that genuinely schedules — a click, a wheel tick, a
@@ -922,7 +921,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         }
 
         // Intercept the narrow set of physical keys egui 0.35 cannot deliver
-        // (Task 114: keypad operators/digits, media, print/pause/menu)
+        // (keypad operators/digits, media, print/pause/menu)
         // BEFORE egui-winit sees them, and route them to
         // `App::on_raw_key_event` instead. Every other key falls through to
         // egui unchanged — this must stay narrow (see `is_blocked_key`).
@@ -1000,14 +999,14 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 }
             }
             WindowEvent::Focused(false) => {
-                // #436.8 safety net: a chrome-border drag interrupted by
+                // Safety net: a chrome-border drag interrupted by
                 // focus loss (e.g. alt-tab mid-drag) must not leave the latch
                 // stuck non-zero, which would force every subsequent pointer
                 // event `Full` forever.
                 if let Some(state) = self.windows.get_mut(&winit_id) {
                     state.chrome_drag_pressed_count = 0;
                 }
-                // Task 124.3a (review correction): same pointer-presence-loss
+                // Same pointer-presence-loss
                 // notification as `CursorLeft` — losing focus means no
                 // further pointer/button events are guaranteed to arrive for
                 // this window until it regains focus, so any held-button
@@ -1177,7 +1176,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 // from zero-delay requests (hover state, tooltip updates).
                 // This ensures layout-settling frames still fire while keeping
                 // idle CPU near zero.
-                // Task 121 SPIKE: egui re-arms the frame schedule from inside
+                // egui re-arms the frame schedule from inside
                 // the frame. `InputState::wants_repaint_after` returns
                 // `Duration::ZERO` whenever `!events.is_empty()`, and the
                 // pointer events we deliberately suppressed are still in that
@@ -1259,7 +1258,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 if let Some(state) = self.windows.get_mut(&id.0) {
                     // Clamp the caller-supplied delay to the same 16ms floor
                     // the in-frame `frame_output.repaint_delay` path and the
-                    // `RequestRepaint` arm enforce (issue #439). Without this
+                    // `RequestRepaint` arm enforce. Without this
                     // floor, a cross-thread caller (the PTY consumer thread's
                     // `post_event`) could request an 8ms wake that `min`s
                     // below any 16ms-floored deadline already scheduled,
@@ -1484,7 +1483,7 @@ mod tests {
 
     #[test]
     fn clamp_repaint_delay_raises_sub_floor_delays_to_the_floor() {
-        // Issue #439: the PTY consumer thread previously requested an 8ms
+        // The PTY consumer thread once requested an 8ms
         // repaint delay through the unclamped cross-thread path, bypassing the
         // 60fps floor and letting bursty output (btop, htop, vim, less) drive
         // the GUI past 60fps. Any sub-16ms request must now be raised.
@@ -1526,7 +1525,7 @@ mod tests {
 
     #[test]
     fn request_paste_command_sets_only_paste_flag() {
-        // Regression (Task 106.1): the terminal right-click
+        // Regression: the terminal right-click
         // "Paste" menu sends `ViewportCommand::RequestPaste`. Before the fix
         // this command fell through to the catch-all log-and-ignore arm, so
         // right-click paste silently did nothing.
@@ -1608,7 +1607,7 @@ mod tests {
 
     #[test]
     fn is_blocked_key_covers_the_egui_blocked_set() {
-        // Task 114.5: a representative key from each blocked group.
+        // A representative key from each blocked group.
         assert!(is_blocked_key(KeyCode::PrintScreen));
         assert!(is_blocked_key(KeyCode::Pause));
         assert!(is_blocked_key(KeyCode::ContextMenu));
@@ -1636,7 +1635,7 @@ mod tests {
     fn is_blocked_key_does_not_intercept_normal_keys() {
         // egui delivers these keys today; the intercept must stay narrow
         // and never swallow them. CapsLock/NumLock/ScrollLock are no longer
-        // intercepted (Task 114 lock-state revert) — they fall through to
+        // intercepted — they fall through to
         // egui like any other normal-ish key (accepted gap: egui drops them).
         assert!(!is_blocked_key(KeyCode::CapsLock));
         assert!(!is_blocked_key(KeyCode::ScrollLock));
@@ -1693,7 +1692,7 @@ mod tests {
         );
     }
 
-    // ── Task 121 spike: `should_schedule_cursor_moved` ───────────────────
+    // ── `should_schedule_cursor_moved` ───────────────────────────────────
 
     #[test]
     fn should_schedule_cursor_moved_latched_forces_true_regardless_of_app_opinion() {
@@ -1714,7 +1713,7 @@ mod tests {
     #[test]
     fn should_schedule_cursor_moved_steady_not_needed_suppresses() {
         // Two consecutive "not needed" events (steady motion over static
-        // terminal content) -> suppress. This is the headline Task 121 case.
+        // terminal content) -> suppress. This is the headline case.
         assert!(!should_schedule_cursor_moved(false, false, false));
     }
 
@@ -1733,7 +1732,7 @@ mod tests {
         assert!(should_schedule_cursor_moved(false, false, true));
     }
 
-    // ── Task 124.3b review: `PointerMotionHistory` ────────────────────────
+    // ── `PointerMotionHistory` ───────────────────────────────────────────
 
     #[test]
     fn pointer_motion_history_starts_with_no_position() {
@@ -1801,7 +1800,7 @@ mod tests {
         // A conversion failure (`physical_to_logical_pos` returning `None`
         // for a non-finite/non-positive scale factor) unconditionally
         // overwrites the recorded position with `None`, matching the
-        // pre-124.3b bare-field behavior exactly -- the prior position is
+        // the old bare-field behavior exactly -- the prior position is
         // discarded, not preserved for a later `observe`.
         let mut history = PointerMotionHistory::default();
         history.observe(Some(egui::Pos2::new(1.0, 1.0)));
@@ -1818,14 +1817,14 @@ mod tests {
         assert_eq!(positions.previous, None);
     }
 
-    // ── 122.6: `CursorMoved` dispatch driven by a live `App`, not
+    // ── `CursorMoved` dispatch driven by a live `App`, not
     // hand-supplied booleans (`event_loop.rs:809-845`) ────────────────────
     //
     // The tests above pin `should_schedule_cursor_moved` in isolation, fed
     // literal `true`/`false`. These tests instead call the SAME function in
     // the SAME order the `CursorMoved` arm of `Handler::window_event` does,
     // fed by `App::pointer_motion_needs_repaint`'s REAL answer from a live
-    // `App` (`DummyApp`, configured per 122.6) — pinning the app-to-dispatch
+    // `App` (`DummyApp`, configured the same way) — pinning the app-to-dispatch
     // wiring itself, not just the pure helper.
     //
     // `Handler::window_event` cannot be called directly from a unit test:
@@ -1839,8 +1838,8 @@ mod tests {
     fn cursor_moved_dispatch_conservative_app_schedules_at_steady_state() {
         // The trait-default (conservative) app answers "needed" for every
         // position, so dispatch — fed that REAL answer, not a literal
-        // `true` — schedules every event, matching pre-Task-121 "every
-        // pointer motion repaints" behavior.
+        // `true` — schedules every event, matching the "every
+        // pointer motion repaints" default behavior.
         let app = DummyApp::default();
         let window_id = WindowId(winit::window::WindowId::dummy());
         let pos = egui::Pos2::new(4.0, 4.0);
@@ -1864,7 +1863,7 @@ mod tests {
     fn cursor_moved_dispatch_suppressing_app_suppresses_at_steady_state() {
         // A suppressing app answers "not needed"; once the edge-detect latch
         // (`previous_needed`) has also settled to `false`, dispatch fed that
-        // REAL answer suppresses the repaint — the headline Task 121 case,
+        // REAL answer suppresses the repaint — the headline case,
         // now proven against a live `App` instead of literal bools.
         let app = DummyApp {
             pointer_motion_needs_repaint: false,
@@ -1942,16 +1941,16 @@ mod tests {
         assert!(should_schedule_cursor_moved(true, false, current_needed));
     }
 
-    // ── Task 124.3a: `App::on_pointer_moved` dispatch, and
+    // ── `App::on_pointer_moved` dispatch, and
     // `pointer_button_event_for` (the `MouseInput` arm's mapping) ────────
 
     #[test]
     fn cursor_moved_dispatch_calls_on_pointer_moved_even_when_repaint_is_suppressed() {
-        // Same live-`App` pattern as the 122.6 tests above, but proving the
+        // Same live-`App` pattern as the tests above, but proving the
         // NEW hook: `App::on_pointer_moved` must fire for this event even
         // though the same app's `pointer_motion_needs_repaint` answer for
         // the identical position is `false` — the two axes are uncoupled
-        // (Task 124.3a), not one gating the other.
+        // not one gating the other.
         let mut app = DummyApp {
             pointer_motion_needs_repaint: false,
             ..Default::default()
@@ -2045,7 +2044,7 @@ mod tests {
         // Review correction: Back/Forward must convert (not be ignored), so
         // a physically-held Back/Forward button can still drive `?1002`
         // motion reporting via the existing unsupported-button fallback in
-        // `freminal::gui::mouse`'s encoders, matching pre-124.3a behavior.
+        // `freminal::gui::mouse`'s encoders, matching the pre-hook behavior.
         use winit::event::{ElementState, MouseButton};
 
         let mods = egui::Modifiers::default();
@@ -2067,10 +2066,10 @@ mod tests {
         );
     }
 
-    // ── Task 121 spike: `effective_repaint_delay` (liveness-critical) ────
+    // ── `effective_repaint_delay` (liveness-critical) ────────────────────
     //
     // This is the substitution that breaks egui's self-sustaining ~60fps
-    // re-arm loop. It is the highest-risk logic in the spike, so every branch
+    // re-arm loop. It is the highest-risk logic here, so every branch
     // is pinned here — especially the fallback, because getting that wrong
     // stalls the window instead of merely wasting a frame.
 
@@ -2104,9 +2103,9 @@ mod tests {
 
     #[test]
     fn effective_repaint_delay_fallback_is_never_faster_than_the_blink_period() {
-        // 121.12 perversity pin: the fallback must be `>= 500ms`, the
-        // cursor-blink period `app_impl.rs` schedules per-pane. Before this
-        // subtask the fallback was 250ms, so turning the cursor blink OFF
+        // Perversity pin: the fallback must be `>= 500ms`, the
+        // cursor-blink period `app_impl.rs` schedules per-pane. With a 250ms
+        // fallback, turning the cursor blink OFF
         // (no `app_requested_delay` at all -> this fallback) scheduled MORE
         // frames (4fps) than leaving the blink ON (2fps at the 500ms floor).
         // A future edit that shrinks this constant back below the blink

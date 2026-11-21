@@ -3,17 +3,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! The out-of-frame pointer-motion repaint decision (Task 122, subtask
-//! 122.5a; rewritten to cell-granular positional suppression by Task
-//! 124.3b).
+//! The out-of-frame pointer-motion repaint decision, with cell-granular
+//! positional suppression.
 //!
 //! `freminal-windowing`'s pointer fast path calls
 //! `App::pointer_motion_needs_repaint` on every `CursorMoved` event,
 //! **outside any egui frame**, to decide whether that motion requires a
 //! repaint at all. This module holds the pure decision chain behind that
 //! call — pane resolution, cell-granular position classification, and the
-//! composed true/false answer — factored out of `app_impl.rs` (subtask
-//! 122.5) and then out of that file entirely (subtask 122.5a) because it is
+//! composed true/false answer — factored out of `app_impl.rs` and then out of that file entirely because it is
 //! one coherent concept distinct from the `App` trait impl: it is pure, it
 //! runs before any frame exists, and it is headlessly unit-testable
 //! without constructing a `FreminalGui`/`PerWindowState`/`PaneTree`/`Pane`/
@@ -21,14 +19,14 @@
 //! self-contained gets a module whose path names it, rather than staying
 //! folded into the file it had already outgrown.
 //!
-//! # Task 124.3b: from pane-wide vetoes to cell-granular positions
+//! # From pane-wide vetoes to cell-granular positions
 //!
-//! Before this subtask, three of the predicate's terms were pane-WIDE
+//! Previously, three of the predicate's terms were pane-WIDE
 //! approximations: `has_urls`, `scroll_offset > 0`, and `any_pane_selecting`
 //! each forced a repaint for ANY motion anywhere in (or, for selection,
 //! anywhere in the whole window) the affected pane, because the exact
 //! cell/pixel geometry a precise test would need was not available outside
-//! a frame. Task 122.15/124.3a published that geometry
+//! a frame. That geometry is now published
 //! (`PanePointerReportInputs`: `terminal_rect`, `cell_size`, and now
 //! `scrollbar_hit_rect`), and `App::pointer_motion_needs_repaint` itself now
 //! carries the PREVIOUS pointer position alongside the current one
@@ -54,7 +52,7 @@ use freminal_common::geometry::{Point, Rect};
 use super::panes;
 
 /// Where one pointer position falls relative to a pane's published
-/// geometry (Task 124.3b).
+/// geometry.
 ///
 /// `Content`/`Gutter` carry cell coordinates using the SAME floor semantics
 /// as the live input path (`terminal/coords.rs`'s
@@ -135,7 +133,7 @@ const fn is_valid_cell_dimension(v: f32) -> bool {
 /// resolved" case, or when a test constructs `pos` outside the rect
 /// directly). Pure, so directly unit-testable.
 ///
-/// # Review fix: exact geometry, not an upper-bound approximation
+/// # Exact geometry, not an upper-bound approximation
 ///
 /// `Content` requires `geometry.terminal_rect.contains(pos)` EXACTLY —
 /// previously this only tested `pos.x >= terminal_rect.min.x`, which
@@ -144,10 +142,9 @@ const fn is_valid_cell_dimension(v: f32) -> bool {
 /// fell) as long as it was still inside `pane_rect`. `Rect::contains` is
 /// inclusive on all four edges (see its doc), so a position exactly on the
 /// `terminal_rect`/gutter-strip shared boundary resolves to `Content`
-/// (tested first), matching the pre-review boundary behavior of "the
-/// shared edge belongs to content, not gutter".
+/// (tested first): the shared edge belongs to content, not gutter.
 ///
-/// # Review fix (item 3): gutter classification mirrors `compute_command_block_hover_rows` exactly
+/// # Gutter classification mirrors `compute_command_block_hover_rows` exactly
 ///
 /// `Gutter` does NOT use `Rect::contains` (inclusive on all four edges) —
 /// it uses the SAME half-open test
@@ -197,8 +194,7 @@ pub(super) fn classify_pointer_position(
         };
     }
 
-    // Half-open, NOT `Rect::contains` — see this function's doc (review fix,
-    // item 3). Must stay byte-for-byte equivalent to
+    // Half-open, NOT `Rect::contains` — see this function's doc. Must stay byte-for-byte equivalent to
     // `compute_command_block_hover_rows`'s own bounds check.
     let in_gutter_strip = pos.x >= pane_rect.min.x
         && pos.x < terminal_rect.min.x
@@ -214,7 +210,7 @@ pub(super) fn classify_pointer_position(
     PointerRegion::Outside
 }
 
-/// Subtask 121.14: pure composition of the "some animation is in flight
+/// Pure composition of the "some animation is in flight
 /// somewhere in this window, independent of pointer position" term used by
 /// `pointer_motion_needs_repaint`. Extracted so it is unit-testable without
 /// a live `FreminalGui`/`PerWindowState`. Trivial (an OR of two already-
@@ -244,7 +240,7 @@ pub(super) struct PaneSnapshotInputs {
     /// Computed by the caller at the app boundary (`app_impl.rs`'s
     /// `resolve_pointer_observation_for`, which has `self.config` in
     /// scope) as an independent named field here, rather than as a `bool`
-    /// PARAMETER on [`resolve_pane_under_pointer`] — review fix:
+    /// PARAMETER on [`resolve_pane_under_pointer`]:
     /// `freminal-state-representation` forbids bool parameters outright,
     /// and the three source facts this ANDs together
     /// (`gutter_config_active`/`is_alternate_screen`/`command_blocks_non_empty`)
@@ -287,7 +283,7 @@ pub(super) struct PointerObservation {
     /// at all (including when no pane resolved, or the resolved pane has
     /// no scrollbar currently rendered).
     ///
-    /// Review fix: carries PANE IDENTITY, not just a bare `bool` — a plain
+    /// Carries PANE IDENTITY, not just a bare `bool` — a plain
     /// "am I inside *a* scrollbar hit rect" flag cannot distinguish moving
     /// from pane A's scrollbar into pane B's scrollbar (both `true`, so a
     /// bare-`bool` comparison would wrongly suppress) from staying inside
@@ -316,7 +312,7 @@ impl PointerObservation {
     /// The "could not resolve at all" result: [`PointerRegion::Unknown`],
     /// every other field at its quiet value.
     ///
-    /// Review fix: used where the pre-review code returned [`Self::no_pane`]
+    /// Used instead of [`Self::no_pane`]
     /// for a case that is NOT a legitimate "nowhere interesting" — the
     /// resolution chain found something real but could not read it. Two
     /// distinct call sites need exactly this:
@@ -372,11 +368,11 @@ impl PointerObservation {
 /// returned `None` for an id THIS SAME call's own hit-test just produced
 /// from `split_layout`/`zoomed_pane` — the tree changed out from under the
 /// layout, a bug state — so this resolves to [`PointerObservation::unresolved`]
-/// (review fix: previously `no_pane`, which is reserved for the legitimately
-/// "nowhere interesting" case; see that method's doc for why the distinction
+/// (not `no_pane`, which is reserved for the legitimately "nowhere
+/// interesting" case; see that method's doc for why the distinction
 /// matters).
 ///
-/// Review fix: no longer takes a `gutter_config_active: bool` /
+/// No longer takes a `gutter_config_active: bool` /
 /// `gutter_width_upper_bound_logical: f32` pair — gutter eligibility is now
 /// [`PaneSnapshotInputs::gutter_eligible`], a field computed by the caller
 /// at the app boundary, and gutter geometry classification uses the exact
@@ -384,11 +380,11 @@ impl PointerObservation {
 /// doc) rather than an upper-bound approximation. This function therefore
 /// takes no `bool` parameters at all (`freminal-state-representation`).
 ///
-/// Task 124.3b: this is called TWICE per `pointer_motion_needs_repaint`
+/// This is called TWICE per `pointer_motion_needs_repaint`
 /// call — once for the previous pointer position, once for the current —
-/// against the SAME frame's `split_layout`/`zoomed_pane` (review fix: now
-/// computed exactly ONCE by the caller and borrowed for both calls, rather
-/// than each call recomputing `PaneTree::layout` independently), so the two
+/// against the SAME frame's `split_layout`/`zoomed_pane` (computed exactly
+/// ONCE by the caller and borrowed for both calls, rather than each call
+/// recomputing `PaneTree::layout` independently), so the two
 /// resulting [`PointerObservation`]s are directly comparable by the
 /// `*_positional_force` functions.
 pub(super) fn resolve_pane_under_pointer(
@@ -439,7 +435,7 @@ pub(super) fn resolve_pane_under_pointer(
 /// call, resolved against the SAME frame's layout by
 /// `app_impl.rs`'s `resolve_pointer_observations`.
 ///
-/// # Review fix: named fields, not a same-typed tuple
+/// # Named fields, not a same-typed tuple
 ///
 /// `resolve_pointer_observations` previously returned
 /// `(PointerObservation, PointerObservation)` — a bare tuple of two values
@@ -510,7 +506,7 @@ fn endpoints_share_gutter_row(a: PointerObservation, b: PointerObservation) -> b
     }
 }
 
-/// Task 124.3b: does URL hover state need a repaint for this motion?
+/// Does URL hover state need a repaint for this motion?
 ///
 /// Replaces the old pane-wide `has_urls` veto (which forced a repaint for
 /// ANY motion anywhere in a pane containing at least one hyperlink) with
@@ -530,10 +526,10 @@ pub(super) fn url_positional_force(prev: PointerObservation, curr: PointerObserv
     (prev.has_urls || curr.has_urls) && !endpoints_share_content_cell(prev, curr)
 }
 
-/// Task 124.3b: does the command-block gutter's hover state need a repaint
+/// Does the command-block gutter's hover state need a repaint
 /// for this motion?
 ///
-/// Generalizes the Task 121 fix's already-positional single-position gutter
+/// Generalizes the already-positional single-position gutter
 /// test to the previous/current pair. Relevant only when at least one
 /// endpoint is classified [`PointerRegion::Gutter`] AND that endpoint's own
 /// pane is gutter-eligible this frame
@@ -549,7 +545,7 @@ pub(super) fn gutter_positional_force(prev: PointerObservation, curr: PointerObs
     relevant && !endpoints_share_gutter_row(prev, curr)
 }
 
-/// Task 124.3b: does the scrollbar's hover state need a repaint for this
+/// Does the scrollbar's hover state need a repaint for this
 /// motion?
 ///
 /// Replaces the old pane-wide `scroll_offset > 0` veto with an exact
@@ -562,10 +558,10 @@ pub(super) fn gutter_positional_force(prev: PointerObservation, curr: PointerObs
 /// crossing directly from one pane's scrollbar into a different pane's
 /// (`Some(a)` -> `Some(b)`, `a != b`).
 ///
-/// # Review fix: pane identity, not a bare bool
+/// # Pane identity, not a bare bool
 ///
-/// The pre-review version compared a bare `bool` ("is this endpoint inside
-/// *a* scrollbar hit rect"), which cannot distinguish "moved from pane A's
+/// A bare `bool` ("is this endpoint inside
+/// *a* scrollbar hit rect") cannot distinguish "moved from pane A's
 /// scrollbar into pane B's scrollbar" (both `true` under the bare-bool
 /// test, so it would have wrongly suppressed) from "stayed inside pane A's
 /// scrollbar the whole time" (also both `true`, and the case that
@@ -581,7 +577,7 @@ pub(super) fn scrollbar_boundary_force(prev: PointerObservation, curr: PointerOb
     prev.scrollbar_pane != curr.scrollbar_pane
 }
 
-/// Task 124.3b: does an in-progress selection drag need a repaint for this
+/// Does an in-progress selection drag need a repaint for this
 /// motion?
 ///
 /// Replaces the old window-level `any_pane_selecting` veto (which forced a
@@ -614,7 +610,7 @@ pub(super) fn selection_positional_force(
     }
 }
 
-/// Task 124.3b: `Unknown` geometry may only ever cause a repaint, never
+/// `Unknown` geometry may only ever cause a repaint, never
 /// suppress one.
 ///
 /// `true` iff either endpoint classified to [`PointerRegion::Unknown`]
@@ -689,7 +685,7 @@ pub(super) struct PointerMotionInputs {
 }
 
 /// The composed decision behind `App::pointer_motion_needs_repaint`'s
-/// freminal-side implementation (Task 124.3b). Extracted as a pure function
+/// freminal-side implementation. Extracted as a pure function
 /// over already-computed signals so it is unit-testable without a live
 /// `FreminalGui`/windowing stack.
 ///
@@ -725,7 +721,7 @@ mod tests {
     };
     use crate::gui::panes::PaneIdGenerator;
 
-    // ── Subtask 121.14: `animation_in_flight_composed` ───────────────────
+    // ── `animation_in_flight_composed` ───────────────────
 
     #[test]
     fn animation_in_flight_composed_both_false_is_false() {
@@ -789,7 +785,7 @@ mod tests {
 
     #[test]
     fn classify_content_wins_the_shared_boundary_with_gutter() {
-        // Review fix: `Content` is tested (and matched) FIRST, so a
+        // `Content` is tested (and matched) FIRST, so a
         // position exactly on the terminal_rect/gutter_rect shared edge
         // (x == terminal_rect.min.x == 20) resolves to Content, not
         // Gutter -- `Rect::contains` is inclusive on all four edges, so
@@ -812,7 +808,7 @@ mod tests {
 
     #[test]
     fn classify_gutter_bottom_edge_is_outside_not_gutter() {
-        // Review fix (item 3): the gutter strip is half-open on `y`, exactly
+        // The gutter strip is half-open on `y`, exactly
         // like `compute_command_block_hover_rows`'s own
         // `y >= terminal_rect.max.y` bound -- a position exactly on
         // `terminal_rect.max.y` (100, this fixture), even though it is
@@ -865,7 +861,7 @@ mod tests {
         assert_eq!(region, PointerRegion::Unknown);
     }
 
-    // ── Review fix: exact `terminal_rect` containment, not an upper bound ──
+    // ── Exact `terminal_rect` containment, not an upper bound ──
     //
     // A pane where the terminal content rect leaves real padding on the
     // pane's right and bottom edges too (not just the left/gutter side), so
@@ -887,10 +883,10 @@ mod tests {
 
     #[test]
     fn classify_outside_beyond_terminal_rect_max_x_even_though_inside_pane_rect() {
-        // Before the review fix, `Content` only tested `pos.x >=
-        // terminal_rect.min.x`, so x=110 (past terminal_rect.max.x=100 but
-        // still inside pane_rect's max.x=120) was wrongly classified as
-        // Content. The fix requires exact `terminal_rect.contains(pos)`.
+        // `Content` requires exact `terminal_rect.contains(pos)`: x=110 is
+        // past terminal_rect.max.x=100 but still inside pane_rect's
+        // max.x=120, and must not be classified as Content (testing only
+        // `pos.x >= terminal_rect.min.x` would).
         let region = classify_pointer_position(
             point(110.0, 10.0),
             padded_pane_rect(),
@@ -925,7 +921,7 @@ mod tests {
     #[test]
     fn classify_gutter_exact_bottom_edge_is_outside_with_padding() {
         // x=5 is within the gutter strip [0, 20); y=80 is exactly
-        // `terminal_rect.max.y` (padded fixture) -- half-open (item 3), so
+        // `terminal_rect.max.y` (padded fixture) -- half-open, so
         // this is the boundary case itself, not merely "further past" it
         // like the sibling test below.
         let region = classify_pointer_position(
@@ -940,7 +936,7 @@ mod tests {
     fn classify_outside_gutter_x_range_but_beyond_terminal_rects_y_bounds() {
         // x=5 is within the gutter strip [0, 20); y=90 is past
         // terminal_rect.max.y=80 but still inside pane_rect (max.y=100).
-        // Review fix: the gutter strip shares terminal_rect's Y bounds
+        // The gutter strip shares terminal_rect's Y bounds
         // exactly, so this is Outside, not Gutter.
         let region = classify_pointer_position(
             point(5.0, 90.0),
@@ -1047,7 +1043,7 @@ mod tests {
 
     #[test]
     fn resolve_pane_under_pointer_lookup_miss_resolves_to_unresolved_unknown_not_quiet_outside() {
-        // Review fix: a hit-tested pane whose id came from THIS SAME call's
+        // A hit-tested pane whose id came from THIS SAME call's
         // own layout, but whose data cannot be looked up, is a bug state
         // (the tree changed out from under the layout) -- Unknown, not the
         // legitimately-quiet `no_pane`/Outside case.
@@ -1087,7 +1083,7 @@ mod tests {
 
     #[test]
     fn resolve_pane_under_pointer_gutter_eligible_passes_through_pane_snapshot_inputs_verbatim() {
-        // Review fix: gutter eligibility is no longer computed inside
+        // Gutter eligibility is no longer computed inside
         // `resolve_pane_under_pointer` from a `gutter_config_active: bool`
         // parameter (removed) plus pane-state fields -- it is now a single
         // named `PaneSnapshotInputs::gutter_eligible` field the caller
@@ -1388,7 +1384,7 @@ mod tests {
 
     #[test]
     fn scrollbar_boundary_force_crossing_directly_from_one_panes_scrollbar_to_anothers_forces() {
-        // Review fix: this is the case a bare `bool` comparison gets wrong
+        // This is the case a bare `bool` comparison gets wrong
         // -- both endpoints are "inside a scrollbar hit rect" (so a
         // bare-bool `!=` would see no change and suppress), but they are
         // DIFFERENT panes' scrollbars, which must force exactly like any
@@ -1671,14 +1667,14 @@ mod tests {
         ));
     }
 
-    // ── Composed invariant with `pty_mouse_report.rs` (Task 124.3b) ───────
+    // ── Composed invariant with `pty_mouse_report.rs` ───────
     //
     // `pty_mouse_report.rs`'s
     // `sgr_pixels_two_sub_cell_moves_produce_two_distinct_reports_and_no_third_repeat`
     // proves the DELIVERY half: two motions within one 8x16 cell
     // ((10.0, 10.0) then (11.0, 10.0), both floor to `Content { col: 1, row: 0 }`)
     // each produce a distinct `?1016` PTY report, because pixel-granular
-    // report encoding (124.3a) is independent of this module's
+    // report encoding is independent of this module's
     // cell-granular repaint gate. This test proves the other half of the
     // SAME composed invariant: those same two positions, resolved through
     // THIS module's classifier against THIS module's decision chain,
@@ -1747,23 +1743,23 @@ mod tests {
     }
 }
 
-/// Subtask 124.13, updated by Task 124.3b: the pointer-motion gate's
+/// The pointer-motion gate's
 /// suppression rate, per scenario — now driven by sequential
 /// previous/current position pairs through the positional chain
 /// (`resolve_pane_under_pointer` -> the `*_positional_force` functions ->
-/// `pointer_motion_needs_repaint_decision`) instead of the pre-124.3b
-/// pane-wide vetoes the original 124.13 table measured.
+/// `pointer_motion_needs_repaint_decision`) instead of the old
+/// pane-wide vetoes an earlier version of this table measured.
 ///
 /// **Measurement, not behaviour.** Nothing here changes a decision; it
 /// drives the real positional chain over a deterministic sweep of
 /// sequential pointer-position pairs and counts what comes out.
 ///
-/// # What changed from the original 124.13 table
+/// # What changed from the original table
 ///
 /// The original table's two headline findings — "one hyperlink anywhere
 /// collapses suppression to near zero" and "a nonzero scroll offset is an
 /// identical pane-wide veto" — described the OLD `has_urls`/
-/// `scroll_offset > 0` pane-wide vetoes this subtask removed. Both
+/// `scroll_offset > 0` pane-wide vetoes that were removed. Both
 /// scenarios below now demonstrate the replacement: a hyperlink-bearing (or
 /// scrolled-back) pane suppresses steady motion within one cell/scrollbar
 /// state exactly as well as a clean pane, and only forces on an actual cell
@@ -1800,8 +1796,7 @@ mod suppression_rates {
 
     /// One scenario's outcome.
     ///
-    /// `same_content_cell_pairs`/`same_content_cell_suppressed` (review fix,
-    /// item 5) isolate the specific sub-population the hyperlink scenario's
+    /// `same_content_cell_pairs`/`same_content_cell_suppressed` isolate the specific sub-population the hyperlink scenario's
     /// headline claim is actually about: checked pairs that resolved to the
     /// SAME pane at the SAME [`PointerRegion::Content`] cell (no cell
     /// crossing at all). `checks`/`suppressed` alone cannot distinguish "a
@@ -1830,7 +1825,7 @@ mod suppression_rates {
     /// `layout`/`inputs` (a single steady pane, matching how a real
     /// wandering-pointer sweep observes one pane's state).
     ///
-    /// # Review fix (item 5): explicit sub-cell companion moves
+    /// # Explicit sub-cell companion moves
     ///
     /// The coarse 20-point lattice stride is larger than the 8x16 fixture
     /// cell, so on its own the lattice crosses a content cell on almost
@@ -1900,7 +1895,7 @@ mod suppression_rates {
 
                 check_pair(prev, current);
 
-                // Review fix (item 5): a guaranteed-same-cell companion
+                // A guaranteed-same-cell companion
                 // move, dead center of the cell `current` just resolved to
                 // (skipped for Gutter/Outside/Unknown, which have no
                 // "center" this fixture geometry can compute) — see this
@@ -1959,7 +1954,7 @@ mod suppression_rates {
 
     /// Baseline: nothing hover-sensitive on screen, real geometry published.
     ///
-    /// # Review fix (item 5): truthful expectation, not "a high fraction"
+    /// # Truthful expectation, not "a high fraction"
     ///
     /// A clean pane has no positional visual source at all: `has_urls`,
     /// `gutter_eligible`, and `scrollbar_hit_rect` are all off/`None`, and
@@ -1987,13 +1982,13 @@ mod suppression_rates {
         );
     }
 
-    /// **The replacement for 124.13's headline finding.** The removed
+    /// **The replacement for the original headline finding.** The removed
     /// pane-wide `has_urls` veto forced EVERY motion check for a
     /// hyperlink-bearing pane, regardless of position — a suppression rate
     /// of exactly zero. `url_positional_force` instead only forces on an
     /// actual cell crossing, so same-cell steps in the sweep now suppress.
     ///
-    /// # Review fix (item 5): exact same-cell counters, not a loose rate
+    /// # Exact same-cell counters, not a loose rate
     ///
     /// `urls.suppressed > 0` alone can ALSO be satisfied by lattice pairs
     /// that land entirely OUTSIDE the pane (both endpoints `no_pane`/
@@ -2089,9 +2084,8 @@ mod suppression_rates {
 
     /// The gutter strip remains cheap: enabling it (with command blocks
     /// present) only costs the strip itself, not the whole pane, exactly as
-    /// it did before 124.3b (this term was already positional — 124.3b
-    /// generalizes it to the previous/current pair rather than changing its
-    /// shape).
+    /// it did before (this term was already positional; it was generalized
+    /// to the previous/current pair rather than changing its shape).
     #[test]
     fn the_gutter_veto_remains_positional_and_therefore_cheap() {
         let clean = sweep(clean_with_geometry(), SelectingPanes::None);

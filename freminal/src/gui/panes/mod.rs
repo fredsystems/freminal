@@ -42,8 +42,8 @@ use super::view_state::ViewState;
 /// `Pane::recent_commands` is a bounded ring buffer; once it reaches this cap,
 /// the oldest entry is dropped each time a new finished-command event arrives.
 /// The cap exists so a long-running shell cannot grow GUI memory without
-/// bound, and matches the per-pane history quota called out in
-/// Task 72.9.
+/// bound, and matches the per-pane history quota for
+/// recent commands.
 pub const RECENT_COMMANDS_CAP: usize = 64;
 
 // ── PaneId ───────────────────────────────────────────────────────────
@@ -113,9 +113,7 @@ impl Default for PaneIdGenerator {
 /// A single terminal pane.
 ///
 /// Each pane owns an independent set of channels to its PTY consumer thread
-/// and a shared snapshot handle. These are the same fields that currently
-/// live on `Tab`; in subtask 58.3, `Tab` will be refactored to hold a
-/// `PaneTree` of `Pane` instances instead.
+/// and a shared snapshot handle.
 ///
 /// The pane tree lives on the GUI thread. PTY threads are unaware of the
 /// tree structure — they just own their `TerminalEmulator` and publish
@@ -131,7 +129,7 @@ pub struct Pane {
     ///
     /// Unbounded on purpose: it carries keystrokes, which must never be
     /// dropped.  The replies the GUI sends on it are bounded at the source
-    /// instead, by the per-pane `window_cmd_budget` report cap (148.C9).
+    /// instead, by the per-pane `window_cmd_budget` report cap.
     pub input_tx: Sender<InputEvent>,
 
     /// Strong handle to a clone of [`Self::input_tx`], existing purely so
@@ -205,7 +203,7 @@ pub struct Pane {
     pub echo_off: Arc<AtomicBool>,
 
     /// Counters for window commands sent by the PTY thread and not yet drained
-    /// by the GUI (148.C9, 148.RC2).  The GUI releases one per command it drains
+    /// by the GUI.  The GUI releases one per command it drains
     /// in `crate::gui::rendering::handle_window_manipulation`; the PTY thread
     /// stops queueing a class at its cap (`MAX_OUTSTANDING_REPORTS`,
     /// `MAX_OUTSTANDING_VIEWPORT_COMMANDS`).
@@ -236,7 +234,7 @@ pub struct Pane {
     pub(crate) render_cache: PaneRenderCache,
 
     /// Receiver for [`CommandFinishedEvent`]s emitted by this pane's PTY
-    /// consumer thread (Task 72.9).
+    /// consumer thread.
     ///
     /// Drained once per frame by the GUI; new events are pushed onto
     /// [`Self::recent_commands`] and, when the owning tab is not active,
@@ -247,13 +245,12 @@ pub struct Pane {
     ///
     /// Capped at [`RECENT_COMMANDS_CAP`]; the oldest entry is dropped when the
     /// cap is reached. Populated by draining
-    /// [`Self::command_event_rx`] each frame. Consumed by Task 76 (notification
-    /// formatting), Task 72.10 (fold/collapse UI), and a future command-palette
-    /// task.
+    /// [`Self::command_event_rx`] each frame. Consumed by notification
+    /// formatting, the fold/collapse UI, and the command-history palette.
     pub recent_commands: VecDeque<CommandBlock>,
 
-    /// Pre-loaded shell-history seed for the Quick Command History Palette
-    /// (Task 72.15).  Populated asynchronously by
+    /// Pre-loaded shell-history seed for the Quick Command History Palette.
+    /// Populated asynchronously by
     /// [`crate::gui::shell_history::spawn_loader`] at PTY spawn time and
     /// optionally re-published by
     /// [`crate::gui::shell_history::spawn_loader_with_path`] when the
@@ -291,7 +288,7 @@ pub struct Pane {
     /// [`CommandBlockId`].  Populated by the GUI when a finished
     /// [`CommandBlock`] arrives and the command's rows are still inside
     /// the snapshot's visible window, so the Quick Command History
-    /// Palette (Task 72.15) can present command text synchronously
+    /// Palette can present command text synchronously
     /// without re-requesting it from the PTY thread.
     ///
     /// Entries are evicted in lock-step with [`Self::recent_commands`] --
@@ -360,7 +357,7 @@ impl Pane {
     /// new block is appended.  The oldest entry's text (if any) is also
     /// evicted from [`Self::command_texts`] so the cache stays in step with
     /// the ring buffer.  Used by both the per-frame command-event drain in
-    /// the GUI (Task 72.9) and by unit tests.
+    /// the GUI and by unit tests.
     pub fn push_recent_command(&mut self, block: CommandBlock) {
         if self.recent_commands.len() >= RECENT_COMMANDS_CAP
             && let Some(dropped) = self.recent_commands.pop_front()
@@ -512,7 +509,7 @@ pub struct SplitBorder {
 }
 
 /// The sub-segment of a split divider that should be highlighted to
-/// _surround_ the active pane (Task 109).
+/// _surround_ the active pane.
 ///
 /// Returns the portion of `border.rect` that lies along an edge of
 /// `active_rect`, drawn full-length in the active color, or `None` when the
@@ -1564,7 +1561,7 @@ const fn split_rect(rect: Rect, direction: SplitDirection, ratio: f32) -> (Rect,
 }
 
 /// Decide whether a **non-active** pane should receive keyboard focus this
-/// frame (Task 110).
+/// frame.
 ///
 /// The caller is responsible for only invoking this for non-active panes (the
 /// active pane never re-focuses itself). A non-active pane is focused when
@@ -1586,7 +1583,7 @@ pub const fn should_focus_inactive_pane(
 }
 
 /// Find which pane (if any) a point lands in, given the current pane
-/// layout (issue #453).
+/// layout.
 ///
 /// Used on pane-border drag release to determine which pane should receive
 /// focus, since focus-follows-mouse is frozen for the duration of the drag
@@ -1610,7 +1607,7 @@ mod tests {
     use super::*;
     use freminal_common::buffer_states::row_number::RowNumber;
 
-    // ── should_focus_pane tests (Task 110) ───────────────────────────
+    // ── should_focus_pane tests ───────────────────────────
 
     #[test]
     fn click_focuses_inactive_pane_regardless_of_ffm() {
@@ -1635,7 +1632,7 @@ mod tests {
         assert!(!should_focus_inactive_pane(false, false, false));
     }
 
-    // ── pane_at_pos tests (issue #453) ───────────────────────────────
+    // ── pane_at_pos tests ───────────────────────────────
 
     #[test]
     fn pane_at_pos_finds_containing_pane() {
@@ -1819,7 +1816,7 @@ mod tests {
         assert_eq!(pane2.view_state.scroll_offset, 0);
     }
 
-    // ── reply handle liveness (Task 130.8) ───────────────────────────
+    // ── reply handle liveness ───────────────────────────
 
     /// A `Pane` built by `from_channels` holds the only strong handles on its
     /// input channel (`input_tx` and `reply_tx`). Dropping the pane must
@@ -1873,7 +1870,7 @@ mod tests {
         );
     }
 
-    // ── recent_commands ring buffer (Task 72.9) ──────────────────────
+    // ── recent_commands ring buffer ──────────────────────
 
     #[test]
     fn push_recent_command_below_cap_appends_in_order() {
@@ -2713,7 +2710,7 @@ mod tests {
 
     #[test]
     fn split_borders_active_subtree_pins_first_second_and_neither() {
-        // Pins `ActiveSubtree`'s three-way classification (Task 122.3a) in
+        // Pins `ActiveSubtree`'s three-way classification in
         // one place, isolated from the geometry/direction assertions that
         // `split_borders_nested_tree_returns_all_borders` already covers.
         //
@@ -2767,7 +2764,7 @@ mod tests {
         );
     }
 
-    // ── active_highlight_segment (Task 109) ──────────────────────────
+    // ── active_highlight_segment ──────────────────────────
     //
     // The 3-pane example from the plan:
     //   |----------------|

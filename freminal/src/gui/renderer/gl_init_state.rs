@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Where a renderer is in its GL-object lifecycle (Task 125.C16).
+//! Where a renderer is in its GL-object lifecycle.
 //!
 //! One concept: whether a renderer's `init` has run, succeeded, or failed.
 //! A failed `init` is **latched** so the paint callbacks that lazily

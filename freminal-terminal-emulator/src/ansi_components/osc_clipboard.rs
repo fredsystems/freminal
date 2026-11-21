@@ -10,7 +10,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// Maximum decoded size, in bytes, of an OSC 52 clipboard write.
 ///
 /// A set whose decoded payload is larger is dropped with no `SetClipboard`
-/// emitted (Task 148.16, GHSA-v2hw-gcg8-2rfr). The parser's accumulation cap for
+/// emitted. The parser's accumulation cap for
 /// OSC 52 is derived from this value; see
 /// [`MAX_OSC_CLIPBOARD_BYTES`](crate::ansi_components::osc::MAX_OSC_CLIPBOARD_BYTES).
 pub const MAX_OSC52_WRITE_BYTES: usize = 1024 * 1024;

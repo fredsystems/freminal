@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! Auto-wrap at the bottom of the scroll region on the alternate screen honours
-//! DECLRMM (Task 148.C12), driven end to end through the escape-sequence
+//! DECLRMM, driven end to end through the escape-sequence
 //! parser.
 //!
 //! xterm's `xtermScroll` (`util.c`) confines the scroll to the left/right

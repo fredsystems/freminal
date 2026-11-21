@@ -3,8 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! The cursor column never leaves `0..=width` (Task 148.3,
-//! GHSA-8f32-mj37-fw6v).
+//! The cursor column never leaves `0..=width`.
 //!
 //! `x == width` is the legitimate pending-wrap position; anything greater is a
 //! stranded cursor that a later CBT used to slice the tab-stop table with,

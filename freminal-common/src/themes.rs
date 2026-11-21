@@ -171,11 +171,10 @@ impl ThemePalette {
         }
     }
 
-    /// Resolve the fill color for an OSC 9;4 [`ProgressState`] (issue #507,
-    /// phase B2).
+    /// Resolve the fill color for an OSC 9;4 [`ProgressState`].
     ///
     /// Deliberately reuses the **existing** gutter overrides/fallbacks
-    /// (per the phase B2 plan: no new `ThemePalette` fields for ~25
+    /// (no new `ThemePalette` fields for ~25
     /// themes) rather than introducing dedicated `progress_*` fields. The
     /// mapping mirrors the Windows taskbar (`ITaskbarList3`) progress-state
     /// colors this `ConEmu`-style protocol was modelled on -- see
@@ -228,7 +227,7 @@ impl ThemePalette {
     /// Priority ladder (per the v0.10.0 chrome-styling design decision):
     ///
     /// 1. **Authored** — the theme's explicit `chrome_*` field, if `Some`.
-    ///    Vetted themes transcribe these from upstream (112.3d).
+    ///    Vetted themes transcribe these from upstream.
     /// 2. **Best-fit** — reuse a color the palette already defines that suits
     ///    the role (e.g. `selection_bg` for the active fill, `background` for
     ///    the surface). No invented hues.
@@ -2115,7 +2114,7 @@ mod tests {
         assert_eq!(t.gutter_color_for(CommandStatus::Unknown), t.ansi[7]);
     }
 
-    // --- Progress-state color resolver (issue #507, phase B2) ------------
+    // --- Progress-state color resolver ------------
 
     #[test]
     fn progress_color_for_falls_back_to_ansi_when_unset() {
@@ -2132,9 +2131,9 @@ mod tests {
 
     #[test]
     fn progress_color_for_reuses_gutter_overrides_when_set() {
-        // No dedicated `progress_*` fields exist (deliberately, per the
-        // phase B2 plan) -- setting the gutter overrides must be enough to
-        // recolor the matching progress states too.
+        // No dedicated `progress_*` fields exist (deliberately) -- setting the
+        // gutter overrides must be enough to recolor the matching progress
+        // states too.
         let mut t = CATPPUCCIN_MOCHA;
         t.gutter_success = Some((1, 2, 3));
         t.gutter_failure = Some((4, 5, 6));
@@ -2173,11 +2172,11 @@ mod tests {
         }
     }
 
-    // --- Chrome-role resolver (112.3c) -----------------------------------
+    // --- Chrome-role resolver -----------------------------------
 
     #[test]
     fn role_less_themes_have_no_authored_chrome_roles() {
-        // Raw terminal palettes (and any theme not yet transcribed in 112.3d)
+        // Raw terminal palettes (and any theme not yet transcribed)
         // intentionally leave all seven chrome roles `None` and rely on the
         // resolver. This guards against accidentally authoring partial roles
         // on a theme meant to be fully resolver-driven.
@@ -2242,7 +2241,7 @@ mod tests {
 
     #[test]
     fn vetted_themes_carry_authored_chrome_roles() {
-        // Themes transcribed in 112.3d must return their authored values,
+        // Themes with authored chrome roles must return their authored values,
         // not the resolver fallback.
         for slug in [
             "catppuccin-mocha",

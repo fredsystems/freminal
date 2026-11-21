@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Phase 13: Exhaustive CSI command coverage (movement, erase, insert/delete, scroll, tabs)
+//! Exhaustive CSI command coverage (movement, erase, insert/delete, scroll, tabs)
 
 use freminal_terminal_emulator::ansi_components::csi::AnsiCsiParser;
 

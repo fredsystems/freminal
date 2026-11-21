@@ -297,7 +297,7 @@ pub(super) fn is_method_timeout(error: &zbus::Error) -> bool {
 /// [`zbus::block_on`] on the calling thread. On a timeout the pending call is
 /// dropped, which ends the wait for its reply: nothing is left behind (an
 /// earlier version waited on a detached helper thread, which leaked one thread
-/// per timed-out probe while the daemon stayed hung; 138.C26). The error is
+/// per timed-out probe while the daemon stayed hung). The error is
 /// the one zbus itself uses for a timeout, see [`is_method_timeout`].
 fn call_no_auto_start<B, R>(
     connection: &Connection,
