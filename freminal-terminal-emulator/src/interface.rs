@@ -148,8 +148,7 @@ const SYNC_UPDATES_TIMEOUT_MS: u64 = 200;
 /// query reply carries the clipboard contents (only when
 /// `allow_clipboard_read` is on), and a reply routed back from the GUI can be
 /// larger than a DA answer. A message bound alone would therefore allow this
-/// capacity times the largest reply, which is why the byte budget exists
-/// (148.C9).
+/// capacity times the largest reply, which is why the byte budget exists.
 ///
 /// The capacity is generous because a legitimate client can have hundreds of
 /// replies outstanding at once (for example many kitty graphics transmissions
@@ -179,20 +178,20 @@ pub const MAX_QUEUED_REPLY_BYTES: usize = 4 * 1024 * 1024;
 /// The result is a permanently stale screen: an application that wraps a
 /// scroll in `?2026h` … `?2026l` loses the whole update whenever a PTY read
 /// boundary falls between the scroll and the closing `?2026l`, and nothing
-/// redraws until an unrelated event forces a rebuild (issue #490).
+/// redraws until an unrelated event forces a rebuild.
 ///
 /// This type closes that gap by making the signal **level-triggered across
 /// skipped frames**: an edge observed while `skip_draw` is set is accumulated
 /// here and replayed on the first snapshot the GUI will actually render.
 ///
 /// This type used to carry a parallel `content` flag for the equivalent
-/// `content_changed` bool. Task 124.12 deleted both `content_changed` and
-/// this deferral for it: `TerminalSnapshot::row_epochs` (Task 124.11) is a
+/// `content_changed` bool. Both that bool and this deferral for it are gone:
+/// `TerminalSnapshot::row_epochs` is a
 /// monotonic per-row stamp compared against a baseline the *consumer* holds,
 /// not an edge diffed against the previous snapshot, so a skipped frame
-/// cannot lose it — there is nothing left to defer. The #490 content case is
-/// not an oversight here; it was fixed by removing the bool that needed
-/// deferring, not by extending the deferral.
+/// cannot lose it — there is nothing left to defer. The content case is not an
+/// oversight here; it was fixed by removing the bool that needed deferring,
+/// not by extending the deferral.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct DeferredChangeFlags {
     /// A `scroll_changed` edge that has not yet reached a rendered snapshot.
@@ -244,8 +243,8 @@ pub struct TerminalEmulator {
     /// also must not force a needless re-flatten when returning to a buffer
     /// whose restored content is byte-identical to what we last rendered on
     /// it. So instead of dropping the cache on a switch, we **swap** it with
-    /// the stashed cache for the buffer we are switching *to* (issue #405,
-    /// alt/primary one-frame tax). The very next flatten then compares
+    /// the stashed cache for the buffer we are switching *to* (avoiding a
+    /// one-frame full redraw on every alt/primary switch). The very next flatten then compares
     /// against the correct same-buffer baseline, and `switch_to_primary` restoring
     /// byte-identical primary rows no longer forces a full-flatten redraw.
     ///
@@ -308,8 +307,8 @@ pub struct TerminalEmulator {
     /// Change signals owed to the GUI from snapshots it was told to skip.
     ///
     /// See [`DeferredChangeFlags`] for why edge-triggered change detection is
-    /// unsound in the presence of `skip_draw`, and issue #490 for the user-
-    /// visible symptom.
+    /// unsound in the presence of `skip_draw`, and the permanently stale
+    /// screen it can cause.
     deferred_changes: DeferredChangeFlags,
 }
 
@@ -407,14 +406,14 @@ impl TerminalEmulator {
             sudo_terminfo,
             term,
         } = spawn_env;
-        // Two channels feed the PTY writer thread (GHSA-6cxq-f7hx-92v2):
+        // Two channels feed the PTY writer thread:
         // `write_tx`, unbounded, carries user input; `reply_tx`, bounded,
         // carries terminal-generated replies, so output made of queries cannot
         // grow memory without bound when the child does not read its tty.
         let (write_tx, read_rx) = unbounded();
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(REPLY_QUEUE_CAPACITY);
         // Bytes queued on `reply_tx` and not yet written; shared by the handler
-        // (adds) and the PTY writer thread (subtracts) -- see 148.C9.
+        // (adds) and the PTY writer thread (subtracts).
         let queued_reply_bytes = Arc::new(AtomicUsize::new(0));
         // Latest-value slot for DECCOLM resizes, shared by the handler (stores)
         // and the PTY writer thread (takes), so repeated column-mode toggles
@@ -550,7 +549,7 @@ impl TerminalEmulator {
         // terminal behavior.  This must clear BOTH the scroll offset AND the
         // fold extra-rows request: leaving `extra_flatten_rows` stale keeps the
         // flattened window extended above the live bottom against a buffer that
-        // no longer has a fold there (Task 113, Bug E).  `reset_scroll_offset`
+        // no longer has a fold there (stale extra rows).  `reset_scroll_offset`
         // clears both; the next snapshot then carries scroll_offset = 0 and
         // window_extra_rows = 0 so the GUI's ViewState is synced automatically.
         //
@@ -822,7 +821,7 @@ impl TerminalEmulator {
         // switching to: `previous_visible_snap` becomes that buffer's last-seen
         // baseline (or `None` if we've never rendered it), and the buffer we
         // just left is stashed for when we return. This preserves same-buffer
-        // change detection across the switch (issue #405, alt/primary tax).
+        // change detection across the switch.
         if is_alternate_screen != self.previous_was_alternate {
             std::mem::swap(
                 &mut self.previous_visible_snap,
@@ -897,7 +896,7 @@ impl TerminalEmulator {
         self.apply_sync_updates_timeout();
 
         // Expire a stale OSC 9;4 progress report before reading it below —
-        // see `TerminalHandler::expire_stale_progress` (issue #507). This
+        // see `TerminalHandler::expire_stale_progress`. This
         // covers every snapshot built in response to PTY or GUI activity.
         // A fully idle pane (no further PTY/GUI activity to trigger a
         // fresh `build_snapshot` call) is covered separately: the PTY
@@ -968,7 +967,7 @@ impl TerminalEmulator {
                 .visible_line_widths_extended(scroll_offset, extra_rows),
         );
 
-        // ── Per-row content epochs (Task 124.11) ─────────────────────────────
+        // ── Per-row content epochs ───────────────────────────────────────────
         //
         // Must run after `flatten_visible` above and with the same
         // `(scroll_offset, extra_rows)`. `visible_row_epochs` reads the
@@ -989,7 +988,7 @@ impl TerminalEmulator {
         // `Buffer::visible_as_tchars_and_tags_extended*` misses that
         // fingerprint, takes the full-merge fallback, and replaces the cache.
         // `TerminalHandler::search_corpus` (Ctrl-F) used to be exactly such a
-        // caller (Task 124.C6): it always requested the plain `extra_rows ==
+        // caller: it always requested the plain `extra_rows ==
         // 0` window regardless of this snapshot path's fold state, so a single
         // search replaced `merge_cache` with the mismatched window.
         // `flatten_visible` above tolerates that —
@@ -1285,7 +1284,7 @@ mod tests {
         );
     }
 
-    /// Task 125.17: a selection named by logical row numbers keeps copying the
+    /// A selection named by logical row numbers keeps copying the
     /// same text after rows have been evicted from the front, and a start row
     /// that has itself been evicted clamps to the oldest retained row.
     #[test]
@@ -1376,7 +1375,7 @@ mod tests {
 
     #[test]
     fn handle_incoming_data_clears_extra_rows() {
-        // Task 113, Bug E: new output must clear the fold extra-rows request,
+        // New output must clear the fold extra-rows request,
         // not just the scroll offset.  Here the offset is already 0 but a fold
         // has extended the window (extra_flatten_rows > 0); new data must still
         // snap fully to the live bottom.
@@ -1540,7 +1539,7 @@ mod tests {
 
     #[test]
     fn search_corpus_over_open_fold_does_not_thrash_idle_row_epochs() {
-        // Task 124.C6 regression: `search_corpus` used to flatten the visible
+        // Regression: `search_corpus` used to flatten the visible
         // window via the incremental/cached merge path with `extra_rows ==
         // 0`, always. When the GUI's snapshot path had a command-block fold
         // open (`extra_rows > 0`), that search overwrote
@@ -1842,7 +1841,7 @@ mod tests {
 
     #[test]
     fn build_snapshot_reentered_alternate_screen_is_blank_and_primary_survives() {
-        // Task 131.5: the alternate screen's contents persist while parked, so
+        // The alternate screen's contents persist while parked, so
         // the blank screen a second `?1049h` shows is the *clear*, and no
         // per-buffer snapshot cache (which still holds the previous alternate
         // session's flattened "ALT") may mask it.
@@ -1896,7 +1895,7 @@ mod tests {
 
     #[test]
     fn build_snapshot_return_to_primary_unchanged_content_reuses_visible_chars_arc() {
-        // Issue #405 alt/primary one-frame tax: returning to the primary screen
+        // Alt/primary one-frame tax: returning to the primary screen
         // with byte-identical restored content must reuse the SAME
         // `visible_chars` Arc allocation (proving the per-buffer cache swap in
         // `interface.rs` preserves the primary baseline across the alt-screen
@@ -1938,7 +1937,7 @@ mod tests {
         assert!(
             Arc::ptr_eq(&returned.visible_chars, &primary_arc),
             "returning to a byte-identical primary screen must reuse the same \
-             visible_chars Arc (issue #405 one-frame tax fix)"
+             visible_chars Arc (one-frame tax fix)"
         );
         assert_ne!(
             stable.row_epochs, returned.row_epochs,
@@ -1950,7 +1949,7 @@ mod tests {
 
     #[test]
     fn build_snapshot_idle_rebuild_reuses_same_visible_chars_arc() {
-        // Issue #439 fix #4 relies EXCLUSIVELY on `Arc::ptr_eq` of
+        // The GUI relies EXCLUSIVELY on `Arc::ptr_eq` of
         // `visible_chars` (not the deleted sticky `content_changed` flag) to
         // decide whether the GUI must rebuild. That is only sound if an idle
         // `build_snapshot` (nothing dirty) returns the *same* `Arc`
@@ -1974,15 +1973,13 @@ mod tests {
 
     #[test]
     fn build_snapshot_repeated_primary_alt_bounce_without_writes_reuses_arc() {
-        // Issue #439 fix #4 adversarial-review follow-up: walk
+        // Repeated bounce: walk
         // primary -> alt -> primary -> alt (2nd time) with NO writes to the
         // alt buffer, and assert the returning primary snapshot reuses the
         // byte-identical `visible_chars` Arc. This exercises the per-buffer
         // cache-swap stash across a REPEATED bounce (the existing tests only
-        // do a single round trip), which is the path the reviewer flagged as
-        // relied-on-but-untested now that the raw `content_changed` flag
-        // (deleted by Task 124.12) no longer backs up the ptr_eq check on the
-        // GUI side.
+        // do a single round trip), which is relied on now that no sticky `content_changed`
+        // flag backs up the ptr_eq check on the GUI side.
         //
         // `row_epochs` is asserted to re-stamp on every bounce rather than
         // asserted unchanged: `switch_to_alternate`/`switch_to_primary`
@@ -2036,7 +2033,7 @@ mod tests {
 
     #[test]
     fn build_snapshot_scrolled_primary_to_alt_to_primary_does_not_reuse_scrolled_content() {
-        // Issue #405 / CodeRabbit follow-up: a primary snapshot taken while
+        // A primary snapshot taken while
         // scrolled back must NOT be restored (via the per-buffer cache swap)
         // after returning from the alternate screen, because entering alt
         // forces scroll_offset = 0 — the stashed content is for a different
@@ -2230,7 +2227,7 @@ mod tests {
         );
     }
 
-    // ── command_blocks in TerminalSnapshot (Task 72.4) ───────────────────────
+    // ── command_blocks in TerminalSnapshot ───────────────────────────────────
 
     #[test]
     fn default_snapshot_has_empty_command_blocks() {
@@ -2274,7 +2271,7 @@ mod tests {
         );
     }
 
-    // ── logical row numbers in TerminalSnapshot (Task 125.14) ─────────────────
+    // ── logical row numbers in TerminalSnapshot ───────────────────────────────
 
     #[test]
     fn build_snapshot_row_base_is_zero_before_any_eviction() {
@@ -2343,7 +2340,7 @@ mod tests {
         assert!(snap.row_base > first_row);
     }
 
-    // ── command-block slice reuse (Task 125 review B2) ──────────────────────
+    // ── command-block slice reuse ───────────────────────────────────────────
 
     /// Drive one `A -> B -> C -> D` cycle with the given correlation id.
     fn run_cycle(emu: &mut TerminalEmulator, fid: &str, code: i32) {
@@ -2486,7 +2483,7 @@ mod tests {
     fn build_snapshot_command_block_preserves_exit_code_127() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         // OSC 133 D;127 must round-trip the exit code through the byte-stream
-        // OSC parser (regression guard for the bug fixed in 72.16.a).
+        // OSC parser (regression guard: the exit code must not be lost).
         emu.handle_incoming_data(b"\x1b]133;A;freminal=1;fid=t1\x07");
         emu.handle_incoming_data(b"\x1b]133;D;127;freminal=1;fid=t1\x07");
         let snap = emu.build_snapshot();

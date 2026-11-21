@@ -188,7 +188,7 @@ mod tests {
         String::from_utf8(bytes).expect("response should be valid UTF-8")
     }
 
-    /// Regression guard (Task 76.6): the XTVERSION / XTGETTCAP device-name
+    /// Regression guard: the XTVERSION / XTGETTCAP device-name
     /// response must keep the `>|XTerm(Freminal ...)` shape. The `XTerm(`
     /// prefix is load-bearing — tmux only enables `extkeys`
     /// (`modifyOtherKeys`) when it recognises the prefix

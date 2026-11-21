@@ -27,13 +27,13 @@ use std::time::Duration;
 
 /// A [`CommandBlock`]'s row boundaries resolved to retained buffer indices.
 ///
-/// The snapshot carries each block's rows as stable [`RowNumber`]s (Task
-/// 125.14); the GUI's row math (gutters, folds, hit-testing, jump-to-command)
+/// The snapshot carries each block's rows as stable [`RowNumber`]s; the
+/// GUI's row math (gutters, folds, hit-testing, jump-to-command)
 /// works in retained buffer indices, the coordinates of
 /// `TerminalSnapshot::visible_window_start`. This is the one seam between the
 /// two: resolve a block against the snapshot's `row_base` and use the indices.
 ///
-/// Resolution reproduces what the pre-125.14 eviction-time rewrite gave these
+/// Resolution reproduces what the old eviction-time rewrite gave these
 /// fields: a block whose *prompt* row has been evicted no longer exists
 /// ([`Self::resolve`] returns `None`), and any other boundary that has been
 /// evicted clamps to the oldest retained row (index `0`).
@@ -136,7 +136,7 @@ pub const fn block_is_foldable(block: &CommandBlock) -> bool {
     block.end_row.is_some()
 }
 
-/// Buffer-absolute row to anchor a block's duration label on (73.6): the
+/// Buffer-absolute row to anchor a block's duration label on: the
 /// block's **last on-screen row**.
 ///
 /// The label is anchored to the bottom of the block's visible portion so it
@@ -519,12 +519,12 @@ mod tests {
         assert!(!block_is_foldable(&running_block(4)));
     }
 
-    // ── duration_label_anchor_row (73.6) ─────────────────────────────────
+    // ── duration_label_anchor_row ─────────────────────────────────
 
     #[test]
     fn anchor_is_the_blocks_last_row_not_first() {
         // Block spans rows 2..=5.  The label must anchor on row 5 (last),
-        // not row 2 (first) — the regression this subtask fixes.
+        // not row 2 (first) — the regression being guarded.
         let block = finished_block(2, 5, Some(0));
         assert_eq!(
             duration_label_anchor_row(&block, RowNumber::ZERO, 0, 24, 23),
@@ -574,7 +574,7 @@ mod tests {
         );
     }
 
-    // ── BlockRows / logical row numbers (Task 125.14) ────────────────────
+    // ── BlockRows / logical row numbers ────────────────────
 
     /// A finished block whose four rows are the given absolute numbers.
     fn numbered_block(
@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn block_rows_clamp_an_evicted_later_field_to_the_oldest_row() {
-        // The pre-125.14 eviction rewrite saturated such a field at row 0.
+        // The old eviction rewrite saturated such a field at row 0.
         let block = numbered_block(100, Some(98), Some(99), Some(105));
         let rows = BlockRows::resolve(&block, RowNumber::new(100)).unwrap();
         assert_eq!(rows.prompt_start, 0);

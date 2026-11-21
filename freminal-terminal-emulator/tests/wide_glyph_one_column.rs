@@ -3,8 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! A double-width glyph in a 1-column terminal must not hang the emulator
-//! (Task 148.5, issue #558).
+//! A double-width glyph in a 1-column terminal must not hang the emulator.
 //!
 //! The `terminal_state` fuzz target found a six-byte input -- one column, four
 //! rows, one CJK ideograph -- that made `Buffer::insert_text` wrap forever and

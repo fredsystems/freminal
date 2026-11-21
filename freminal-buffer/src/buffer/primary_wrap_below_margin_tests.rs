@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 148.C3: on the primary screen, LF / IND / NEL and auto-wrap below the
+//! On the primary screen, LF / IND / NEL and auto-wrap below the
 //! bottom margin on the last screen row must not scroll.
 //!
 //! With a partial DECSTBM region, the rows under it are outside the region.
@@ -14,8 +14,8 @@
 //! (charproc.c) goes through `xtermIndex` too, so a wrap behaves the same.
 //!
 //! freminal's primary screen instead pushed a new row, scrolling the whole
-//! screen (region included) into scrollback. The alternate screen was fixed
-//! in 148.7 (see `alt_wrap_below_margin_tests`).
+//! screen (region included) into scrollback. The alternate screen is covered
+//! separately (see `alt_wrap_below_margin_tests`).
 
 use freminal_common::buffer_states::{buffer_type::BufferType, tchar::TChar};
 

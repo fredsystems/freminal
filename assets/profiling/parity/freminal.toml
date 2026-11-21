@@ -1,11 +1,11 @@
-# freminal.toml — Task 125.2 hermetic parity fixture (template).
+# freminal.toml — hermetic parity fixture (template).
 #
 # Rendered by workloads.sh's `render_fixture` into an isolated per-run
 # directory before every capture; never edited in place and never pointed at
 # from a real $XDG_CONFIG_HOME. Tokens (`@..@`) are substituted at render
-# time; see Documents/PROFILING.md, "Task 125 parity fixtures" for the full
+# time; see Documents/PROFILING.md, "Terminal parity fixtures" for the full
 # list and the settings this file deliberately does NOT pin (paste guard,
-# notifications, command blocks) because Task 125 measures product-level
+# notifications, command blocks) because the parity runs measure product-level
 # default behavior, not a stripped-down configuration.
 #
 # Geometry is controlled by Hyprland's stable tiled allocation at the fixed

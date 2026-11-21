@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! End-to-end tests for kitty OSC 22 pointer shapes (Task 139.4).
+//! End-to-end tests for kitty OSC 22 pointer shapes.
 //!
 //! Every test feeds raw bytes through `TerminalEmulator::handle_incoming_data`
 //! (which wraps `TerminalState::handle_incoming_data`) and asserts only

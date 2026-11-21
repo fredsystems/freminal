@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize paired Task 125 terminal measurements deterministically."""
+"""Summarize paired terminal parity measurements deterministically."""
 
 from __future__ import annotations
 

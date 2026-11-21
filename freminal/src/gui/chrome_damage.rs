@@ -3,19 +3,19 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Chrome-damage decision (#436.3), extracted for reuse and unit testing.
+//! Chrome-damage decision, extracted for reuse and unit testing.
 //!
-//! This module produces [`freminal_windowing::ChromeDamage`] — the #436
+//! This module produces [`freminal_windowing::ChromeDamage`] — the
 //! decision input for whether static chrome (menu bar, tab bar, pane
 //! borders, broadcast label, and every overlay: modals/toasts/tooltips/
 //! popups) changed on the frame just rendered. It implements two of the
-//! three signal families from the design (`gh issue view 436`):
+//! three signal families that decision draws on:
 //!
-//! - **§3.3 "app-level chrome-change signals"**: [`ChromeSignals`] bundles
+//! - **"app-level chrome-change signals"**: [`ChromeSignals`] bundles
 //!   the individual per-frame booleans the app already computes (or can
-//!   cheaply compute) for each row of the §3.3 table. [`ChromeSignals::any_fired`]
+//!   cheaply compute) for each row of the table. [`ChromeSignals::any_fired`]
 //!   ORs them together.
-//! - **§3.5 "self-dismissal settle rule"** (adversarial finding 1): a
+//! - **"self-dismissal settle rule"**: a
 //!   dismissible chrome element (toast, About, Welcome, paste/broadcast/
 //!   close-guard dialogs, save-layout prompt) can vanish *during its own
 //!   render pass* (the proven toast hazard: it draws itself, then
@@ -28,14 +28,12 @@
 //!   the two samples are diffed — catching the transition even when the
 //!   cross-frame (last-frame-vs-this-frame) comparison would not.
 //!
-//! **NOT covered here** (explicitly deferred to their own subtasks, per the
-//! design): §3.1 (egui's own `repaint_delay`) and §3.2 (chrome-affecting
-//! input events, including the region-aware pointer-motion gate) are
-//! `run_frame`-side signals owned by 436.4/436.9. The §5.2 font-atlas-resize
-//! retroactive-FULL fallback is also 436.4/436.6 — it can only be detected
-//! *after* the terminal band tessellates, which does not exist as a
-//! separate pass yet. This module produces app-level signals only; it does
-//! not yet feed into `run_frame` (that wiring is 436.4).
+//! **NOT covered here**: egui's own `repaint_delay` and chrome-affecting
+//! input events (including the region-aware pointer-motion gate) are
+//! `run_frame`-side signals. The font-atlas-resize retroactive-FULL
+//! fallback is likewise `run_frame`-side — it can only be detected *after*
+//! the terminal band tessellates. This module produces app-level signals
+//! only.
 //!
 //! Like [`super::frame_damage`], every function here is pure — no `self`,
 //! no `egui` context, no window state — so it is directly unit-testable.
@@ -44,13 +42,13 @@ use crate::gui::panes::PaneId;
 use crate::gui::tabs::TabId;
 
 /// Number of frames after window creation during which chrome is always
-/// forced `Changed` (#436 §7 warm-up). The font atlas, layout, and
+/// forced `Changed`. The font atlas, layout, and
 /// `PanelState` id-maps settle over the first 1-2 frames; giving a small
 /// margin (3) is cheap insurance against a `Partial` present being taken
 /// (see `compose_with_chrome_damage`) before steady state.
 pub const WARMUP_FRAMES: u32 = 3;
 
-/// Whether a window is still in its startup warm-up window (#436 §7): the
+/// Whether a window is still in its startup warm-up window: the
 /// first [`WARMUP_FRAMES`] rendered frames are always forced `Changed` while
 /// the font atlas / layout / `PanelState` id-maps settle. `frames_rendered`
 /// is the count of frames rendered so far for this window (0 on the very
@@ -61,10 +59,10 @@ pub const fn is_chrome_warming_up(frames_rendered: u32) -> bool {
 }
 
 /// Everything the app measured this frame that bears on whether static
-/// chrome changed (#436 §3.3). Each field maps to a row of the §3.3 table
+/// chrome changed. Each field maps to a row of the table
 /// that the app can compute without any `run_frame`-side state; see the
-/// module doc for what is deliberately NOT here (§3.1/§3.2 egui-side
-/// signals, §5.2 font-atlas resize).
+/// module doc for what is deliberately NOT here (egui-side
+/// signals, font-atlas resize).
 ///
 /// All fields independently force `Changed` when true — see
 /// [`ChromeSignals::any_fired`]. Each is an unrelated, independently-sourced
@@ -104,9 +102,9 @@ pub struct ChromeSignals {
     /// Any toast is currently on the stack. Unlike the other rows, this
     /// does not by itself prove a *transition* — it is the "stays forced
     /// while visible" half; the *transition* half (added/expired) is
-    /// covered separately by [`DismissiblePresence`]/§3.5, mirroring how
+    /// covered separately by [`DismissiblePresence`], mirroring how
     /// `toast_active` also forces `FrameDamage::Full` every frame it is up
-    /// in `decide_frame_damage` (#435) for the same reason (a toast's
+    /// in `decide_frame_damage` for the same reason (a toast's
     /// hover/dismiss hit-test needs live input testing, not stale cache).
     pub toast_active: bool,
     /// The window's inner size (physical pixels) changed vs. last frame.
@@ -117,7 +115,7 @@ pub struct ChromeSignals {
     /// pane's border/cursor style.
     pub focus_changed: bool,
     /// Still within the first [`WARMUP_FRAMES`] frames since window
-    /// creation (#436 §7) — force `Changed` unconditionally until steady
+    /// creation — force `Changed` unconditionally until steady
     /// state.
     pub warming_up: bool,
     /// Any rendered pane has an open overlay whose chrome this frame is
@@ -128,13 +126,12 @@ pub struct ChromeSignals {
     /// terminal-band range (TAIL chrome) with no known extent, so a REPLAY
     /// frame would otherwise discard their freshly-built shapes and
     /// repaint the stale cached tail from before the overlay opened —
-    /// making the open overlay vanish or ghost. Issue #436 §1 names
-    /// context-menu/command-history and the URL tooltip as chrome that
-    /// must be covered. (The name predates the tooltip addition; it covers
+    /// making the open overlay vanish or ghost. Context-menu/command-history
+    /// and the URL tooltip are chrome that must be covered. (The name predates the tooltip addition; it covers
     /// all above-band per-pane terminal overlays with unknown extent, not
     /// only `Order::Foreground`.)
     ///
-    /// **Bounded search is the named exception (Task 124.14d).** A normal
+    /// **Bounded search is the named exception.** A normal
     /// search frame — no tooltip-bearing control hovered — no longer sets
     /// this signal: its highlight-row and popup-rect geometry already
     /// joins `FrameDamage` directly (`PaneDamageInput::search_overlay_rects`,
@@ -146,7 +143,7 @@ pub struct ChromeSignals {
 }
 
 impl ChromeSignals {
-    /// Whether any individual §3.3 signal fired this frame. A `true` from
+    /// Whether any individual signal fired this frame. A `true` from
     /// any field forces the frame `Changed`; only when *every* field is
     /// `false` does this contribute nothing to the decision.
     const fn any_fired(&self) -> bool {
@@ -170,8 +167,7 @@ impl ChromeSignals {
 
 #[cfg(feature = "frame-profiling")]
 impl ChromeSignals {
-    /// Task 121 frame-profiling harness follow-up (gate-blocker
-    /// instrumentation): name/value pairs for all 15 §3.3 signal fields, in
+    /// Frame-profiling instrumentation: name/value pairs for all 15 signal fields, in
     /// declaration order, used solely by the (feature-gated) per-signal
     /// frame-profiling counters in `app_impl.rs`.
     ///
@@ -243,7 +239,7 @@ pub struct DismissiblePresence {
     pub any_toast: bool,
 }
 
-/// #436 §3.5 self-dismissal settle rule (adversarial finding 1): a
+/// Self-dismissal settle rule: a
 /// dismissible element transitioning present<->absent must force THIS frame
 /// AND the next frame FULL, so the cache is never rebuilt from the frame that
 /// still contains a vanishing element. Returns true if `prev != current`
@@ -264,7 +260,7 @@ pub fn dismissible_presence_transitioned(
     prev != current
 }
 
-/// Per-tab/pane snapshot used to detect the §3.3 "tab set changed" / "tab
+/// Per-tab/pane snapshot used to detect the "tab set changed" / "tab
 /// title changed" / "pane layout changed" / "broadcast state changed" rows
 /// between frames. Captured once per frame from data the app already has;
 /// comparing two snapshots (via [`diff_tab_snapshots`]) yields the four
@@ -288,10 +284,10 @@ pub struct ChromeTabSnapshot {
     pub broadcast_input: bool,
 }
 
-/// Result of comparing two [`ChromeTabSnapshot`]s: one boolean per §3.3 row
+/// Result of comparing two [`ChromeTabSnapshot`]s: one boolean per row
 /// this snapshot covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-// Four independent §3.3 table rows, each an unrelated per-frame observation
+// Four independent table rows, each an unrelated per-frame observation
 // (not a state machine) -- same rationale as `ChromeSignals`/`DismissiblePresence`.
 #[allow(clippy::struct_excessive_bools)]
 pub struct ChromeTabSnapshotDiff {
@@ -301,7 +297,7 @@ pub struct ChromeTabSnapshotDiff {
     pub broadcast_state_changed: bool,
 }
 
-/// Pure diff of two [`ChromeTabSnapshot`]s into the four §3.3 booleans it
+/// Pure diff of two [`ChromeTabSnapshot`]s into the four booleans it
 /// covers. See [`ChromeTabSnapshotDiff`] for the field-to-row mapping.
 pub fn diff_tab_snapshots(
     prev: &ChromeTabSnapshot,
@@ -317,8 +313,9 @@ pub fn diff_tab_snapshots(
     }
 }
 
-/// Decide this frame's [`freminal_windowing::ChromeDamage`] (#436 §3.3 +
-/// §3.5). Returns [`freminal_windowing::ChromeDamage::Changed`] if ANY §3.3
+/// Decide this frame's [`freminal_windowing::ChromeDamage`] (app-level
+/// signals plus the self-dismissal settle rule). Returns
+/// [`freminal_windowing::ChromeDamage::Changed`] if ANY
 /// signal fired ([`ChromeSignals::any_fired`]) OR a dismissible element
 /// transitioned this frame OR the previous frame flagged a pending settle
 /// frame; [`freminal_windowing::ChromeDamage::Unchanged`] only when none of
@@ -328,7 +325,7 @@ pub fn diff_tab_snapshots(
 /// comparisons the caller is expected to make (intra-frame before/after, and
 /// cross-frame after-vs-last-frame) — see that function's doc.
 ///
-/// `settle_frame_pending` is the **other** half of the §3.5 settle rule: a
+/// `settle_frame_pending` is the **other** half of the settle rule: a
 /// transition forces BOTH this frame and the NEXT frame `Changed`. The
 /// caller carries this by remembering "a transition happened last frame"
 /// (e.g. a `chrome_settle_pending: bool` field on its per-window state,
@@ -350,11 +347,11 @@ pub const fn decide_chrome_damage(
     }
 }
 
-/// #436.8: is `pos` over any chrome-interactive rect? `head_rects == None`
+/// Is `pos` over any chrome-interactive rect? `head_rects == None`
 /// means no FULL frame has captured them yet -> conservative `true`.
 #[must_use]
 ///
-/// `toast_rects` (review item 2 follow-up to subtask 121.14) is the most
+/// `toast_rects` is the most
 /// recently laid-out toast pill hit-rects, tested the same way as
 /// `border_rects` — hovering a toast changes chrome pixels (close-button
 /// highlight, hover-pauses-expiry) even though toasts are neither
@@ -375,7 +372,7 @@ pub fn point_in_chrome_rects(
 }
 
 /// Per-pane inputs to the OR-accumulated `foreground_overlay_open` scan in
-/// `app_impl.rs::stage_frame_damage` (Task 124.14d). Extracted as a pure,
+/// `app_impl.rs::stage_frame_damage`. Extracted as a pure,
 /// named-input decision -- rather than re-implementing `stage_frame_damage`'s
 /// boolean logic inline in a test -- because that scan needs a full
 /// `PerWindowState`/pane-tree to exercise directly.
@@ -396,12 +393,12 @@ pub struct PaneForegroundOverlayInputs {
     /// `pane.render_cache.hover_tooltip_active()` -- the `Order::Tooltip`
     /// URL-hover tooltip.
     pub hover_tooltip_active: bool,
-    /// `pane.render_cache.search_overlay_safety()` (Task 124.14d).
+    /// `pane.render_cache.search_overlay_safety()`.
     pub search_overlay_safety: crate::gui::search::SearchOverlaySafety,
 }
 
 /// Whether one pane's per-frame state alone must set
-/// `foreground_overlay_open` this frame (Task 124.14d).
+/// `foreground_overlay_open` this frame.
 #[must_use]
 pub fn pane_forces_foreground_overlay_open(inputs: PaneForegroundOverlayInputs) -> bool {
     inputs.context_menu_open
@@ -439,7 +436,7 @@ mod tests {
     }
 
     /// Table test: every individual `ChromeSignals` field, set alone (all
-    /// others false), forces `Changed`. Exercises every §3.3 row this module
+    /// others false), forces `Changed`. Exercises every row this module
     /// covers.
     #[test]
     fn each_signal_field_alone_forces_changed() {
@@ -477,7 +474,7 @@ mod tests {
         }
     }
 
-    /// Regression test for the #436.4b defect: an open per-pane
+    /// Regression test: an open per-pane
     /// `Order::Foreground` overlay (context menu, in-terminal search bar, or
     /// command-history palette) must alone force `Changed`, so a REPLAY
     /// frame never discards its freshly-built shapes in favor of the stale
@@ -498,7 +495,7 @@ mod tests {
         );
     }
 
-    // ── pane_forces_foreground_overlay_open (Task 124.14d) ──────────────
+    // ── pane_forces_foreground_overlay_open ──────────────
 
     /// The default input (nothing open, bounded search) must NOT force the
     /// signal -- the base case every other test below deviates from by
@@ -517,7 +514,7 @@ mod tests {
         assert!(!pane_forces_foreground_overlay_open(no_overlay_inputs()));
     }
 
-    /// The headline property this subtask exists for: a *bounded* search
+    /// The headline property: a *bounded* search
     /// overlay, alone, must NOT force `foreground_overlay_open` -- its
     /// geometry already joined `FrameDamage` directly, so escalating the
     /// whole window `Changed` for it would erase that bounded damage's
@@ -602,7 +599,7 @@ mod tests {
 
     #[test]
     fn settle_frame_pending_forces_changed_with_no_other_signals() {
-        // This is the "+ next frame" half of the §3.5 settle rule: even
+        // This is the "+ next frame" half of the settle rule: even
         // with nothing else happening this frame, a pending settle from a
         // transition on the PREVIOUS frame still forces Changed.
         let signals = ChromeSignals::default();
@@ -685,7 +682,7 @@ mod tests {
         }
     }
 
-    /// Models the app-side §3.5 state machine described in
+    /// Models the app-side state machine described in
     /// `decide_chrome_damage`'s doc: `chrome_settle_pending` is simply
     /// reassigned to this frame's `presence_transitioned` at the end of
     /// every frame (no separate "reset" call). Verifies the full sequence:
@@ -725,8 +722,8 @@ mod tests {
         );
     }
 
-    /// **Mandatory finding-1 test.** Reproduces the exact toast hazard
-    /// verbatim from the design: a toast is present when its `.show(ctx)`
+    /// **Mandatory finding-1 test.** Reproduces the exact toast hazard:
+    /// a toast is present when its `.show(ctx)`
     /// begins on frame N, expires and `retain`-removes itself DURING that
     /// same call, and — because the stack is now empty — the toast stack
     /// requests no further repaint. The PREVIOUS frame's post-`.show()`
@@ -736,7 +733,7 @@ mod tests {
     /// permit a REPLAY that keeps painting the (now-ghost) toast forever.
     ///
     /// This test asserts that the naive cross-frame comparison indeed misses
-    /// it (documenting the exact bug this subtask exists to prevent) and
+    /// it (documenting the exact bug the within-frame comparison prevents) and
     /// that the mandatory before/after-WITHIN-FRAME comparison catches it —
     /// i.e. if the before/after-within-frame diff were removed and only the
     /// cross-frame diff were fed into `decide_chrome_damage`, frame N would
@@ -763,7 +760,7 @@ mod tests {
             ..DismissiblePresence::default()
         };
 
-        // The BUG this subtask exists to prevent: the naive cross-frame
+        // The BUG the within-frame comparison prevents: the naive cross-frame
         // comparison (this frame's `after` vs last frame's `after`) sees NO
         // change.
         let naive_cross_frame_transitioned =
@@ -794,7 +791,7 @@ mod tests {
             "frame N (the toast's self-dismissal frame) must be Changed"
         );
 
-        // ...and the §3.5 settle rule forces the NEXT frame Changed too,
+        // ...and the settle rule forces the NEXT frame Changed too,
         // even though nothing else changed and the naive cross-frame check
         // would (again) see no difference on that frame either.
         let settle_pending_next = intra_frame_transitioned;
@@ -921,7 +918,7 @@ mod tests {
         assert!(!diff.pane_layout_changed);
     }
 
-    // ── #436.7 §7 warm-up ───────────────────────────────────────────────
+    // ── warm-up ───────────────────────────────────────────────
 
     #[test]
     fn warming_up_covers_exactly_the_first_warmup_frames() {
@@ -954,7 +951,7 @@ mod tests {
         );
     }
 
-    // ── #436.8 region-aware pointer gate ─────────────────────────────────
+    // ── region-aware pointer gate ─────────────────────────────────
 
     #[test]
     fn point_in_chrome_rects_none_head_is_conservative_true() {
@@ -1054,7 +1051,7 @@ mod tests {
         ));
     }
 
-    // ── Review item 2 follow-up to 121.14: the dedicated `toast_rects` param ──
+    // ── the dedicated `toast_rects` param ──
 
     #[test]
     fn point_in_chrome_rects_inside_toast_rect_is_true() {
@@ -1109,21 +1106,21 @@ mod tests {
         ));
     }
 
-    // ── #436.8 `is_chrome_interactive_at` wrapper decision (436.9 follow-up) ──
+    // ── `is_chrome_interactive_at` wrapper decision ──
     //
     // `FreminalGui::is_chrome_interactive_at` (app_impl.rs) is
     //   `self.windows.get(&window_id).is_none_or(|win|
     //        point_in_chrome_rects(pos, win.published.chrome_head_rects(),
     //            win.published.chrome_border_rects(),
     //            win.published.chrome_toast_rects()))`
-    // (Group A #122.4: the three rect fields moved onto `PublishedFrameState`,
-    // reached via `win.published`; the composed decision below is unchanged.)
+    // (The three rect fields live on `PublishedFrameState`, reached via
+    // `win.published`.)
     // The point-in-rects half is pinned exhaustively above. The distinct
     // behavior the wrapper adds is the `is_none_or` fallback: an UNKNOWN
     // `window_id` (no `PerWindowState` entry) is conservatively chrome-
     // interactive (`true`), same discipline as `None` head rects. A full
     // wrapper test needs a `FreminalGui` (no headless constructor — see the
-    // 436.2a/436.4 notes and `app_impl.rs` test-module doc comment), so we
+    // `app_impl.rs` test-module doc comment), so we
     // model the composed `is_none_or` decision here with a local closure that
     // mirrors the wrapper exactly, guarding against a regression in that
     // composition (e.g. flipping the unknown-window default to `false`, which
@@ -1166,9 +1163,8 @@ mod tests {
         // Known window, head rects not yet captured (None) -> conservative true.
         assert!(decide(Some((None, &[], &[])), egui::pos2(50.0, 10.0)));
 
-        // Known window, point inside a captured toast rect -> true (review
-        // item 2: toasts have their own field/param now, not folded into
-        // `border_rects`).
+        // Known window, point inside a captured toast rect -> true (toasts
+        // have their own field/param, not folded into `border_rects`).
         let toast = [egui::Rect::from_min_max(
             egui::pos2(200.0, 200.0),
             egui::pos2(300.0, 240.0),

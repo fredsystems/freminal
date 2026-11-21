@@ -180,12 +180,11 @@ echo -e "${GREEN}All tests passed!${NC}"
 
 # ── Known Limitations ─────────────────────────────────────────────────
 #
-# As of subtasks 9.1-9.5:
-# - Compound CSI mode sequences (e.g. ESC[?1049;2004h) are now split and
-#   handled individually (fixed in 9.1)
-# - DECRPM mode query responses are wired for all supported modes (fixed
-#   in 9.2)
+# Handled (formerly limitations):
+# - Compound CSI mode sequences (e.g. ESC[?1049;2004h) are split and
+#   handled individually
+# - DECRPM mode query responses are wired for all supported modes
 # - Modified key sequences (Shift/Ctrl/Alt + arrow/function keys) are
-#   sent in xterm format (fixed in 9.3/9.4)
+#   sent in xterm format
 # - DEC private DSR (ESC[?6n) is handled and responds with cursor
-#   position (fixed in 9.5)
+#   position

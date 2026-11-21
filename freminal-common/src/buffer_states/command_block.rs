@@ -79,7 +79,7 @@ pub struct CommandBlock {
     pub fid: String,
 
     /// Row of `OSC 133 A` (prompt start), as a stable [`RowNumber`] that
-    /// survives scrollback eviction (Task 125.14).  Convert to a retained
+    /// survives scrollback eviction.  Convert to a retained
     /// index with the snapshot's `retained_index_of`; a number below the
     /// snapshot's `row_base` has been evicted.
     pub prompt_start_row: RowNumber,
@@ -192,7 +192,7 @@ impl CommandBlock {
     /// `false`): such a block represents a prompt that was aborted (Ctrl-C)
     /// before any command ran, so there is no execution interval to report.
     /// Reporting a duration here would measure prompt-idle time, not command
-    /// time — the bug 106.2 fixes.
+    /// time.
     #[must_use]
     pub fn duration(&self) -> Option<Duration> {
         let finished = self.finished_at?;
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn duration_measures_from_executed_at_not_started_at() {
-        // Regression for 73.7: an instant command after a long pause at the
+        // Regression: an instant command after a long pause at the
         // prompt must report only the execution time (C->D), not the time
         // the user spent typing/reading (A->C->D).
         let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
@@ -391,7 +391,7 @@ mod tests {
             Some(dur) => assert_eq!(
                 dur,
                 Duration::from_millis(5),
-                "duration must be C->D (5ms), not A->D (30.005s)"
+                "duration must be C->D (5ms), not A->D"
             ),
             None => panic!("expected Some duration"),
         }
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn duration_is_none_when_executed_at_missing() {
-        // Regression for 106.2: when no `OSC 133 C` was received
+        // Regression: when no `OSC 133 C` was received
         // (executed_at is None) the prompt was aborted (Ctrl-C) before any
         // command ran.  There is no execution interval, so duration() must
         // report None rather than measuring prompt-idle time from

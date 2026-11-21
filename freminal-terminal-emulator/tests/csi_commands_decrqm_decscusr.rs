@@ -82,7 +82,7 @@ fn decrqm_without_mode_number_produces_no_mode_query() {
 fn decscusr_valid_range_and_default_and_invalid() {
     // DECSCUSR is CSI Ps ' ' q (note the SPACE before 'q')
     // Typical values:
-    // 0 (or omitted): the configured cursor style (Task 131 review)
+    // 0 (or omitted): the configured cursor style
     // 1: blinking block
     // 2: steady block
     // 3: blinking underline

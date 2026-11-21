@@ -86,7 +86,7 @@ impl From<bool> for ImageDataDisposition {
     }
 }
 
-/// Maximum relative-placement chain depth (Task 100.4a, `ETOODEEP`).
+/// Maximum relative-placement chain depth (`ETOODEEP`).
 ///
 /// The kitty spec requires implementations to support a chain depth of at
 /// least 8; a 9th link is rejected.
@@ -120,7 +120,7 @@ const KITTY_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
 /// shared-memory object exists, is readable, how large it is, or whether it
 /// holds a valid image. It is also the reply when file-backed transmission is
 /// refused by configuration, so a client cannot tell "disabled" from
-/// "unreadable" (GHSA-8prj-mhmf-xpjg).
+/// "unreadable".
 const KITTY_FILE_ERROR_RESPONSE: &str = "EBADF:Failed to read image file";
 
 /// Whether `medium` makes the terminal read a host file or shared-memory
@@ -487,8 +487,7 @@ fn read_capped(reader: impl std::io::Read, cap: u64) -> Result<Vec<u8>, KittyFil
 ///
 /// Only drive-letter absolute paths are allowed. A UNC or verbatim path
 /// makes Windows open an SMB connection to the named host as soon as it is
-/// resolved (even by `canonicalize`), leaking an `NTLMv2` challenge-response
-/// (GHSA-3g79-vfp3-q57g), so this must be checked before any filesystem
+/// resolved (even by `canonicalize`), leaking an `NTLMv2` challenge-response, so this must be checked before any filesystem
 /// call. Pure string logic, so it is testable on every platform; production
 /// code calls it only under `cfg(windows)`.
 #[cfg(any(windows, test))]
@@ -641,7 +640,7 @@ fn delete_kitty_temp_file(loaded: &LoadedKittyFile) -> Result<(), KittyFileError
 /// the conversion panic-free rather than relying on that assumption.
 ///
 /// `pub(super)` so [`TerminalHandler::inject_virtual_parent_relatives`]
-/// (Task 100.4b, in `mod.rs`) can reuse it to derive a virtual-parent
+/// (in `mod.rs`) can reuse it to derive a virtual-parent
 /// child's render-time origin from the parent's live placeholder cells.
 pub(super) fn signed_cell_offset(origin: usize, offset: i32) -> usize {
     let origin_i64 = i64::value_from(origin).unwrap_or(i64::MAX);
@@ -653,7 +652,7 @@ pub(super) fn signed_cell_offset(origin: usize, offset: i32) -> usize {
 /// data: if EITHER `c=`/`r=` is present, kitty derives/scales the display
 /// grid, so the image is drawn scaled to fill it (`ExplicitCells`);
 /// otherwise the display grid was derived from the image's native pixel
-/// size (`NativePixels`) (Task 100.17).
+/// size (`NativePixels`).
 const fn kitty_image_size_mode(control: &KittyControlData) -> ImageSizeMode {
     if control.display_cols.is_some() || control.display_rows.is_some() {
         ImageSizeMode::ExplicitCells
@@ -945,7 +944,7 @@ fn read_kitty_shm_range(
 /// object cannot shrink under the mapping. The size is re-read from the open
 /// descriptor here, so the mapped range is always inside the object. XNU
 /// reports that size rounded up to whole pages, so a read without `S=` may
-/// include trailing zero padding, as it did before Task 148 and as in kitty.
+/// include trailing zero padding, as kitty does.
 #[cfg(target_os = "macos")]
 fn read_kitty_shm_range(
     file: &std::fs::File,
@@ -1473,7 +1472,7 @@ impl TerminalHandler {
             placement_id,
             cols: u32::try_from(display_cols).unwrap_or(u32::MAX),
             rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
-            // Task 100.20: a fresh instance id every time this is
+            // A fresh instance id every time this is
             // (re-)registered, so placeholder cells stamped from an earlier
             // registration (which keep their own already-stamped instance
             // id) remain a distinct renderer bucket from placeholder cells
@@ -1485,8 +1484,7 @@ impl TerminalHandler {
     }
 
     /// Record a plain (non-relative) real (cell-stamped) placement's origin
-    /// so future relative placements can reference it as a parent (Task
-    /// 100.4a).
+    /// so future relative placements can reference it as a parent.
     // All parameters are required placement fields; grouping into a struct
     // would obscure the data flow without reducing coupling, matching the
     // established convention for `place_kitty_image`-adjacent methods.
@@ -1623,8 +1621,7 @@ impl TerminalHandler {
             .insert_protocol_retained(image_to_place.clone());
 
         // Relative placement (`P=` present) — intercept before the
-        // virtual/normal placement paths below; it sends its own response
-        // (Task 100.4a).
+        // virtual/normal placement paths below; it sends its own response.
         if cmd.control.parent_image_id.is_some() {
             self.handle_kitty_relative_placement(
                 &cmd.control,
@@ -1662,8 +1659,8 @@ impl TerminalHandler {
     /// Stamp a non-virtual (cell-materialized) `a=p` placement at the
     /// cursor, restoring the cursor afterward if `C=1` was requested, and
     /// record it as a real placement so it can act as a future relative-
-    /// placement parent (Task 100.4a). Resolves the `x=`/`y=`/`w=`/`h=`
-    /// source-crop (Task 100.9) against the image's own pixel dimensions.
+    /// placement parent. Resolves the `x=`/`y=`/`w=`/`h=`
+    /// source-crop against the image's own pixel dimensions.
     ///
     /// Split out of [`Self::handle_kitty_put`] to keep that function within
     /// the line-count lint limit.
@@ -1690,7 +1687,7 @@ impl TerminalHandler {
         );
         let subcell_offset = self.resolve_subcell_offset(&cmd.control);
 
-        // Kitty spec REPLACE semantics (Task 100.18): a second `a=p` put
+        // Kitty spec REPLACE semantics: a second `a=p` put
         // with the SAME non-zero `p=` replaces that one placement; `p=0`/
         // unspecified means multiple, independently-coexisting placements,
         // so it must NOT clear anything here.
@@ -1702,8 +1699,7 @@ impl TerminalHandler {
 
         // Mint a fresh placement-instance id for this DISPLAY put — every
         // `a=p` put is a distinct on-screen placement, even a `p=0`/
-        // unspecified one that shares an image id with another placement
-        // (Task 100.18).
+        // unspecified one that shares an image id with another placement.
         let placement_instance = next_placement_instance_id();
         let place_result = self.buffer.place_image(
             image_to_place,
@@ -1722,19 +1718,18 @@ impl TerminalHandler {
 
         // `C=1` (no cursor movement): put the cursor back on the image origin,
         // located by row number so scrollback eviction during placement cannot
-        // displace it (Task 125.C7).
+        // displace it.
         if cmd.control.no_cursor_movement {
             self.buffer.restore_cursor_to_image_origin(&place_result);
         }
 
         // Record this real (cell-stamped) placement's origin so future
-        // relative placements can reference it as a parent (Task 100.4a).
+        // relative placements can reference it as a parent.
         //
         // Use the TRUE stamped origin from `place_result`, not the
         // pre-call `cursor` read above: `place_image` may drain scrollback
         // rows during placement, which shifts the image's actual row
-        // upward relative to the cursor position captured before the call
-        // (Task 100.14).
+        // upward relative to the cursor position captured before the call.
         let pid = cmd.control.placement_id.unwrap_or(0);
         self.record_real_placement(
             id,
@@ -2403,8 +2398,8 @@ impl TerminalHandler {
         let should_display = matches!(action, KittyAction::TransmitAndDisplay | KittyAction::Put);
 
         // Relative placement (`P=` present) — intercept before the
-        // virtual/normal placement paths below; it sends its own response
-        // (Task 100.4a). Only meaningful when the action actually displays
+        // virtual/normal placement paths below; it sends its own response.
+        // Only meaningful when the action actually displays
         // the image; a plain `a=t` transmit with stray `P=`/`Q=` fields
         // falls through to the normal store-only path below.
         if control.parent_image_id.is_some() && should_display {
@@ -2459,10 +2454,9 @@ impl TerminalHandler {
     /// Stamp a non-virtual, non-relative `a=T` (transmit-and-display) or
     /// `a=t` immediately-displayed placement at the cursor, restoring the
     /// cursor afterward if `C=1` was requested, and record it as a real
-    /// placement so it can act as a future relative-placement parent (Task
-    /// 100.4a). Mirrors [`Self::stamp_kitty_put`]'s handling of
-    /// source-crop (Task 100.9), sub-cell offset (Task 100.19), and REPLACE
-    /// semantics (Task 100.18) for the `a=p` (Put) path.
+    /// placement so it can act as a future relative-placement parent.
+    /// Mirrors [`Self::stamp_kitty_put`]'s handling of source-crop, sub-cell
+    /// offset, and REPLACE semantics for the `a=p` (Put) path.
     ///
     /// Split out of [`Self::place_kitty_image`] to keep that function
     /// within the line-count lint limit.
@@ -2488,7 +2482,7 @@ impl TerminalHandler {
         let source_crop = resolve_source_crop(control, img_width_px, img_height_px);
         let subcell_offset = self.resolve_subcell_offset(control);
 
-        // Kitty spec REPLACE semantics (Task 100.18): a second `a=T`
+        // Kitty spec REPLACE semantics: a second `a=T`
         // with the SAME non-zero `p=` replaces that one placement;
         // `p=0`/unspecified means multiple, independently-coexisting
         // placements, so it must NOT clear anything here.
@@ -2502,7 +2496,7 @@ impl TerminalHandler {
         // Mint a fresh placement-instance id for this DISPLAY put —
         // every `a=T` display is a distinct on-screen placement, even a
         // `p=0`/unspecified one that shares an image id with another
-        // placement (Task 100.18).
+        // placement.
         let placement_instance = next_placement_instance_id();
         let place_result = self.buffer.place_image(
             inline_image,
@@ -2520,22 +2514,22 @@ impl TerminalHandler {
         );
 
         // `C=1` (no cursor movement) — mirrors `stamp_kitty_put`'s handling of
-        // the same flag on `a=p` (Task 100.16). `place_image` (Task 100.15)
+        // the same flag on `a=p`. `place_image`
         // always moves the cursor below the image, so `C=1` must explicitly
         // put it back on the image origin, located by row number so scrollback
-        // eviction during placement cannot displace it (Task 125.C7).
+        // eviction during placement cannot displace it.
         if control.no_cursor_movement {
             self.buffer.restore_cursor_to_image_origin(&place_result);
         }
 
         // Record this real (cell-stamped) placement's origin so future
-        // relative placements can reference it as a parent (Task 100.4a).
+        // relative placements can reference it as a parent.
         //
         // Use the TRUE stamped origin from `place_result`, not a
         // pre-call cursor read: `place_image` may drain scrollback rows
         // during placement, which shifts the image's actual row
         // upward relative to the cursor position captured before the
-        // call (Task 100.14). This is unaffected by the `C=1` cursor
+        // call. This is unaffected by the `C=1` cursor
         // restore above — the recorded origin always reflects where the
         // image was actually stamped, regardless of where the cursor
         // ends up afterward.
@@ -2553,7 +2547,7 @@ impl TerminalHandler {
     }
 
     /// Handle a Kitty relative placement (`P=`/`Q=`/`H=`/`V=` present on
-    /// `a=p` or `a=T`, Task 100.4a).
+    /// `a=p` or `a=T`).
     ///
     /// Validates the parent reference (`ENOPARENT`), rejects a relative
     /// placement that is itself virtual (`EINVAL`), rejects chains deeper
@@ -2565,7 +2559,7 @@ impl TerminalHandler {
     /// semantics. If the resolved parent is a VIRTUAL (Unicode placeholder)
     /// placement, the child is registered in `real_placements` with the
     /// parent link but is NOT stamped — positioning a child of a virtual
-    /// parent happens at render time and is deferred to Task 100.4b.
+    /// parent happens at render time and is deferred to render time.
     ///
     /// Sends its own success/error APC response; callers must not send an
     /// additional response after calling this.
@@ -2704,7 +2698,7 @@ impl TerminalHandler {
     ) {
         // The parent's origin is a stable row number, so it still names the
         // parent's row however far the buffer has scrolled since the parent
-        // was placed (Task 125.14).
+        // was placed.
         //
         // A `V=` that would carry the child above the first row of the
         // parent's screen has no row to land on. It is a checked offset on
@@ -2746,7 +2740,7 @@ impl TerminalHandler {
         let subcell_offset = self.resolve_subcell_offset(control);
 
         // Mint a fresh placement-instance id for the child — it is a
-        // DISTINCT on-screen placement from its parent (Task 100.18), even
+        // DISTINCT on-screen placement from its parent, even
         // though it shares the parent's origin plus an offset.
         let placement_instance = next_placement_instance_id();
 
@@ -2792,7 +2786,7 @@ impl TerminalHandler {
     ///
     /// No cells are stamped here — positioning at render time from the
     /// parent's live placeholder cells is handled by
-    /// `TerminalHandler::inject_virtual_parent_relatives` (Task 100.4b),
+    /// `TerminalHandler::inject_virtual_parent_relatives`,
     /// which reads the `h_offset`/`v_offset` recorded here.
     #[allow(clippy::too_many_arguments)]
     fn register_relative_placement_against_virtual_parent(
@@ -2809,12 +2803,12 @@ impl TerminalHandler {
         tracing::debug!(
             "Kitty graphics: relative placement child (image_id={child_image_id}, \
              placement_id={child_pid}) registered against virtual parent \
-             (image_id={}, placement_id={}); positioned at render time (Task 100.4b)",
+             (image_id={}, placement_id={}); positioned at render time",
             parent_key.0,
             parent_key.1,
         );
         // Mint the child's placement-instance id now, at registration time
-        // (Task 100.18/100.20) — no cells are stamped here, but the id must
+        // — no cells are stamped here, but the id must
         // be minted ONCE and stay stable across every subsequent
         // `inject_virtual_parent_relatives` re-derivation (`RealPlacement`
         // is a first-class, persistent record; a per-frame mint would make
@@ -3063,7 +3057,7 @@ impl TerminalHandler {
     /// Convenience wrapper: cascade-delete every `real_placements` entry for
     /// the given image id (across all its placement ids), plus their
     /// relative children. Used by the `a=d` (delete) by-id and by-number
-    /// arms (Task 100.4a).
+    /// arms.
     fn cascade_delete_real_placements_for_image(&mut self, image_id: u64) {
         let roots: Vec<(u64, u32)> = self
             .active_real_placements()
@@ -3604,7 +3598,7 @@ impl TerminalHandler {
     }
 
     /// `d=i`/`d=I` — delete placements for image id `i=`, optionally
-    /// narrowed to a single placement id `p=` (Task 100.20).
+    /// narrowed to a single placement id `p=`.
     fn handle_kitty_delete_by_id(
         &mut self,
         cmd: &KittyGraphicsCommand,
@@ -3715,8 +3709,8 @@ impl TerminalHandler {
     /// They are therefore 1-based coordinates of the SCREEN. A key of `0` names
     /// no column (kitty compares `start_column <= x - 1`, which `0` never
     /// satisfies), so it returns `None`. An absent key falls back to the
-    /// cursor's column (freminal behaviour kept from before Task 125.C8; the
-    /// spec is silent).
+    /// cursor's column (freminal behaviour kept from before row-addressed deletes;
+    /// the spec is silent).
     fn resolve_delete_column(&self, cmd: &KittyGraphicsCommand) -> Option<usize> {
         match cmd.control.src_x {
             Some(x) => usize::value_from(x).ok()?.checked_sub(1),
@@ -3942,7 +3936,7 @@ impl TerminalHandler {
             self.active_virtual_placements_mut()
                 .retain(|&(img_id, _), _| img_id != id);
             // Cascade-delete this image's real placements and their
-            // relative children (Task 100.4a) — safe now that no cell
+            // relative children — safe now that no cell
             // references the image anywhere.
             self.cascade_delete_real_placements_for_image(id);
         }
@@ -4009,7 +4003,7 @@ impl TerminalHandler {
     }
 
     /// Resolve `a=p`/`a=T` `X=`/`Y=` control keys into a [`SubCellOffset`]
-    /// for the display path only (Task 100.19).
+    /// for the display path only.
     ///
     /// `X=`/`Y=` (`cell_x_offset`/`cell_y_offset`) shift the drawing origin
     /// within the placement's top-left cell by that many PIXELS. Clamped to
@@ -4092,7 +4086,7 @@ fn resolve_compose_rect(
 }
 
 /// Resolve `a=p`/`a=T` `x=`/`y=`/`w=`/`h=` control keys into a
-/// [`SourceCrop`] for the display path only (Task 100.9).
+/// [`SourceCrop`] for the display path only.
 ///
 /// `x=`/`y=` default to `0` (top-left) when absent; `w=`/`h=` (`0` or
 /// absent) default to "the rest of the image" from that origin — matching
@@ -5010,7 +5004,7 @@ mod tests {
         );
     }
 
-    /// `d=i,p=<n>` (Task 100.20) must narrow deletion to the ONE named
+    /// `d=i,p=<n>` must narrow deletion to the ONE named
     /// placement — a second, independent placement of the SAME image id
     /// with a DIFFERENT `p=` must survive.
     #[test]
@@ -5225,7 +5219,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // ImageSizeMode provenance (Task 100.17a)
+    // ImageSizeMode provenance
     // -----------------------------------------------------------------------
 
     #[test]
@@ -5590,7 +5584,7 @@ mod tests {
     }
 
     /// Two INDEPENDENT `a=p,U=1` registrations of the SAME image with
-    /// `p=0`/unspecified (Task 100.20) must stamp their respective
+    /// `p=0`/unspecified must stamp their respective
     /// placeholder cells with DISTINCT `placement_instance` ids — even
     /// though both registrations share the same `(image_id, placement_id)`
     /// key in `virtual_placements` (the second registration overwrites the
@@ -5822,7 +5816,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Kitty relative placement tests (Task 100.4a)
+    // Kitty relative placement tests
     // -----------------------------------------------------------------------
 
     /// Helper: build a bare `a=p` (Put) command with the given control data
@@ -5858,7 +5852,7 @@ mod tests {
     }
 
     /// Count cells whose placement matches BOTH `image_id` and
-    /// `placement_id` (Task 100.20 narrowing tests).
+    /// `placement_id` (narrowing tests).
     fn count_placement_with_id(
         handler: &TerminalHandler,
         image_id: u64,
@@ -5896,7 +5890,7 @@ mod tests {
     }
 
     /// Two `a=p`/`a=T` puts of the SAME image with `p=0`/unspecified are
-    /// MULTIPLE COEXISTING placements per the kitty spec (Task 100.18):
+    /// MULTIPLE COEXISTING placements per the kitty spec:
     /// both sets of cells must remain on screen, each stamped with its
     /// OWN, distinct `placement_instance` id (so the renderer buckets them
     /// as two separate quads instead of merging into one).
@@ -5951,7 +5945,7 @@ mod tests {
     }
 
     /// A second `a=p`/`a=T` put with the SAME NON-ZERO `placement_id`
-    /// REPLACES the first placement (kitty spec, Task 100.18): the old
+    /// REPLACES the first placement (kitty spec): the old
     /// placement's cells must be cleared, leaving only the new placement's
     /// cells (at its own screen position) on screen.
     #[test]
@@ -6073,7 +6067,7 @@ mod tests {
         );
     }
 
-    /// Task 100.14 regression test: `place_kitty_image` used to capture the
+    /// Regression test: `place_kitty_image` used to capture the
     /// cursor row/col *before* calling `Buffer::place_image`, then pass that
     /// stale position straight to `record_real_placement`. But
     /// `Buffer::place_image` may call `enforce_scrollback_limit` internally,
@@ -6087,8 +6081,8 @@ mod tests {
     /// image's cells were *actually* stamped (ground truth), not the stale
     /// pre-call cursor row.
     ///
-    /// The expected-origin arithmetic accounts for a second Task 100.15
-    /// effect: whenever placing an image forces a scrollback drain, the
+    /// The expected-origin arithmetic accounts for a second effect: whenever
+    /// placing an image forces a scrollback drain, the
     /// post-drain cursor target always lands exactly one row past the
     /// image's new last row — i.e. exactly at the trimmed buffer's tail —
     /// so `place_image`'s "append a blank row below the image" step always
@@ -6098,9 +6092,9 @@ mod tests {
     /// this test's specific numbers — `origin_row` in this
     /// drain-triggering regime always works out to
     /// `max_rows - display_rows - 1`, independent of the starting cursor
-    /// row, which is exactly why the pre-100.15 `origin_row` and the
-    /// post-100.15 `origin_row` differ by a fixed amount rather than by
-    /// however many rows `grow_buffer_rows` happened to produce).
+    /// row, which is exactly why the origin row computed from the stale
+    /// cursor and the true `origin_row` differ by a fixed amount rather than
+    /// by however many rows `grow_buffer_rows` happened to produce).
     #[test]
     fn kitty_real_placement_origin_survives_scrollback_drain() {
         let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
@@ -6143,7 +6137,7 @@ mod tests {
         let first_drain = rows_after_stamp - 27; // 34 - 27 = 7
         let row_after_first_drain = stale_cursor_row - first_drain; // 19 - 7 = 12
 
-        // Stage 2 (Task 100.15): the post-first-drain cursor target
+        // Stage 2: the post-first-drain cursor target
         // (row_after_first_drain + display_rows = 12 + 15 = 27) lands
         // exactly at max_rows(27) — one past the image's now-last row —
         // so `place_image` appends a fresh row there and immediately
@@ -6157,10 +6151,10 @@ mod tests {
             "test setup must actually force a drain, or it can't distinguish \
              the fix from the bug"
         );
-        // Task 125.14: the recorded origin is a stable row NUMBER. It was
+        // The recorded origin is a stable row NUMBER. It was
         // taken at the pre-drain cursor row (row 19, base 0) and, being
         // stable, still names the image's top row; that row's retained index
-        // after the drains is what the pre-125.14 test compared directly.
+        // after the drains is what this test compares.
         assert_eq!(
             placement.origin_row,
             RowNumber::new(19),
@@ -6169,14 +6163,14 @@ mod tests {
         assert_eq!(
             handler.buffer().row_index_of(placement.origin_row),
             Some(expected_origin_row),
-            "100.14: origin_row must resolve to the post-drain stamped row, not \
+            "origin_row must resolve to the post-drain stamped row, not \
              the stale pre-call cursor row"
         );
         assert_eq!(
             stale_cursor_row - expected_drained_total,
             expected_origin_row,
             "sanity: origin_row = stale_cursor_row - total rows drained \
-             across both 100.15 drain stages"
+             across both drain stages"
         );
         assert_eq!(placement.origin_col, 0);
 
@@ -6198,7 +6192,7 @@ mod tests {
         );
     }
 
-    /// Task 125.14: a recorded placement origin is a stable row NUMBER, so it
+    /// A recorded placement origin is a stable row NUMBER, so it
     /// keeps naming the image's row when LATER output evicts rows above it
     /// (the old physical origin drifted onto a different row).
     #[test]
@@ -6250,7 +6244,7 @@ mod tests {
         );
     }
 
-    /// Task 125.14: a relative placement made AFTER eviction resolves its
+    /// A relative placement made AFTER eviction resolves its
     /// parent's row through the stable number, not through a drifted index.
     #[test]
     fn kitty_relative_child_lands_below_its_parent_after_eviction() {
@@ -6368,7 +6362,7 @@ mod tests {
         })
     }
 
-    /// Review NIT: a negative `V=` that carries the child above row 0 used to
+    /// A negative `V=` that carries the child above row 0 used to
     /// saturate onto row 0. It has no row to land on: accepted, but neither
     /// stamped nor registered.
     #[test]
@@ -6471,7 +6465,7 @@ mod tests {
         assert!(!handler.active_real_placements().contains_key(&(77, 0)));
     }
 
-    // ── Pruning placements whose origin was evicted (review NIT) ────────────
+    // ── Pruning placements whose origin was evicted ────────────
 
     /// Drive `lines` newline outputs through the batch entry point, the way a
     /// PTY read does.
@@ -6642,7 +6636,7 @@ mod tests {
         assert!(handler.active_real_placements().contains_key(&(83, 0)));
     }
 
-    /// Task 125.14: a width-changing reflow renumbers every row; the handler
+    /// A width-changing reflow renumbers every row; the handler
     /// carries its placement origins through the buffer's `ReflowRemap`.
     #[test]
     fn kitty_real_placement_follows_its_image_through_reflow() {
@@ -6692,7 +6686,7 @@ mod tests {
         );
     }
 
-    // ── Placement maps are per screen (Task 131.7) ──────────────────────────
+    // ── Placement maps are per screen ───────────────────────────────────────
 
     /// Place a 1x1 real image `id` at the cursor of the active screen.
     fn place_real(handler: &mut TerminalHandler, id: u32) {
@@ -7239,7 +7233,7 @@ mod tests {
 
         // Delete A by id, uppercase `I` — the cascade to relative children
         // (real_placements pruning + child cell clearing) only fires on the
-        // data-freeing path (Task 100.7a), so this must use the uppercase
+        // data-freeing path, so this must use the uppercase
         // form rather than lowercase `i`.
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -7310,7 +7304,7 @@ mod tests {
         assert_eq!(child.parent, Some((42, 0)));
 
         // No image cells were stamped for B — positioning is deferred to
-        // Task 100.4b.
+        // render time.
         let has_image_99 = handler.buffer().rows().iter().any(|row| {
             row.cells()
                 .iter()
@@ -7318,11 +7312,11 @@ mod tests {
         });
         assert!(
             !has_image_99,
-            "a child of a virtual parent must not be stamped yet (100.4b)"
+            "a child of a virtual parent must not be stamped yet"
         );
     }
 
-    // ── Task 100.4b: render-time positioning of virtual-parent relative
+    // ── Render-time positioning of virtual-parent relative
     //    children in `visible_image_placements_extended` ──────────────────
 
     /// Grow the buffer to at least `rows` rows by driving `rows - 1` line
@@ -7331,8 +7325,8 @@ mod tests {
     /// buffer's initial single row.
     ///
     /// This previously grew the buffer by stamping a throwaway image via
-    /// `Buffer::place_image`. Task 100.15 changed `place_image` to append
-    /// an extra blank row and move the cursor onto it after a tail
+    /// `Buffer::place_image`. `place_image` appends an extra blank row and
+    /// moves the cursor onto it after a tail
     /// placement — entirely correct production behavior, but it meant
     /// this generic row-growth test helper silently inherited whatever
     /// cursor-placement quirks `place_image` had, coupling unrelated
@@ -7508,7 +7502,7 @@ mod tests {
     #[test]
     fn real_parent_child_not_double_injected() {
         // A real-parent relative child is already stamped into the buffer
-        // by Task 100.4a; since its parent key lives in `real_placements`
+        // at placement time; since its parent key lives in `real_placements`
         // (not `virtual_placements`), `inject_virtual_parent_relatives`
         // must skip it entirely rather than moving or duplicating it.
         let (mut handler, _rx) = kitty_handler();
@@ -7517,7 +7511,7 @@ mod tests {
         // Real (non-virtual) parent placement (42, 0).
         handler.insert_real_placement(42, 0, RowNumber::new(0), 0, 1, 1, None, 0, 0, 0, 1);
 
-        // Child (99, 0) already stamped at (1, 0) — as 100.4a would have
+        // Child (99, 0) already stamped at (1, 0) — as placement would have
         // done via `place_image_at` — with parent = (42, 0), h=1, v=1
         // (irrelevant here since the parent is real, not virtual).
         stamp_parent_placeholder_block(&mut handler, 99, 0, 1, 0, 1, 1);
@@ -7538,7 +7532,7 @@ mod tests {
         assert_eq!(
             matches,
             vec![(1, 0)],
-            "real-parent child must remain exactly where 100.4a stamped it, not moved/duplicated"
+            "real-parent child must remain exactly where it was stamped, not moved/duplicated"
         );
     }
 
@@ -7708,7 +7702,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Consent gate and uniform replies (GHSA-8prj-mhmf-xpjg)
+    // Consent gate and uniform replies
     // -----------------------------------------------------------------------
 
     /// Drain `rx`, require exactly one PTY reply, and return it.
@@ -8653,7 +8647,7 @@ mod tests {
 
         // An error response should have been sent.
         // Every failure of a file-backed medium replies identically; the
-        // detailed ENOENT reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        // detailed ENOENT reason is logged, never sent.
         assert_file_refused(&handler, &rx, 995);
     }
 
@@ -8690,7 +8684,7 @@ mod tests {
         );
 
         // Every failure of a file-backed medium replies identically; the
-        // detailed EINVAL reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        // detailed EINVAL reason is logged, never sent.
         assert_file_refused(&handler, &rx, 995);
     }
 
@@ -8726,7 +8720,7 @@ mod tests {
             );
 
             // Every failure of a file-backed medium replies identically; the
-            // detailed EPERM reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+            // detailed EPERM reason is logged, never sent.
             assert_file_refused(&handler, &rx, 995);
         }
     }
@@ -8880,7 +8874,7 @@ mod tests {
             );
 
             // Every failure of a file-backed medium replies identically; the
-            // detailed EPERM reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+            // detailed EPERM reason is logged, never sent.
             assert_file_refused(&handler, &rx, 995);
         }
     }
@@ -9082,7 +9076,7 @@ mod tests {
         assert!(handler.buffer().image_store().get(996).is_none());
 
         // Every failure of a file-backed medium replies identically; the
-        // detailed EFBIG reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        // detailed EFBIG reason is logged, never sent.
         assert_file_refused(&handler, &rx, 996);
 
         assert!(
@@ -9735,7 +9729,7 @@ mod tests {
         );
     }
 
-    /// Regression (Task 125.C7): at scrollback capacity, placing an image
+    /// Regression: at scrollback capacity, placing an image
     /// evicts rows DURING the placement. `C=1` must still leave the cursor on
     /// the image's origin cell, not on whatever row now holds the stale index.
     #[test]
@@ -9782,7 +9776,7 @@ mod tests {
         assert_eq!((placement.col_in_image, placement.row_in_image), (0, 0));
     }
 
-    /// Task 125 review: an image taller than the screen scrolls its own origin
+    /// An image taller than the screen scrolls its own origin
     /// into scrollback. `C=1` must not park the cursor there, where the next
     /// write would be invisible: it clamps to the top of the live window.
     #[test]
@@ -10844,7 +10838,7 @@ mod tests {
     }
 
     /// A 80x4 handler with scrollback, scrolled so the live window starts well
-    /// below buffer row 0 (Task 125.C8): screen row `n` is buffer row `n + start`.
+    /// below buffer row 0: screen row `n` is buffer row `n + start`.
     fn kitty_handler_with_scrollback() -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
         let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(20);
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
@@ -11888,19 +11882,19 @@ mod tests {
         );
     }
 
-    /// Task 100.16 regression test: `place_kitty_image`'s `a=T`/Put display
+    /// Regression test: `place_kitty_image`'s `a=T`/Put display
     /// branch used to call `Buffer::place_image` + `record_real_placement`
     /// without ever checking `control.no_cursor_movement` — only the `a=p`
     /// path (`stamp_kitty_put`) implemented the C=1 save/restore. This test
     /// previously passed for the WRONG reason: with a 1-row image, the old
-    /// (pre-100.15) `place_image` parked the cursor back on the image's own
-    /// single row, which happened to coincide with `cursor_before` in a
+    /// `place_image` (which then parked the cursor back on the image's own
+    /// single row) happened to coincide with `cursor_before` in a
     /// fresh single-row buffer, masking the missing C=1 handling entirely.
     ///
     /// Using an explicit `r=2` (2-row) image makes that coincidental clamp
     /// impossible: without a genuine save/restore, the cursor would land
     /// either on the image's second row or on the fresh blank row
-    /// `place_image` (Task 100.15) appends below it — never back at
+    /// `place_image` appends below it — never back at
     /// `cursor_before` — so this can only pass if `place_kitty_image`
     /// actually saves and restores the cursor for C=1.
     #[test]
@@ -11946,9 +11940,9 @@ mod tests {
     }
 
     /// Companion to `kitty_transmit_and_display_with_no_cursor_movement`:
-    /// locks in the other half of Task 100.16's behavior. Without `C=1`,
+    /// locks in the other half of that behavior. Without `C=1`,
     /// `a=T`/Put must let the cursor move below the placed image — to the
-    /// fresh row `Buffer::place_image` (Task 100.15) appends below it — not
+    /// fresh row `Buffer::place_image` appends below it — not
     /// leave it at the pre-call position and not clamp it onto the image's
     /// own last row.
     #[test]
@@ -12092,7 +12086,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Kitty animation tests (Task 100.2b): a=f, a=a, a=c
+    // Kitty animation tests: a=f, a=a, a=c
     // ------------------------------------------------------------------
 
     /// Transmit a 2x2 opaque-black RGBA base image (store only) with the
@@ -12697,7 +12691,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Kitty image number (`I=`) reference-by-number tests (Task 100.3)
+    // Kitty image number (`I=`) reference-by-number tests
     // -----------------------------------------------------------------------
 
     /// Parse the `i=<id>` field out of the next queued kitty graphics
@@ -13001,7 +12995,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Source-crop (`a=p`/`a=T` x/y/w/h, Task 100.9)
+    // Source-crop (`a=p`/`a=T` x/y/w/h)
     // ------------------------------------------------------------------
 
     /// Transmit (store-only, no display) a 10x10 opaque-black RGBA base
@@ -13096,7 +13090,7 @@ mod tests {
         );
     }
 
-    /// `a=p,X=,Y=` (Task 100.19) must stamp the resolved [`SubCellOffset`]
+    /// `a=p,X=,Y=` must stamp the resolved [`SubCellOffset`]
     /// onto every placed cell.
     #[test]
     fn kitty_put_with_subcell_offset_stamps_resolved_offset_onto_placed_cells() {
@@ -13128,7 +13122,7 @@ mod tests {
     }
 
     /// `X=`/`Y=` at or beyond the cell's pixel dimensions must be clamped
-    /// to strictly less than the cell size (Task 100.19) — the default
+    /// to strictly less than the cell size — the default
     /// handler cell size is 8x16px, so `X=100` clamps to 7 and `Y=100`
     /// clamps to 15.
     #[test]

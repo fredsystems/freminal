@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Regression tests for `resize_and_alt.rs` found by the Task 125 review:
+//! Regression tests for `resize_and_alt.rs` found in review:
 //! the throwaway buffer an alternate-screen resize reflows the parked primary
 //! screen in must honour the configured scrollback limit, and a height grow
 //! must restore the compressed scrollback rows it re-exposes.

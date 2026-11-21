@@ -3,31 +3,31 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Live render-work profiling foundation (Task 125.4), wired to the
-//! `gui::terminal::widget` pane render path by Task 125.5.
+//! Live render-work profiling, wired to the
+//! `gui::terminal::widget` pane render path.
 //!
 //! This module is entirely gated behind the existing `frame-profiling`
 //! Cargo feature (see `freminal/Cargo.toml`) and compiled out completely in
 //! a default build -- see the `#[cfg(feature = "frame-profiling")]` on this
 //! module's declaration in `super`. It defines the cohesive types
 //! [`RenderWorkClass`], [`ChangedRowBucket`], [`UploadByteCounts`], and
-//! [`LiveRenderProfile`] itself (125.4), plus the raw-decision mirror types
+//! [`LiveRenderProfile`] itself, plus the raw-decision mirror types
 //! [`RawRebuildDecision`] / [`ReevaluatedRebuild`] and the pure
-//! [`resolve_render_work_class`] mapping (125.5) that let
+//! [`resolve_render_work_class`] mapping that let
 //! `gui::terminal::widget::FreminalTerminalWidget::show` and its pane
 //! `PaintCallback` record a live observation per frame without this module
 //! naming `gui::terminal::frame_dirty::VertexRebuild` directly (that type is
 //! `pub(super)`-scoped to `gui::terminal` and unreachable from here -- see
 //! [`RawRebuildDecision`]'s doc for why a mirror, not an import, is
-//! correct). Task 125.6 completes real per-buffer upload-byte attribution:
+//! correct). Real per-buffer upload-byte attribution works like this:
 //! `gui::renderer::gpu::TerminalRenderer::draw_with_verts` and
 //! `draw_with_cursor_only_update` now return the exact bytes their own GL
 //! upload calls issued, and the `widget.rs` paint callback finalizes each
 //! observation with that real [`UploadByteCounts`] instead of
 //! [`UploadByteCounts::default`] -- an uninvoked callback (the
 //! `FrameDamage::None` case) still finalizes as zero-upload, which remains
-//! correct because it is true: no GL upload was ever issued for it. 125.6
-//! also adds [`RenderWorkClassUploadTotals`], attributing cumulative upload
+//! correct because it is true: no GL upload was ever issued for it.
+//! [`RenderWorkClassUploadTotals`] additionally attributes cumulative upload
 //! bytes to each resolved [`RenderWorkClass`] so a later reconciliation
 //! pass can divide bytes by [`RenderWorkClassCounts`] to get an
 //! average-bytes-per-frame figure per class.
@@ -36,7 +36,7 @@
 //!
 //! `freminal`'s render path begins a pane's `show()` every egui update, but
 //! egui only invokes that pane's registered `PaintCallback` when the frame
-//! actually draws something (Task 124.2's `FrameDamage::None` means the
+//! actually draws something (`FrameDamage::None` means the
 //! callback is never invoked at all for a frame where nothing changed
 //! anywhere). A profiler that simply incremented a "started" counter and a
 //! "finished" counter separately could not tell a genuinely-skipped paint
@@ -95,13 +95,13 @@
 
 use std::collections::VecDeque;
 
-/// A strictly increasing identifier for one pane's `show()` call (125.4).
+/// A strictly increasing identifier for one pane's `show()` call.
 ///
 /// Handed out by [`LiveRenderProfile::start`] and consumed by exactly one
 /// matching [`LiveRenderProfile::complete`] call (see the module doc for
 /// why a later, mismatched completion is rejected rather than accepted).
 /// The wrapped counter is private; callers that need it for a diagnostic
-/// log line (125.5/125.6) read it back through [`Self::value`] rather than
+/// log line read it back through [`Self::value`] rather than
 /// constructing or comparing raw integers directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneFrameToken(u64);
@@ -117,12 +117,10 @@ impl PaneFrameToken {
 }
 
 /// Resolved render-work classification for one completed pane `show()`
-/// call (125.4).
+/// call.
 ///
-/// Matches the outcomes 125.5 resolves from the already-computed
-/// `dirty.rebuild` / `changed_rows` / `full_rebuild` decision (see that
-/// subtask's scope note -- this type is defined here so the state machine
-/// can be built and tested before any call site records into it).
+/// Matches the outcomes the widget resolves from the already-computed
+/// `dirty.rebuild` / `changed_rows` / `full_rebuild` decision.
 ///
 /// [`Self::Bounded`] carries its own [`ChangedRowBucket`] rather than
 /// pairing a bare `Bounded` variant with a separate `Option<ChangedRowBucket>`
@@ -146,8 +144,7 @@ pub enum RenderWorkClass {
     Full,
 }
 
-/// The raw `VertexRebuild` decision, mirrored here for the live profiler
-/// (Task 125.5).
+/// The raw `VertexRebuild` decision, mirrored here for the live profiler.
 ///
 /// `super::super::terminal::frame_dirty::VertexRebuild` is
 /// `pub(super)`-scoped to the `gui::terminal` module tree and therefore
@@ -185,7 +182,7 @@ pub enum RawRebuildDecision {
 }
 
 /// How a [`RawRebuildDecision::ReevaluateFullRebuild`] resolved, once the
-/// caller checked its own full-repaint trigger flags (Task 125.5).
+/// caller checked its own full-repaint trigger flags.
 ///
 /// A named two-state outcome, not a bare `bool`, per
 /// `freminal-state-representation`: this is not an independent signal,
@@ -202,7 +199,7 @@ pub enum ReevaluatedRebuild {
 }
 
 /// Resolve a [`RawRebuildDecision`] into the [`RenderWorkClass`] the live
-/// profiler records (Task 125.5).
+/// profiler records.
 ///
 /// Pure and total: every [`RawRebuildDecision`] variant maps to exactly
 /// one [`RenderWorkClass`], with [`RawRebuildDecision::Bounded`]'s row
@@ -226,7 +223,7 @@ pub const fn resolve_render_work_class(raw: RawRebuildDecision) -> RenderWorkCla
 }
 
 /// A histogram bucket for a pane's changed-row count on a
-/// [`RenderWorkClass::Bounded`] frame (125.4).
+/// [`RenderWorkClass::Bounded`] frame.
 ///
 /// Buckets, not raw counts: a live per-frame log line summarising 120
 /// observations (the [`LiveRenderProfile::FLUSH_EVERY`] cadence) needs a
@@ -271,7 +268,7 @@ impl ChangedRowBucket {
     }
 }
 
-/// Cumulative occurrence counts for each [`ChangedRowBucket`] (125.4).
+/// Cumulative occurrence counts for each [`ChangedRowBucket`].
 ///
 /// Only incremented for [`RenderWorkClass::Bounded`] completions -- see
 /// [`LiveRenderProfile::complete`].
@@ -326,7 +323,7 @@ impl ChangedRowHistogram {
     }
 }
 
-/// Cumulative occurrence counts for each [`RenderWorkClass`] (125.4).
+/// Cumulative occurrence counts for each [`RenderWorkClass`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderWorkClassCounts {
     /// [`RenderWorkClass::Reuse`] completions.
@@ -354,8 +351,7 @@ impl RenderWorkClassCounts {
     }
 }
 
-/// Cumulative occurrence counts for each [`RawRebuildDecision`] (Task
-/// 125.5).
+/// Cumulative occurrence counts for each [`RawRebuildDecision`].
 ///
 /// Tracked alongside, but separately from, [`RenderWorkClassCounts`]: the
 /// raw decision and the resolved class are two different questions about
@@ -388,11 +384,10 @@ impl RawRebuildDecisionCounts {
 }
 
 /// Per-buffer live upload-byte attribution for one pane's completed paint
-/// callback (125.4).
+/// callback.
 ///
-/// 125.4 defines the type; 125.6 is the subtask that actually counts real
-/// GL upload bytes into it at the call sites -- see that subtask's scope
-/// note.
+/// The type is defined here; the draw call sites count real GL upload
+/// bytes into it.
 ///
 /// Every field is a separately-attributed GPU buffer/texture category so a
 /// later flush line can show which class of upload dominates a workload,
@@ -411,7 +406,7 @@ pub struct UploadByteCounts {
     pub image_vertex_vbo_bytes: u64,
     /// Bytes uploaded at draw time for the full-viewport background quads
     /// -- the background-image quad and the OSC 11 base-fill quad, each a
-    /// single quad re-uploaded every frame it is drawn (Task 132.C4).
+    /// single quad re-uploaded every frame it is drawn.
     pub background_quad_vbo_bytes: u64,
     /// Bytes uploaded to inline-image textures.
     pub image_texture_bytes: u64,
@@ -468,7 +463,7 @@ impl UploadByteCounts {
 }
 
 /// Cumulative upload-byte totals attributed to each resolved
-/// [`RenderWorkClass`] (Task 125.6).
+/// [`RenderWorkClass`].
 ///
 /// Distinct from both [`UploadByteCounts`] (a per-buffer-category
 /// breakdown for ONE observation) and [`RenderWorkClassCounts`]
@@ -509,14 +504,14 @@ impl RenderWorkClassUploadTotals {
     }
 }
 
-/// What became of one [`PaneFrameToken`] (125.4).
+/// What became of one [`PaneFrameToken`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneFrameOutcome {
     /// The matching paint callback ran and reported a resolved render-work
     /// class plus its upload-byte attribution.
     Painted {
         /// The raw `VertexRebuild` decision this completion was resolved
-        /// from (Task 125.5).
+        /// from.
         raw: RawRebuildDecision,
         /// The resolved render-work classification.
         class: RenderWorkClass,
@@ -529,7 +524,7 @@ pub enum PaneFrameOutcome {
     /// zero-upload.
     ///
     /// Retains the raw decision and resolved class [`LiveRenderProfile::start`]
-    /// was given for this token (Task 125.5 regression fix): a superseded
+    /// was given for this token: a superseded
     /// observation is still a real CPU-side dirty-tracking decision that
     /// happened this frame, even though no GPU work for it was ever
     /// issued, and discarding its classification would make the
@@ -554,8 +549,7 @@ pub struct PaneFrameRecord {
 }
 
 /// The raw decision and resolved class captured by
-/// [`LiveRenderProfile::start`] for the currently outstanding token (Task
-/// 125.5).
+/// [`LiveRenderProfile::start`] for the currently outstanding token.
 ///
 /// Retained so that if the token is later superseded rather than
 /// completed, its classification survives into the finalized
@@ -575,7 +569,7 @@ struct PendingObservation {
     class: RenderWorkClass,
 }
 
-/// Live, feature-gated render-work profiler (Task 125.4).
+/// Live, feature-gated render-work profiler.
 ///
 /// Owns exactly one outstanding [`PaneFrameToken`] at a time (see the
 /// module doc for the start/complete state machine), a bounded queue of the
@@ -587,12 +581,10 @@ struct PendingObservation {
 /// deliberately modeled on rather than sharing code with (see those types'
 /// docs for why that duplication is accepted).
 ///
-/// This subtask (125.4) defines and tests the state machine only. No
-/// renderer or widget call site constructs or drives one of these yet --
-/// that is 125.5 (which will own one `LiveRenderProfile` per pane and call
+/// One `LiveRenderProfile` is owned per pane; the widget calls
 /// [`Self::start`] from `show()` and [`Self::complete`] from the pane's
-/// paint callback) and 125.6 (which feeds real upload byte counts into
-/// [`Self::complete`]).
+/// paint callback, feeding real upload byte counts into
+/// [`Self::complete`].
 #[derive(Debug, Default)]
 pub struct LiveRenderProfile {
     /// The next token [`Self::start`] will hand out.
@@ -600,15 +592,14 @@ pub struct LiveRenderProfile {
     /// The currently outstanding observation, if one has been started but
     /// not yet finalized (by either a matching [`Self::complete`] or a
     /// superseding [`Self::start`]). Carries the raw/resolved
-    /// classification alongside the token (Task 125.5 regression fix) so
+    /// classification alongside the token so
     /// a superseded observation can still be finalized with its
     /// classification intact.
     pending: Option<PendingObservation>,
     /// The most recently finalized records, bounded to
     /// `Self::RECORD_QUEUE_CAPACITY` entries (oldest evicted first).
     records: VecDeque<PaneFrameRecord>,
-    /// Cumulative [`RawRebuildDecision`] occurrence counts since creation
-    /// (Task 125.5).
+    /// Cumulative [`RawRebuildDecision`] occurrence counts since creation.
     raw_counts: RawRebuildDecisionCounts,
     /// Cumulative [`RenderWorkClass`] occurrence counts since creation.
     class_counts: RenderWorkClassCounts,
@@ -618,7 +609,7 @@ pub struct LiveRenderProfile {
     /// Cumulative upload-byte totals since creation.
     upload_totals: UploadByteCounts,
     /// Cumulative upload-byte totals since creation, attributed to each
-    /// resolved [`RenderWorkClass`] (Task 125.6).
+    /// resolved [`RenderWorkClass`].
     class_upload_totals: RenderWorkClassUploadTotals,
     /// Painted completions since creation.
     painted_count: u64,
@@ -630,8 +621,7 @@ pub struct LiveRenderProfile {
     /// Set when a finalization (by either [`Self::complete`] or the
     /// stale-token sweep inside [`Self::start`]) causes
     /// [`Self::observation_count`] to cross a [`Self::FLUSH_EVERY`]
-    /// boundary, and cleared by [`Self::take_flush_signal`] (Task 125.5
-    /// regression fix). This value never leaves `LiveRenderProfile` --
+    /// boundary, and cleared by [`Self::take_flush_signal`]. This value never leaves `LiveRenderProfile` --
     /// callers only ever observe it through the one-shot
     /// [`Self::take_flush_signal`] accessor, the same shape as the
     /// `pending` field's own internal-only role.
@@ -662,14 +652,14 @@ impl LiveRenderProfile {
     const RECORD_QUEUE_CAPACITY: usize = 120;
 
     /// Explicit `tracing` target for the periodic flush summary the
-    /// `widget.rs` call site logs under (Task 125.5), kept distinct from
-    /// the pre-existing `"freminal::frame_profiling"` target (Task 121's
+    /// `widget.rs` call site logs under, kept distinct from
+    /// the pre-existing `"freminal::frame_profiling"` target (the
     /// app-level GUI-thread duty-cycle stats,
     /// `freminal::gui::window::FrameStats`) and
     /// `"freminal_windowing::frame_profiling"` (the windowing crate's
     /// per-window phase-timing stats) so a live session can filter this
     /// pane-level render-work signal independently of either.
-    pub const LOG_TARGET: &str = "freminal::task_125::live_render_profile";
+    pub const LOG_TARGET: &str = "freminal::live_render_profile";
 
     /// Construct a fresh profile with no outstanding token and all-zero
     /// cumulative totals.
@@ -679,7 +669,7 @@ impl LiveRenderProfile {
     }
 
     /// Begin a new pane-frame observation, with the raw decision and
-    /// resolved class already known (Task 125.5).
+    /// resolved class already known.
     ///
     /// If a previously started token is still outstanding (its matching
     /// [`Self::complete`] never arrived before this call), it is finalized
@@ -718,7 +708,7 @@ impl LiveRenderProfile {
     ///
     /// Takes back only the token and `uploads` -- not the raw decision or
     /// resolved class, both of which [`Self::start`] already recorded for
-    /// this exact token (Task 125.5 regression fix). A callback cannot
+    /// this exact token. A callback cannot
     /// therefore report a classification that disagrees with what `start`
     /// was given.
     pub fn complete(&mut self, token: PaneFrameToken, uploads: UploadByteCounts) -> bool {
@@ -748,11 +738,11 @@ impl LiveRenderProfile {
 
     /// Finalize a pending observation as unpainted (zero-upload),
     /// retaining its raw/resolved classification, from either
-    /// [`Self::start`] superseding it or (in a future subtask) an explicit
+    /// [`Self::start`] superseding it or (potentially) an explicit
     /// end-of-frame sweep for a token that egui never painted.
     fn finalize_unpainted(&mut self, pending: PendingObservation) {
         self.record_classification(pending.raw, pending.class);
-        // Explicit zero-byte attribution (Task 125.6), not a silent skip:
+        // Explicit zero-byte attribution, not a silent skip:
         // an unpainted observation issued no GL upload at all, so it must
         // reconcile against `class_upload_totals` at the same granularity
         // `class_counts` already does -- see `RenderWorkClassUploadTotals`'s
@@ -774,7 +764,7 @@ impl LiveRenderProfile {
     /// [`Self::raw_counts`] / [`Self::class_counts`] / [`Self::row_bucket_counts`]
     /// totals, shared by [`Self::complete`] and [`Self::finalize_unpainted`]
     /// so painted and unpainted observations reconcile against the SAME
-    /// totals (Task 125.5 regression fix) rather than a painted-only
+    /// totals rather than a painted-only
     /// subset.
     const fn record_classification(&mut self, raw: RawRebuildDecision, class: RenderWorkClass) {
         self.raw_counts.record(raw);
@@ -788,8 +778,7 @@ impl LiveRenderProfile {
     /// (painted or unpainted) and latch `Self::flush_signal` if this
     /// observation crosses a [`Self::FLUSH_EVERY`] boundary. Shared by
     /// [`Self::complete`] and [`Self::finalize_unpainted`] so either
-    /// finalizer can trigger the same flush signal (Task 125.5 regression
-    /// fix).
+    /// finalizer can trigger the same flush signal.
     const fn note_observation(&mut self) {
         self.observation_count = self.observation_count.saturating_add(1);
         if self.observation_count.is_multiple_of(Self::FLUSH_EVERY) {
@@ -824,8 +813,7 @@ impl LiveRenderProfile {
         self.records.iter()
     }
 
-    /// Cumulative [`RawRebuildDecision`] occurrence counts since creation
-    /// (Task 125.5).
+    /// Cumulative [`RawRebuildDecision`] occurrence counts since creation.
     #[must_use]
     pub const fn raw_counts(&self) -> RawRebuildDecisionCounts {
         self.raw_counts
@@ -850,7 +838,7 @@ impl LiveRenderProfile {
     }
 
     /// Cumulative upload-byte totals since creation, attributed to each
-    /// resolved [`RenderWorkClass`] (Task 125.6).
+    /// resolved [`RenderWorkClass`].
     #[must_use]
     pub const fn class_upload_totals(&self) -> RenderWorkClassUploadTotals {
         self.class_upload_totals
@@ -875,8 +863,7 @@ impl LiveRenderProfile {
         self.observation_count
     }
 
-    /// Consume the pending flush signal, if one is set (Task 125.5
-    /// regression fix).
+    /// Consume the pending flush signal, if one is set.
     ///
     /// Returns `true` at most once per crossed [`Self::FLUSH_EVERY`]
     /// boundary: whichever finalizer crossed it -- [`Self::complete`] or
@@ -1088,7 +1075,7 @@ mod tests {
         );
     }
 
-    /// Regression test (Task 125.5 review): an unpainted `Reuse`
+    /// Regression test: an unpainted `Reuse`
     /// observation -- superseded by the next `start()` before any
     /// `complete()` arrived -- must still contribute to the cumulative
     /// raw/resolved counts, and its upload contribution must be zero.
@@ -1118,7 +1105,7 @@ mod tests {
         );
     }
 
-    /// Regression test (Task 125.5 review): an unpainted `Bounded`
+    /// Regression test: an unpainted `Bounded`
     /// observation must still contribute its changed-row bucket to
     /// [`ChangedRowHistogram`] -- not just to `class_counts().bounded`.
     #[test]
@@ -1263,7 +1250,7 @@ mod tests {
         }
     }
 
-    /// Regression test (Task 125.5 review): the 120th observation
+    /// Regression test: the 120th observation
     /// finalized by a superseding `start()` call (the stale-token sweep,
     /// not `complete()`) must still produce exactly one consumable flush
     /// signal, even when a LATER observation completes normally before
@@ -1323,8 +1310,8 @@ mod tests {
 
     // ── resolve_render_work_class: every raw-to-resolved mapping ───────
     //
-    // One test per `RawRebuildDecision` variant/payload combination Task
-    // 125.5 introduces, pinning the exact mapping `widget.rs`'s call site
+    // One test per `RawRebuildDecision` variant/payload combination,
+    // pinning the exact mapping `widget.rs`'s call site
     // relies on rather than re-deriving it inline.
 
     #[test]
@@ -1418,7 +1405,7 @@ mod tests {
         assert_eq!(profile.row_bucket_counts().zero, 1);
     }
 
-    // ── RenderWorkClassUploadTotals (Task 125.6) ───────────────────────
+    // ── RenderWorkClassUploadTotals ───────────────────────
 
     #[test]
     fn render_work_class_upload_totals_default_is_zero() {
@@ -1466,8 +1453,8 @@ mod tests {
         assert_eq!(profile.class_counts().full, 3);
     }
 
-    /// Regression-shape test (mirrors 125.5's unpainted-classification
-    /// fix): an unpainted (superseded) observation must still be
+    /// Regression-shape test (mirrors the unpainted-classification
+    /// regression test): an unpainted (superseded) observation must still be
     /// attributed to `class_upload_totals` -- with exactly zero bytes,
     /// since it issued no GL upload at all -- so the per-class byte total
     /// reconciles against the SAME `class_counts` denominator a later

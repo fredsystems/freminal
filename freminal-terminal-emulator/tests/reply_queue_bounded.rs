@@ -4,13 +4,13 @@
 // https://opensource.org/licenses/MIT.
 
 //! A child that does not read its tty must not make terminal replies queue
-//! without bound (GHSA-6cxq-f7hx-92v2).
+//! without bound.
 //!
 //! The real PTY path gives the handler a bounded sender
 //! (`REPLY_QUEUE_CAPACITY`); these tests bind a `TerminalState` to such a
 //! sender with nobody reading the other end, then flood it with queries.
 //!
-//! The queue is also bounded in bytes (`MAX_QUEUED_REPLY_BYTES`, 148.C9): the
+//! The queue is also bounded in bytes (`MAX_QUEUED_REPLY_BYTES`): the
 //! byte-budget tests drive large clipboard replies through
 //! `TerminalHandler::write_gui_reply` with a shared queued-bytes counter that
 //! stands in for the writer thread.
@@ -236,7 +236,7 @@ fn byte_budget_is_refunded_when_the_message_queue_is_full() {
     assert_eq!(queued.load(Ordering::Relaxed), total);
 }
 
-/// PR #572 review: a DECCOLM resize and a GUI resize interleaved while the
+/// A DECCOLM resize and a GUI resize interleaved while the
 /// writer is behind must leave the PTY at the emulator's final width. With
 /// DECCOLM resizes coalesced through the slot but GUI resizes sent directly,
 /// an early marker could apply a later DECCOLM size after a newer GUI resize

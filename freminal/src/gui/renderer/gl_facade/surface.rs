@@ -5,22 +5,21 @@
 
 //! The frozen GL call surface.
 //!
-//! Task 123, `PLAN_123_GL_MEASUREMENT_HARNESS.md`, subtask 123.1 — the
-//! audited enumeration of every `glow::HasContext` method the `freminal`
+//! See `Documents/DESIGN_DECISIONS.md`, "GL Call Boundary and Measurement
+//! Harnesses". This module holds the audited enumeration of every `glow::HasContext` method the `freminal`
 //! crate calls — plus the test-time guard that keeps that enumeration
-//! honest until the facade migration (123.2–123.5) lands.
+//! honest until the facade migration lands.
 
 /// Every `glow::HasContext` method freminal calls, sorted and de-duplicated.
 ///
-/// This is the frozen surface `PLAN_123` subtask 123.1 audited. The plan
-/// document's own original enumeration (written before this audit) said
-/// **47** and omitted two call sites: `create_program` (`gpu.rs:1614`) and
+/// This is the frozen, audited surface. The original hand-written
+/// enumeration said **47** and omitted two call sites: `create_program` (`gpu.rs:1614`) and
 /// `create_shader` (`gpu.rs:1643`), both written as multi-line method
 /// chains (`gl` on one line, `.create_program()` / `.create_shader(..)` on
-/// the next) that the plan's grep-based audit missed. 123.1's audited
+/// the next) that a grep-based audit missed; the audited
 /// figure was **49**.
 ///
-/// Task 125.8 added **7** methods for the asynchronous GPU timestamp-query
+/// The asynchronous GPU timestamp-query adapter later added **7** methods for the asynchronous GPU timestamp-query
 /// adapter (`gui::renderer::gpu_profiling::PaneGpuTimingProfile`):
 /// `create_query` / `delete_query` (query object lifecycle),
 /// `query_counter` (issues a `GL_TIMESTAMP`), `get_query_parameter_u32` /
@@ -99,17 +98,17 @@ pub const GL_CALL_SURFACE: [&str; 56] = [
 
 /// The draw-call subset of [`GL_CALL_SURFACE`].
 ///
-/// Per the plan: draw calls are `draw_arrays` + `draw_arrays_instanced`.
-/// Consumed by 123.8's workload assertions (draw-call count per frame).
+/// Draw calls are `draw_arrays` + `draw_arrays_instanced`.
+/// Consumed by the workload assertions (draw-call count per frame).
 pub const DRAW_CALL_METHODS: [&str; 2] = ["draw_arrays", "draw_arrays_instanced"];
 
 /// The state-change subset of [`GL_CALL_SURFACE`].
 ///
-/// Per the plan: state changes are the `bind_*` family plus `use_program` /
+/// State changes are the `bind_*` family plus `use_program` /
 /// `enable` / `disable` / `scissor`. `active_texture` is included beyond
-/// the plan's literal wording because it is a texture-unit selector — a
+/// the obvious `bind_*` family because it is a texture-unit selector — a
 /// bind-family state change — and omitting it would undercount. Consumed
-/// by 123.8's workload assertions (state-change count per frame).
+/// by the workload assertions (state-change count per frame).
 pub const STATE_CHANGE_METHODS: [&str; 9] = [
     "active_texture",
     "bind_buffer",
@@ -124,8 +123,8 @@ pub const STATE_CHANGE_METHODS: [&str; 9] = [
 
 /// The upload subset of [`GL_CALL_SURFACE`].
 ///
-/// Per the plan: uploads are `buffer_data_*` / `buffer_sub_data_u8_slice` /
-/// `tex_image_2d` / `tex_sub_image_2d`. Consumed by 123.8's workload
+/// Uploads are `buffer_data_*` / `buffer_sub_data_u8_slice` /
+/// `tex_image_2d` / `tex_sub_image_2d`. Consumed by the workload
 /// assertions (upload count/bytes per frame).
 pub const UPLOAD_METHODS: [&str; 5] = [
     "buffer_data_size",
@@ -156,10 +155,10 @@ mod tests {
     /// `bind_framebuffer` / `enable` / `scissor` / `disable` /
     /// `clear_color` / `clear` calls *between* calls into `gpu.rs` inside
     /// the same `PaintCallback`, so leaving them raw would make the
-    /// recording log's state-change metric silently undercount. 123.4
-    /// migrated `gpu.rs`, `widget.rs`, and `app_impl.rs` together for
+    /// recording log's state-change metric silently undercount. The migration
+    /// moved `gpu.rs`, `widget.rs`, and `app_impl.rs` together for
     /// exactly that reason; that same rationale is why the two toast
-    /// passes (123.5) also had to go through the facade rather than stay
+    /// passes also had to go through the facade rather than stay
     /// an accepted exception.
     const NOT_YET_MIGRATED: [&str; 0] = [];
 
@@ -172,7 +171,7 @@ mod tests {
     /// empty; this one means "must not be migrated", and an entry here is a
     /// standing decision rather than debt.
     ///
-    /// `pixel_harness.rs` (Task 123 Phase 2) calls `read_pixels`, `finish`
+    /// `pixel_harness.rs` calls `read_pixels`, `finish`
     /// and `pixel_store_i32` on the raw context to capture the framebuffer
     /// after a frame has been drawn. Routing those through [`super::Gl`]
     /// would be wrong twice over:
@@ -183,10 +182,10 @@ mod tests {
     ///   *freminal draws with*, not what the test harness pokes at.
     /// - If the pixel path were ever driven against a recording `Gl`, the
     ///   instrument's own calls would land in the log and inflate the very
-    ///   counts 123.8 asserts on. An instrument must not appear in its own
+    ///   counts the workload assertions rely on. An instrument must not appear in its own
     ///   measurements.
     ///
-    /// `gpu/destroy_gl_tests.rs` (Task 125.C2) is exempt for the same
+    /// `gpu/destroy_gl_tests.rs` is exempt for the same
     /// reason: it asks the real driver whether names are still valid
     /// objects (`is_program`, `is_buffer`, `is_texture`, `get_error`) after
     /// `TerminalRenderer::destroy`. Those are queries about the driver, not
@@ -200,7 +199,7 @@ mod tests {
     ];
 
     /// The facade module is the one place in the crate that is *allowed* —
-    /// and from 123.2, required — to reference `glow::HasContext` directly:
+    /// and required — to reference `glow::HasContext` directly:
     /// its `Real` arm delegates straight to the driver. Excluding it from
     /// the walk is therefore part of the guard's definition, not an escape
     /// hatch, and it is what lets the detector and its own failure messages
@@ -251,7 +250,8 @@ mod tests {
     /// - It scans the `freminal` crate only. `freminal-windowing` calls
     ///   `clear_color`/`clear` directly on its own `glow::Context`
     ///   (`gl_context.rs`), and this guard is blind to it by construction.
-    ///   See the "disclosed gap" note in `PLAN_123`'s Findings.
+    ///   See `Documents/DESIGN_DECISIONS.md`, "GL Call Boundary and
+    ///   Measurement Harnesses" / "Why a concrete `Gl` facade".
     ///
     /// Both require deliberate action rather than an accident, which is why
     /// the heuristic is judged worth having — but it should not be mistaken
@@ -292,7 +292,7 @@ mod tests {
         assert!(
             unexpected.is_empty(),
             "unexpected file(s): {unexpected:?} — route GL calls through \
-             `gui::renderer::gl_facade::Gl` (Task 123) instead of calling \
+             `gui::renderer::gl_facade::Gl` instead of calling \
              `glow::Context` directly. If this file genuinely cannot go \
              through the facade, add it to NOT_YET_MIGRATED with a written \
              justification."
@@ -318,7 +318,7 @@ mod tests {
             GL_CALL_SURFACE.windows(2).all(|w| w[0] < w[1]),
             "GL_CALL_SURFACE must be strictly ascending (sorted and \
              duplicate-free) — it is a frozen audited list, and duplicates \
-             would silently corrupt 123.8's metric-group subset checks"
+             would silently corrupt the metric-group subset checks"
         );
     }
 

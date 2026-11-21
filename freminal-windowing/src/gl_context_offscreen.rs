@@ -3,10 +3,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Offscreen GL context construction (Task 123, subtask 123.11).
+//! Offscreen GL context construction.
 //!
 //! One concept: building a current GL context that renders into an
-//! offscreen pbuffer instead of a window. This is the Phase 2 counterpart
+//! offscreen pbuffer instead of a window. This is the offscreen counterpart
 //! to `crate::gl_context`'s windowed path, and is **additive** — it
 //! shares no code with, and changes nothing about, how the real
 //! application creates its context.
@@ -16,7 +16,7 @@
 //! `PROFILING.md` names the absence of a pixel-readback harness as the
 //! single biggest hole in freminal's methodology: a regression that changes
 //! *what* is drawn, rather than how often, is invisible to every existing
-//! check. Phase 1's call-recording harness closed the "how often" half.
+//! check. The call-recording harness closed the "how often" half.
 //! This closes the "what" half by giving tests a real GL context they can
 //! draw into and read back from.
 //!
@@ -39,8 +39,7 @@
 //!
 //! # Why there is no winit `Window` here
 //!
-//! 123.11 was specified as a pbuffer path, and it turns out not to need
-//! winit at all: [`glutin::display::Display::new`] accepts a raw display
+//! A pbuffer path turns out not to need winit at all: [`glutin::display::Display::new`] accepts a raw display
 //! handle directly. That matters for testability rather than tidiness — a
 //! winit `EventLoop` can only be constructed once per process and must be
 //! on the main thread, which would make a context-per-test harness
@@ -70,10 +69,10 @@ use crate::error::Error;
 pub struct OffscreenGl {
     /// The glow context callers actually draw through.
     ///
-    /// `Arc`-wrapped (Task 124.19b) so [`Self::gl_arc`] can hand out a second
+    /// `Arc`-wrapped so [`Self::gl_arc`] can hand out a second
     /// owning reference for `egui_glow::Painter::new`, which takes
     /// `Arc<glow::Context>` by value rather than a borrow. [`Self::gl`]
-    /// keeps its pre-124.19b borrow-based signature — the `Arc` is an
+    /// keeps its borrow-based signature — the `Arc` is an
     /// implementation detail existing callers (e.g. `freminal`'s pixel
     /// harness) do not need to know about.
     gl: Arc<glow::Context>,
@@ -186,8 +185,8 @@ impl OffscreenGl {
 
     /// The glow context to draw through.
     ///
-    /// No longer `const` as of Task 124.19b: `self.gl` became
-    /// `Arc<glow::Context>` so [`Self::gl_arc`] could exist, and returning
+    /// Not `const`: `self.gl` is an
+    /// `Arc<glow::Context>` so [`Self::gl_arc`] can exist, and returning
     /// `&glow::Context` from it now goes through `Arc`'s `Deref` coercion
     /// (the exact same pattern `GlState::glow` already uses over its own
     /// `Arc<glow::Context>` field in `frame_paint.rs`) — `Deref::deref` is
@@ -201,7 +200,7 @@ impl OffscreenGl {
     ///
     /// Exists for [`egui_glow::Painter::new`], which takes ownership of an
     /// `Arc<glow::Context>` rather than borrowing one — [`Self::gl`] cannot
-    /// serve that call. Task 124.19b's offscreen frame-paint harness is the
+    /// serve that call. The offscreen frame-paint harness is the
     /// first (and, as of this writing, only) caller.
     #[must_use]
     pub fn gl_arc(&self) -> Arc<glow::Context> {
@@ -231,7 +230,7 @@ mod tests {
     use super::OffscreenGl;
     use glow::HasContext;
 
-    /// 123.11's required smoke test: clear to a known colour, read the
+    /// Smoke test: clear to a known colour, read the
     /// framebuffer back, and assert the pixel matches.
     ///
     /// **Requires `xvfb-run` (or any live `$DISPLAY`) plus Mesa.** Outside
@@ -240,7 +239,7 @@ mod tests {
     /// on a developer's machine for want of an X server would teach people
     /// to ignore it.
     ///
-    /// **In CI it does not skip, it fails.** The Phase 2 job (123.13)
+    /// **In CI it does not skip, it fails.** The GL pixel CI job
     /// guarantees Mesa and Xvfb, so a missing context there means a broken
     /// runner, and silently skipping would turn that into a false green —
     /// the exact failure the skip path is otherwise designed to avoid.

@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Phase 13: OSC coverage (0/1/2 titles, 4/10/11 colors, 8 hyperlinks, 1337 extras)
+//! OSC coverage (0/1/2 titles, 4/10/11 colors, 8 hyperlinks, 1337 extras)
 
 use freminal_terminal_emulator::ansi_components::osc::AnsiOscParser;
 

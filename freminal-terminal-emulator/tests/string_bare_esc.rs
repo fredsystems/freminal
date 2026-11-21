@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! A bare ESC ends an OSC, DCS or APC string (Task 147.8).
+//! A bare ESC ends an OSC, DCS or APC string.
 //!
 //! An ESC inside a string that is not followed by `\` (ST) ends the string:
 //! the body received so far is dispatched, and the ESC starts a new escape

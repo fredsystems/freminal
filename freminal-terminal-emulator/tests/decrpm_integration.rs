@@ -192,7 +192,7 @@ fn backspace_at_column_zero_does_not_wrap_until_mode_45_is_set() {
     );
 }
 
-/// `?45` is handler-owned since Task 131.C3, so the `TerminalModes` table in
+/// `?45` is handler-owned, so the `TerminalModes` table in
 /// `querying_a_terminal_state_mode_never_changes_stored_modes` cannot see it:
 /// prove observably that a query reports the set state and leaves it set.
 #[test]
@@ -734,7 +734,7 @@ fn decrpm_decsclm_in_8bit_mode_uses_0x9b() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// A DECRQM must never overwrite the stored state (Task 130.C6)
+// A DECRQM must never overwrite the stored state
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -837,7 +837,7 @@ fn querying_a_terminal_state_mode_never_changes_stored_modes() {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // KAM (2), SRM (12), ?1001, ?1034, ?1035: recognised, not implemented
-// (Task 147.21). Set and reset change nothing and write nothing; DECRQM
+// Set and reset change nothing and write nothing; DECRQM
 // answers Ps=0, in the ANSI form for KAM/SRM and the DEC form for the rest.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -962,7 +962,7 @@ fn not_implemented_dec_modes_decrqm_in_8bit_mode_uses_0x9b_with_question_mark() 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ?1036 (meta sends escape) and ?1039 (alt sends escape) — Task 147.24.
+// ?1036 (meta sends escape) and ?1039 (alt sends escape).
 // Real modes: DECRQM reports the stored state as Ps=1 / Ps=2. ?1036 defaults
 // to set, ?1039 to reset, and both return to their defaults on RIS and DECSTR.
 // ═══════════════════════════════════════════════════════════════════════════

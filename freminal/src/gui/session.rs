@@ -110,7 +110,7 @@ impl FreminalGui {
     /// is the window that was removed from `self.windows` for the duration
     /// of the current `update()` frame (see `build_layout`'s doc comment),
     /// so passing it here is what lets a save taken *during* that window's
-    /// own frame still capture that window (issue #509's `QuitAll`, which
+    /// own frame still capture that window (`QuitAll`, which
     /// must snapshot the complete topology before any window closes).
     pub(super) fn maybe_auto_save_session(&mut self, extra_win: Option<&window::PerWindowState>) {
         if !self.args.command.is_empty() {

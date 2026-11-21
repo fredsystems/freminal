@@ -390,7 +390,7 @@ const fn classify_reader_send_failure(shutdown_signalled: bool) -> ReaderSendFai
 }
 
 /// The receiving end of the bounded terminal-reply queue, with the byte counter
-/// it shares with the handler that fills it (148.C9).
+/// it shares with the handler that fills it.
 ///
 /// `queued_bytes` is the number of reply bytes sent on the channel and not yet
 /// written to the PTY.  The handler adds to it when it queues a reply and drops
@@ -426,7 +426,7 @@ fn release_reply_bytes(queued_bytes: &AtomicUsize, msg: &PtyWrite) {
 /// Drive the PTY writer thread: apply every message from the user channel and
 /// the reply channel, in batches, until the user channel disconnects.
 ///
-/// Two channels feed the writer (GHSA-6cxq-f7hx-92v2).  `user_rx` is unbounded
+/// Two channels feed the writer.  `user_rx` is unbounded
 /// and carries keystrokes, paste, raw bytes and `PtyWrite::Resize`.  `replies.rx`
 /// is bounded (`REPLY_QUEUE_CAPACITY` messages and `MAX_QUEUED_REPLY_BYTES`
 /// bytes) and carries only terminal-generated replies, so a child that stops
@@ -578,12 +578,11 @@ pub struct PtySpawnConfig<'a> {
     /// Whether to set `TERM_PROGRAM=freminal` and `TERM_PROGRAM_VERSION` on the
     /// child process before applying `extra_env`, and to inject the
     /// shell-integration scripts.  Driven by
-    /// `config.shell_integration.set_term_program` (Task 72.6).
+    /// `config.shell_integration.set_term_program`.
     pub term_program: TermProgramEnv,
     /// Whether the shell-integration `sudo` wrapper that preserves `TERMINFO`
     /// is on.  Driven by `config.shell_integration.sudo_preserve_terminfo`
-    /// (Task 151.12, on by default); only takes effect when shell integration
-    /// is injected.
+    /// (on by default); only takes effect when shell integration is injected.
     pub sudo_terminfo: SudoTerminfo,
     /// The `TERM` set on the child: the single per-pane value, already
     /// resolved with `[shell] term` and the pane's `extra_env` `TERM`
@@ -596,7 +595,7 @@ pub struct PtySpawnConfig<'a> {
 /// announce itself via `TERM_PROGRAM` / `TERM_PROGRAM_VERSION`.
 ///
 /// The version string is `"<cargo-version> (<git-describe>)"`, matching
-/// what Freminal has emitted since pre-72.6.  Both values are formed at
+/// what Freminal has emitted since before the `set_term_program` option existed.  Both values are formed at
 /// runtime to keep the `VERGEN_GIT_DESCRIBE` suffix exact, so this
 /// helper returns owned `String`s rather than `&'static str`.
 ///
@@ -830,7 +829,7 @@ pub fn run_terminal(
     if let Some(termcaps) = termcaps {
         apply_terminfo_env(&mut cmd, termcaps);
     }
-    // TERM Strategy: children get `TERM=xterm-freminal` by default (Task 151).  The
+    // TERM Strategy: children get `TERM=xterm-freminal` by default.  The
     // entry is accurate (it is checked against XTGETTCAP and the parser/handler
     // by tests) and the `xterm-` prefix keeps programs that match `xterm*`
     // working, as `xterm-kitty` and `xterm-ghostty` do.  The bundled entry is
@@ -849,13 +848,13 @@ pub fn run_terminal(
 
     // Shell integration: announce ourselves to scripts via TERM_PROGRAM.
     // Applied BEFORE `extra_env` so layout/user env wins on conflict.
-    // Gated on `[shell_integration] set_term_program` (Task 72.6).
+    // Gated on `[shell_integration] set_term_program`.
     if term_program == TermProgramEnv::Advertise {
         for (key, value) in term_program_env_pairs() {
             cmd.env(key, value);
         }
     }
-    // Spawn-time shell-integration env injection (Task 72.8b).
+    // Spawn-time shell-integration env injection.
     //
     // When we're spawning a bare interactive shell (no positional command)
     // and `term_program` is `Advertise`, detect the shell flavour and inject
@@ -884,7 +883,7 @@ pub fn run_terminal(
     } else {
         None
     };
-    // Tell the injected scripts which optional features are on (Task 151.12).
+    // Tell the injected scripts which optional features are on.
     // Runs on every spawn so an inherited list is always dropped unless this
     // spawn turns the feature on.
     apply_spawn_shell_features(&mut cmd, injected_shell, sudo_terminfo);
@@ -2243,8 +2242,7 @@ mod echo_off_event_driven_tests {
     }
 }
 
-/// Tests of [`run_writer_loop`], the two-channel PTY writer loop
-/// (GHSA-6cxq-f7hx-92v2). They need no PTY: the loop takes a closure as its
+/// Tests of [`run_writer_loop`], the two-channel PTY writer loop. They need no PTY: the loop takes a closure as its
 /// sink, and the tests gate that closure with channels, never with sleeps.
 #[cfg(test)]
 mod writer_loop_tests {

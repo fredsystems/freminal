@@ -311,7 +311,7 @@ impl FreminalGui {
         });
     }
 
-    // ── Layout application (Task 61.2) ───────────────────────────────────────
+    // ── Layout application ───────────────────────────────────────
 
     /// Spawn a PTY-backed `Pane` for a resolved layout leaf.
     ///

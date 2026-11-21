@@ -3,13 +3,13 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! GPU timestamp-query foundation (Task 125.7).
+//! GPU timestamp-query foundation.
 //!
 //! One concept: a bounded, asynchronous GPU timer-query lifecycle,
 //! independent of any concrete GL context. The state machine here never
 //! calls a GL function itself -- it is driven entirely through the
 //! [`GpuQuerySource`] trait, so it can be exercised with fake handles in
-//! tests and later wired to real `glow::Query` handles (Task 125.8) without
+//! tests and later wired to real `glow::Query` handles without
 //! this module changing.
 //!
 //! # Why asynchronous
@@ -54,7 +54,7 @@
 //! the raw `GL_VERSION` string a real caller reads via
 //! `glow::HasContext::get_parameter_string(glow::VERSION)`.
 //!
-//! # Frame-phase timing (Task 125.9)
+//! # Frame-phase timing
 //!
 //! Below the ring, [`FrameGpuTiming`] is the windowing layer's own consumer
 //! of it: a pure, GL-free state machine that turns the eight
@@ -65,11 +65,10 @@
 //! lifecycle rule is tested with fake handles; [`GlowTimestampSource`] is the
 //! thin real-GL implementation.
 //!
-//! It lives in this file rather than its own module because the plan scopes
-//! 125.9 to this file, `frame_paint.rs`, `egui_integration.rs` and
-//! `PROFILING.md`; it is a second concept layered on the first and is the
-//! natural first candidate to move to its own module if this file grows
-//! again.
+//! It lives in this file rather than its own module because it is only
+//! consumed by `frame_paint.rs` and `egui_integration.rs`; it is a second
+//! concept layered on the first and is the natural first candidate to move to
+//! its own module if this file grows again.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -193,10 +192,11 @@ fn parse_leading_version(s: &str) -> Option<GlVersion> {
 /// `"chrome_paint"`).
 ///
 /// `freminal-windowing` does not know or care what operations exist --
-/// naming them is entirely the owning crate's business (Task 125.8/125.9
-/// wire concrete phase names). Kept as a distinct wrapper type rather than
-/// a bare `&'static str` parameter so a phase can never be silently
-/// transposed with some other unrelated string argument at a call site.
+/// naming them is entirely the owning crate's business (the `freminal` crate
+/// and `frame_paint.rs` wire concrete phase names). Kept as a distinct wrapper
+/// type rather than a bare `&'static str` parameter so a phase can never be
+/// silently transposed with some other unrelated string argument at a call
+/// site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GpuProfilePhase(pub &'static str);
 
@@ -266,7 +266,7 @@ pub struct CompletedSample {
 
 impl CompletedSample {
     /// How many frames elapsed between issue and availability -- the
-    /// "query latency in frames" the plan calls for reporting.
+    /// "query latency in frames" worth reporting.
     ///
     /// Saturating: [`GpuQueryRing::poll`] never completes a sample before its
     /// issue frame, but this reporting-only accessor must not panic (debug) or
@@ -288,7 +288,7 @@ impl CompletedSample {
 }
 
 /// Non-blocking access to GPU query state, implemented by the owning crate
-/// over a real `glow::Context` (Task 125.8) or by a fake in tests.
+/// over a real `glow::Context` or by a fake in tests.
 ///
 /// [`GpuQueryRing`] calls this trait's methods and nothing else -- it never
 /// touches a GL function directly, which is what lets the ring's lifecycle
@@ -478,7 +478,7 @@ impl<Q> GpuQueryRing<Q> {
 }
 
 // ---------------------------------------------------------------------------
-// Task 125.9: chrome / terminal-band / total-frame GPU timing
+// Chrome / terminal-band / total-frame GPU timing
 // ---------------------------------------------------------------------------
 
 /// The phase name for the chrome painted before the terminal band (the
@@ -499,11 +499,11 @@ pub const PHASE_FRAME_TOTAL: GpuProfilePhase = GpuProfilePhase("frame_total");
 
 /// Explicit `tracing` target for [`FrameGpuTiming`]'s periodic flush summary.
 ///
-/// Distinct from every other Task 121/125 profiling target
-/// (`"freminal_windowing::frame_profiling"`, `"freminal::task_125::gpu_timing"`
+/// Distinct from every other profiling target
+/// (`"freminal_windowing::frame_profiling"`, `"freminal::gpu_timing"`
 /// and the rest) so a live session can filter windowing-side GPU timing
 /// independently of any of them.
-pub const LOG_TARGET: &str = "freminal_windowing::task_125::gpu_timing";
+pub const LOG_TARGET: &str = "freminal_windowing::gpu_timing";
 
 /// How many simultaneously pending samples one window's ring tolerates.
 ///
@@ -1178,11 +1178,11 @@ mod tests {
         assert_eq!(ring.dropped_sample_count(), 2);
     }
 
-    /// Task 125.7 review fix: a rejected sample's handles must come back to
+    /// A rejected sample's handles must come back to
     /// the caller -- not be silently discarded -- so the caller can
     /// explicitly destroy them exactly as it would any accepted sample's
     /// handles. This is the exact-handle-identity + no-ownership-claim
-    /// proof called for by the review.
+    /// proof.
     #[test]
     fn dropped_ring_full_returns_ownership_of_the_rejected_handles_for_explicit_destruction() {
         let mut ring: GpuQueryRing<u32> = GpuQueryRing::new(1);
@@ -1485,7 +1485,7 @@ mod tests {
         assert!(format!("{a:?}").contains("chrome_paint"));
     }
 
-    // ── FrameGpuTiming (Task 125.9) ──────────────────────────────────────
+    // ── FrameGpuTiming ───────────────────────────────────────────────────
 
     use FramePhaseBoundary::{
         BandEnd, BandStart, HeadEnd, HeadStart, TailEnd, TailStart, TotalEnd, TotalStart,

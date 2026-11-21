@@ -1,4 +1,4 @@
-# Long-running continuous fuzzing (issue 553).
+# Long-running continuous fuzzing.
 #
 # Runs every cargo-fuzz target in `fuzz/` for a fixed time budget on a
 # SELF-HOSTED runner and reports findings through a run summary, an artifact

@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 125.C16: a failed renderer `init` must not leak GL objects.
+//! A failed renderer `init` must not leak GL objects.
 //!
 //! Every test drives a real renderer through the recording facade with a
 //! fault armed ([`RecordingState::fail_nth_call`]) and then checks the one

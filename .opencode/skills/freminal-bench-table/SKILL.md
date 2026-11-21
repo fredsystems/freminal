@@ -110,23 +110,35 @@ name (the historical `feed_data_*` / `build_snapshot_*` naming in the
 old catalog referred to `BenchmarkId` labels or stale names, not the
 actual group IDs — corrected below).
 
-| Change area                                                             | Group ID                           | Defining function                  |
-| ----------------------------------------------------------------------- | ---------------------------------- | ---------------------------------- |
-| Data-feed, plain-text incremental (scrolling shell)                     | `render_terminal_text`             | `bench_feed_data_incremental`      |
-| Data-feed, ANSI/SGR-heavy (dense TUI)                                   | `render_terminal_text_ansi_heavy`  | `bench_feed_data_ansi_heavy`       |
-| Data-feed, bursty chunking pattern                                      | `render_terminal_text_bursty`      | `bench_feed_data_bursty`           |
-| `build_snapshot()` after an ANSI-heavy feed                             | `render_terminal_text_snapshot`    | `bench_build_snapshot_after_feed`  |
-| ArcSwap store/load (snapshot transport)                                 | `render_terminal_text_arcswap`     | `bench_arcswap_roundtrip`          |
-| Glyph shaping, ligatures on/off, cache hit, partial-dirty               | `shaping_ligatures`                | `bench_shaping_ligatures`          |
-| Fold-placeholder line shaping (Task 72.10)                              | `shape_placeholder_line`           | `bench_shape_placeholder_line`     |
-| Background vertex-instance build (80x24, 200x50)                        | `instanced_bg`                     | `bench_bg_instances`               |
-| Foreground vertex-instance build (80x24, 200x50)                        | `instanced_fg`                     | `bench_fg_instances`               |
-| Background vertex instances, all-rows-vs-one-row headroom (#405 Part C) | `instanced_bg_partial_dirty`       | `bench_bg_instances_partial_dirty` |
-| Foreground vertex instances, all-rows-vs-one-row headroom (#405 Part C) | `instanced_fg_partial_dirty`       | `bench_fg_instances_partial_dirty` |
-| Foreground cold-atlas rasterization                                     | `instanced_fg_atlas_rasterization` | `bench_fg_atlas_rasterization`     |
-| Chrome style build (`build_visuals`, theme/profile switch cost)         | `build_visuals`                    | `bench_build_visuals`              |
-| Kitty image animation frame-tick selection                              | `image_animation_tick`             | `bench_image_animation_tick`       |
-| Kitty image-quad vertex generation                                      | `build_image_verts`                | `bench_build_image_verts`          |
+| Change area                                                                                                                | Group ID                                                                                                                             | Defining function                  |
+| -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
+| Data-feed, plain-text incremental (scrolling shell)                                                                        | `render_terminal_text`                                                                                                               | `bench_feed_data_incremental`      |
+| Data-feed, ANSI/SGR-heavy (dense TUI)                                                                                      | `render_terminal_text_ansi_heavy`                                                                                                    | `bench_feed_data_ansi_heavy`       |
+| Data-feed, bursty chunking pattern                                                                                         | `render_terminal_text_bursty`                                                                                                        | `bench_feed_data_bursty`           |
+| `build_snapshot()` after an ANSI-heavy feed                                                                                | `render_terminal_text_snapshot`                                                                                                      | `bench_build_snapshot_after_feed`  |
+| ArcSwap store/load (snapshot transport)                                                                                    | `render_terminal_text_arcswap`                                                                                                       | `bench_arcswap_roundtrip`          |
+| Glyph shaping, ligatures on/off, cache hit, partial-dirty                                                                  | `shaping_ligatures`                                                                                                                  | `bench_shaping_ligatures`          |
+| Fold-placeholder line shaping (Task 72.10)                                                                                 | `shape_placeholder_line`                                                                                                             | `bench_shape_placeholder_line`     |
+| Background vertex-instance build (80x24, 200x50)                                                                           | `instanced_bg`                                                                                                                       | `bench_bg_instances`               |
+| Foreground vertex-instance build (80x24, 200x50)                                                                           | `instanced_fg`                                                                                                                       | `bench_fg_instances`               |
+| Background vertex instances, all-rows-vs-one-row headroom (#405 Part C)                                                    | `instanced_bg_partial_dirty`                                                                                                         | `bench_bg_instances_partial_dirty` |
+| Foreground vertex instances, all-rows-vs-one-row headroom (#405 Part C)                                                    | `instanced_fg_partial_dirty`                                                                                                         | `bench_fg_instances_partial_dirty` |
+| Foreground cold-atlas rasterization                                                                                        | `instanced_fg_atlas_rasterization`                                                                                                   | `bench_fg_atlas_rasterization`     |
+| Chrome style build (`build_visuals`, theme/profile switch cost)                                                            | `build_visuals`                                                                                                                      | `bench_build_visuals`              |
+| Kitty image animation frame-tick selection                                                                                 | `image_animation_tick`                                                                                                               | `bench_image_animation_tick`       |
+| Kitty image-quad vertex generation                                                                                         | `build_image_verts`                                                                                                                  | `bench_build_image_verts`          |
+| Shaping across frames with a persistent cache: identical redraw, one-line scroll, half-screen rewrite (Task 124 run cache) | `shaping_crossframe` (IDs `shape_visible_identical_redraw`, `shape_visible_scroll_by_one_line`, `shape_visible_persistent_fm_cache`) | `bench_shaping_crossframe`         |
+
+## freminal/benches/chrome_cost_bench.rs and pane_resolution_bench.rs
+
+| Change area                                                                | Group ID / IDs                                                                             |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Chrome widget construction and tessellation cost (menu, 4 tabs, 3 borders) | `chrome` (`construct_4tabs_3borders`, `tessellate`)                                        |
+| Pointer-motion pane resolution (pane tree layout, hit tests, highlight)    | `layout`, `iter_panes`, `split_borders`, `find`, `pane_at_pos`, `active_highlight_segment` |
+
+The `pane_resolution_bench` IDs are nanosecond-scale and noisier than the 15% gate on a laptop;
+use them for algorithmic shape within one run, not per-ID percentage deltas (see
+`Documents/DESIGN_DECISIONS.md`, "Orchestration Extraction (Task 122)").
 
 ## Scrollback eviction at capacity (Task 125 `RowStore` remediation)
 

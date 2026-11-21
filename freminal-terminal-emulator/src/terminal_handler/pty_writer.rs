@@ -98,11 +98,11 @@ impl TerminalHandler {
     /// The send never blocks.  In the real PTY path the sender is bounded
     /// twice over, so a child that stops reading its tty cannot make a flood
     /// of queries (`ESC [ c` repeated, long XTGETTCAP lists) queue replies
-    /// without bound (GHSA-6cxq-f7hx-92v2):
+    /// without bound:
     ///
     /// - by **messages**: `REPLY_QUEUE_CAPACITY`; and
     /// - by **bytes**: `MAX_QUEUED_REPLY_BYTES`, tracked in the counter shared
-    ///   with the writer thread (148.C9).  A message bound alone is not enough,
+    ///   with the writer thread.  A message bound alone is not enough,
     ///   because an OSC 52 query reply carries the clipboard (only when
     ///   `allow_clipboard_read` is on) and a GUI-originated reply can be larger
     ///   than a DA answer.  A reply that would push the queued total past the

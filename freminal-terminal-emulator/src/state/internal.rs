@@ -283,8 +283,8 @@ impl TerminalState {
             // its own subset of Table 5-9 of the VT510 Programmer Reference.
             // Of the `TerminalState`-owned mode fields only DECCKM (cursor
             // keys) and DECNKM (keypad) are on that table, so only those two
-            // are reset here, plus `?1036` / `?1039`, which Task 147.24
-            // returns to their defaults on both resets. Mouse tracking, bracketed paste, focus
+            // are reset here, plus `?1036` / `?1039`, which return to their
+            // defaults on both resets. Mouse tracking, bracketed paste, focus
             // reporting, synchronized updates, DECSCNM and the rest of
             // `TerminalModes` are deliberately left alone: none are in
             // Table 5-9.
@@ -858,7 +858,7 @@ impl TerminalState {
 mod tests {
     use super::*;
 
-    // ── Bounded trace logging (129.C6) ──────────────────────────────────────
+    // ── Bounded trace logging ──────────────────────────────────────
 
     #[test]
     fn parsed_output_trace_is_bounded_for_a_large_dcs() {
@@ -1067,7 +1067,7 @@ mod tests {
     #[test]
     fn an_ill_formed_utf8_tail_is_processed_now() {
         // `84` cannot continue `E0`, so the tail is not held back: under
-        // S8C1T the `84` is IND in this read (PR #589 review).
+        // S8C1T the `84` is IND in this read.
         let mut state = TerminalState::default();
         let before = state.handler.cursor_pos();
         state.handle_incoming_data(b"\x1b G\xe0\x84");
@@ -1140,7 +1140,7 @@ mod tests {
         state.send_focus_event(false);
     }
 
-    // ── 147.7: CSI Ps u with parameters is ignored ──────────────────────────
+    // ── CSI Ps u with parameters is ignored ─────────────────────────────────
     #[test]
     fn csi_ps_u_with_parameter_does_not_restore_cursor() {
         let mut state = TerminalState::default();

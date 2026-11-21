@@ -25,11 +25,11 @@ conv2.workspace = true
 swash.workspace = true
 tempfile.workspace = true
 
-# Linux/BSD notification service (Tasks 138.12 and 149): it carries every
+# Linux/BSD notification service: it carries every
 # Linux/BSD notification, OSC 99 and legacy alike.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-# Times out the service's `NO_AUTO_START` calls without a helper thread
-# (138.C26). async-io's timer is driven by async-io's own process-wide reactor
+# Times out the service's `NO_AUTO_START` calls without a helper thread.
+# async-io's timer is driven by async-io's own process-wide reactor
 # thread, so it works inside `zbus::block_on`.
 async-io.workspace = true
 # `StreamExt` for the signal pumps and `FutureExt::or` for the call deadline.
@@ -62,7 +62,7 @@ swash.workspace = true
 notify-rust.workspace = true
 
 # Windows system notifications (OSC 9 / 777 / 133 D / Test Notification and the
-# OSC 99 untracked leg, Tasks 138.C15 and 149.3) are toasts built directly; the
+# OSC 99 untracked leg) are toasts built directly; the
 # OSC 99 one carries its image as an `appLogoOverride`.
 [target."cfg(windows)".dependencies]
 tauri-winrt-notification.workspace = true

@@ -4,12 +4,11 @@
 // https://opensource.org/licenses/MIT.
 
 //! Offscreen egui-level pixel harness for `crate::frame_paint::paint_frame`
-//! (Task 124.19b).
 //!
 //! One concept: driving `paint_frame` -- the real egui `run_ui` /
 //! tessellate / paint sequence, not just raw GL calls -- against an offscreen
 //! pbuffer, then reading the resulting pixels back. This exists because the
-//! Task 123 Phase 2 harness (`freminal/src/gui/renderer/pixel_harness.rs`)
+//! raw-GL harness (`freminal/src/gui/renderer/pixel_harness.rs`)
 //! cannot see this class of bug at all: it drives `HeadlessRenderer` directly
 //! against `glow`, and never constructs an `egui::Context` or calls
 //! `paint_frame`, so it never paints an egui `CentralPanel` (or any other
@@ -50,7 +49,7 @@ pub enum HarnessError {
     NoContext(#[from] crate::Error),
     /// `egui_glow::Painter::new` itself failed against a pbuffer context
     /// that WAS created successfully. Unlike [`Self::NoContext`], this is
-    /// not a condition this subtask's stop conditions permit working
+    /// not a condition that may be worked
     /// around -- a caller encountering it should treat it as a hard
     /// failure, not a skip.
     #[error("egui_glow painter creation failed against the offscreen context: {0}")]
@@ -68,7 +67,7 @@ pub enum HarnessError {
 /// the surface state `decide_partial_present`
 /// needs, independent of how many frames have actually been painted.
 ///
-/// `age` is a [`Cell<u32>`], not a plain field: a 124.18 test needs
+/// `age` is a [`Cell<u32>`], not a plain field: a clipped-redraw test needs
 /// different frames within the SAME `run_frames` sequence to report
 /// different ages (e.g. a `Full` baseline frame, then a `Partial` frame at
 /// `age == 1` to seed history, then a `Partial` frame at `age == 2` to
@@ -79,7 +78,7 @@ pub enum HarnessError {
 /// is sufficient and avoids the ceremony of a `Mutex` for a single flag.
 ///
 /// Separately records the region passed to the most recent
-/// `FrameSurface::clear_region_to` call (124.20), as a
+/// `FrameSurface::clear_region_to` call, as a
 /// `Cell<Option<DamageRect>>` rather than a second bool: a test asserting
 /// the scissored clear fired needs to know *which* region it was given,
 /// not just that it was called, to catch a bug that scissors to the wrong
@@ -125,7 +124,7 @@ impl HarnessSurface {
 
     /// The region passed to `FrameSurface::clear_region_to` since the
     /// last [`Self::reset_cleared`], or `None` if it was not called this
-    /// frame (124.20).
+    /// frame.
     #[must_use]
     pub const fn scissor_cleared_region(&self) -> Option<DamageRect> {
         self.scissor_cleared.get()
@@ -193,7 +192,7 @@ impl FrameSurface for HarnessSurface {
 /// not the other way around, so a type defined in the `freminal` crate is
 /// unreachable from this one. Deliberately minimal compared to its
 /// cross-crate cousin -- no golden-file machinery, no configurable channel
-/// tolerance (this subtask forbids one) -- because this harness only needs
+/// tolerance (comparisons are exact) -- because this harness only needs
 /// exact equality/difference checks within a single test run, never a
 /// cross-run golden comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,7 +247,7 @@ impl Readback {
 ///
 /// Boxed (rather than a bare generic on [`HarnessDriver::run_frames`]) so a
 /// single `Vec` can hold frames whose closures capture different local
-/// state -- mirroring the Phase 2 harness's own frame-sequence idiom
+/// state -- mirroring the raw-GL harness's own frame-sequence idiom
 /// (`capture_after_cursor_only_frames`), which likewise needs one call per
 /// frame with per-frame content.
 pub type FrameFn<'a> = Box<dyn FnMut(&egui::Context, &glow::Context) -> crate::FrameSignals + 'a>;
@@ -264,7 +263,7 @@ pub struct HarnessFrameResult {
     /// Whether `FrameSurface::clear_to` was called for this frame.
     pub cleared: bool,
     /// The region `FrameSurface::clear_region_to` was called with for
-    /// this frame, or `None` if it was not called (124.20).
+    /// this frame, or `None` if it was not called.
     pub scissor_cleared: Option<DamageRect>,
 }
 
@@ -283,7 +282,7 @@ pub struct HarnessDriver {
     painter: egui_glow::Painter,
     width: u32,
     height: u32,
-    /// This driver's record of recent frames' own declared damage (124.18)
+    /// This driver's record of recent frames' own declared damage
     /// -- owned here, not per-`run_frames`-call, so a test can call
     /// [`Self::run_frames`] more than once (e.g. to change
     /// [`Self::set_surface_age`] between individual frames) and still have
@@ -318,7 +317,7 @@ impl HarnessDriver {
         let ctx = egui::Context::default();
         // Pin the scale factor so a readback is deterministic regardless of
         // whatever DPI the host environment would otherwise report through
-        // `RawInput` -- this subtask forbids a comparison tolerance, so
+        // `RawInput` -- comparisons are exact (no tolerance), so
         // nothing here may depend on host-specific scaling.
         ctx.set_pixels_per_point(1.0);
 
@@ -335,13 +334,13 @@ impl HarnessDriver {
             // Deliberately distinct from every colour a test paints by
             // default -- see [`PaintFrameRequest::clear_color`]'s doc at
             // the call site below. Tests that need a non-opaque clear
-            // colour (124.20) override this via [`Self::set_clear_color`].
+            // colour (the scissored-clear tests) override this via [`Self::set_clear_color`].
             clear_color: [0.0, 0.0, 0.0, 1.0],
         })
     }
 
     /// Change the GL clear color painted through subsequent frames.
-    /// Defaults to opaque black (see [`Self::new`]'s doc). 124.20 needs a
+    /// Defaults to opaque black (see [`Self::new`]'s doc). The scissored-clear tests need a
     /// non-opaque clear color (mirroring `App::clear_color`'s
     /// `[0.0, 0.0, 0.0, 0.0]` at `background_opacity < 1.0`), which the
     /// harness cannot hardcode without breaking every other test's "a
@@ -383,7 +382,7 @@ impl HarnessDriver {
                 // every colour a test paints, so a stray clear (one that
                 // `was_cleared()` failed to catch, or an unwanted extra
                 // clear) would show up as an obviously wrong pixel rather
-                // than blending in. 124.20's tests override this via
+                // than blending in. The scissored-clear tests override this via
                 // `set_clear_color` because their whole premise is a
                 // non-opaque clear color.
                 clear_color: self.clear_color,
@@ -480,9 +479,9 @@ mod tests {
     /// recorded there (an earlier revision keyed the wrong variable and
     /// produced six spurious CI failures).
     ///
-    /// A [`HarnessError::PainterCreation`] is never skipped: per this
-    /// subtask's stop conditions, that failure is a genuine finding to
-    /// report, not a condition to route around.
+    /// A [`HarnessError::PainterCreation`] is never skipped: that
+    /// failure is a genuine finding to report, not a condition to route
+    /// around.
     fn new_driver_or_skip(
         support: PartialPresentSupport,
         age: u32,
@@ -560,7 +559,7 @@ mod tests {
     /// coincide, so only the vertical flip is needed: `y_bl = CANVAS -
     /// (top_y + height)`.
     ///
-    /// Since 124.18 this value IS what every unclipped primitive gets
+    /// This value IS what every unclipped primitive gets
     /// clipped to on a `Taken` frame (at `age == 1`, with no history, the
     /// reconstructed region is exactly this rect). It is built to
     /// genuinely correspond to `damage_paint_rect`, so this test reads as
@@ -727,22 +726,24 @@ mod tests {
         })
     }
 
-    /// **Pins the fix (124.18).** A taken partial present must leave every
+    /// **Pins the fix.** A taken partial present must leave every
     /// pixel outside the declared damage region byte-identical to the
     /// previous frame -- in particular `marker_rect`, which the declared
     /// damage region never touches and which frame 2 never repaints.
     ///
-    /// Before 124.18, this test asserted the OPPOSITE on purpose (assertion
+    /// This test once asserted the OPPOSITE on purpose (assertion
     /// 3 below was `assert_ne!`, with a comment explaining that a taken
     /// partial present painted the unclipped opaque chrome fill over the
     /// whole surface, wiping the marker): `paint_frame` painted head, band,
     /// and tail unclipped even when the clear was skipped, so the always
     /// present `CentralPanel`-equivalent background fill erased everything
-    /// outside the declared rect. 124.18 makes `paint_frame` intersect
+    /// outside the declared rect. `paint_frame` now intersects
     /// every primitive's `clip_rect` with the redraw region before
-    /// painting on a `Taken` frame, which is what turns this from a defect
-    /// pin into a fix pin. This inversion is mandatory, not a rewrite of
-    /// convenience -- see `PLAN_124_RENDER_EFFICIENCY.md`'s 124.18.
+    /// painting on a `Taken` frame, which is what turned this from a defect
+    /// pin into a fix pin. The inversion is mandatory, not a rewrite of
+    /// convenience -- see `Documents/DESIGN_DECISIONS.md`,
+    /// "Damage Model" / "Partial present was inert, and three
+    /// defects hid behind it".
     #[test]
     fn a_taken_partial_present_preserves_pixels_outside_the_damage_region() {
         let Some(mut driver) = new_driver_or_skip(
@@ -783,7 +784,7 @@ mod tests {
 
         // 3. THE FIX: the marker -- outside the declared damage region, and
         // never repainted by frame 2 -- is byte-identical to the baseline.
-        // Before 124.18, `paint_frame`'s unclipped head/band/tail paint
+        // Before the fix, `paint_frame`'s unclipped head/band/tail paint
         // overwrote it with the frame's own (identical-looking, but freshly
         // painted) chrome fill even though the clear was skipped.
         let (mx, my) = MARKER_SAMPLE;
@@ -855,7 +856,7 @@ mod tests {
             baseline_pixel, repainted_pixel,
             "repainting the identical marker shape must reproduce it \
              byte-identically; if this fails, the rasteriser or the harness \
-             is nondeterministic, which is a far larger bug than 124.18 -- \
+             is nondeterministic, which is a far larger bug than the clipping defect -- \
              and would make the defect test above meaningless"
         );
     }
@@ -898,12 +899,11 @@ mod tests {
         );
     }
 
-    /// **This is the case the whole subtask exists for (124.18).** Before
-    /// this change, `age == 2` -- the common real-hardware case (124.17's
-    /// GPU re-take measured a conventionally double-buffered surface
-    /// reporting exactly this in steady state) -- was unconditionally
+    /// **This is the case buffer-age history exists for.** Before it,
+    /// `age == 2` -- the common real-hardware case (a conventionally
+    /// double-buffered surface reports exactly this in steady state) -- was unconditionally
     /// `BlockedByBufferAge`, so partial present never fired on any shipped
-    /// build. After this change it must be `Taken`, reconstructed as the
+    /// build. Now it must be `Taken`, reconstructed as the
     /// union of this frame's own declared damage with the immediately
     /// previous frame's (`DamageHistory`).
     ///
@@ -944,7 +944,7 @@ mod tests {
 
         // 1. The decision itself: `Taken`, reconstructed as the union of
         // frame 3's own rect with frame 2's -- NOT `BlockedByBufferAge`
-        // (the pre-124.18 behaviour) and NOT narrowed to frame 3's own
+        // (the behaviour before history was kept) and NOT narrowed to frame 3's own
         // rect alone (which would silently drop frame 2's contribution).
         assert_eq!(
             taken.decision,
@@ -1001,9 +1001,9 @@ mod tests {
         assert_eq!(pixel, prev_damage_color().to_srgba_unmultiplied());
     }
 
-    // ── 124.20: scissor the clear to the redraw region ──────────────────
+    // ── Scissor the clear to the redraw region ──────────────────────────
     //
-    // Distinct geometry and its own non-opaque clear color -- the 124.18
+    // Distinct geometry and its own non-opaque clear color -- the clipped-redraw
     // suite above deliberately uses an OPAQUE clear color and covers every
     // `Taken` frame's redraw region with fully opaque paint after
     // clipping, so it can never observe this defect: an opaque overwrite
@@ -1066,8 +1066,8 @@ mod tests {
         }
     }
 
-    /// Baseline frame for the 124.20 tests: paints only the opaque marker
-    /// (no whole-canvas background fill -- unlike the 124.18 suite, this
+    /// Baseline frame for the scissored-clear tests: paints only the opaque marker
+    /// (no whole-canvas background fill -- unlike the clipped-redraw suite, this
     /// scene needs the untouched framebuffer outside the marker to stay at
     /// exactly `BLEND_CLEAR_COLOR`, which only the `Full`-damage clear
     /// below the marker paint provides).
@@ -1083,7 +1083,7 @@ mod tests {
         })
     }
 
-    /// Frame 2 for the 124.20 tests: paints ONLY the semi-transparent fill
+    /// Frame 2 for the scissored-clear tests: paints ONLY the semi-transparent fill
     /// over `blend_damage_rect`, and does NOT repaint the marker or any
     /// opaque background -- mirroring `App::clear_color`'s
     /// `background_opacity < 1.0` case, where the `CentralPanel` fill
@@ -1102,26 +1102,27 @@ mod tests {
         })
     }
 
-    /// **Pins the fix (124.20).** A `Taken` frame's clear must be scissored
+    /// **Pins the fix.** A `Taken` frame's clear must be scissored
     /// to the redraw region, not skipped entirely: a semi-transparent fill
     /// painted over that region must blend against `clear_color`, not
     /// against whatever stale, unrelated content a previous frame left
     /// behind there.
     ///
-    /// Before 124.20, this test asserted the OPPOSITE on purpose (assertion
+    /// This test once asserted the OPPOSITE on purpose (assertion
     /// 3 below was `assert_ne!`, pinning the defect): `paint_frame` skipped
     /// the clear entirely whenever `partial.is_some()`
     /// (`if partial.is_none() { surface.clear_to(clear_color); }`), so a
     /// non-opaque fill painted into the redraw region blended against
     /// whatever was already in the framebuffer there -- in this scene, an
     /// opaque marker the previous frame painted, which the declared damage
-    /// region subsumes but never repaints. 124.20 replaces "skip the
+    /// region subsumes but never repaints. The scissored clear replaces "skip the
     /// clear" with "scissor the clear to the redraw region"
     /// (`GlState::clear_scissored`, reached through
     /// `FrameSurface::clear_region_to`), which is what turns this from a
-    /// defect pin into a fix pin. This inversion is mandatory, not a
-    /// rewrite of convenience -- see `PLAN_124_RENDER_EFFICIENCY.md`'s
-    /// 124.20.
+    /// defect pin into a fix pin. The inversion is mandatory, not a
+    /// rewrite of convenience -- see
+    /// `Documents/DESIGN_DECISIONS.md`, "Damage Model" / "Partial
+    /// present was inert, and three defects hid behind it".
     #[test]
     fn a_taken_frame_scissors_the_clear_to_the_redraw_region() {
         let Some(mut driver) =
@@ -1151,8 +1152,8 @@ mod tests {
         // 2. THE FIX, part one: the scissored clear was called, with
         // exactly the redraw region -- and the FULL clear was not (a full
         // clear here would erase pixels outside the region that this
-        // frame never repaints, which is exactly what 124.17/124.18
-        // fixed).
+        // frame never repaints, which is exactly what the
+        // redraw-region clip/clear exists to prevent).
         assert!(
             !taken.cleared,
             "a Taken frame must not have done a full clear"
@@ -1191,9 +1192,9 @@ mod tests {
         );
     }
 
-    // ── Task 124.2: `FrameDamage::None` -- skip clear AND paint entirely ─
+    // ── `FrameDamage::None` -- skip clear AND paint entirely ─────────────
     //
-    // Distinct from the 124.18/124.20 suites above: those prove a `Taken`
+    // Distinct from the clipped-redraw and scissored-clear suites above: those prove a `Taken`
     // frame clips/clears correctly. This proves the newly possible
     // `FrameDamage::None` case skips the clear, every GL primitive paint,
     // AND the swap-adjacent steps `paint_frame` owns -- even though the
@@ -1235,7 +1236,7 @@ mod tests {
         })
     }
 
-    /// **Pins the fix (124.2).** A [`FrameDamage::None`] frame must leave
+    /// **Pins the fix.** A [`FrameDamage::None`] frame must leave
     /// the ENTIRE framebuffer byte-identical to the previous frame, even
     /// though its UI closure emitted paint shapes (including a brand-new
     /// one, `none_frame_phantom_rect`, `baseline_frame` never paints) --
@@ -1307,7 +1308,7 @@ mod tests {
         );
     }
 
-    /// **The other half of 124.2's contract.** A skipped `None` frame must
+    /// **The other half of the `None` contract.** A skipped `None` frame must
     /// not corrupt anything the NEXT frame's ordinary skip-clear +
     /// partial-present gate depends on -- the following `Partial` frame
     /// must still take the exact same age-1 fast path, clip correctly, and

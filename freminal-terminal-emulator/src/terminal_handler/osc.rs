@@ -174,7 +174,7 @@ impl TerminalHandler {
             // OSC 22 — kitty pointer shapes: set, push, pop and query.
             AnsiOscType::PointerShape(op) => self.handle_osc_pointer_shape(op),
 
-            // OSC 9;4 — ConEmu-style progress-state update (issue #507).
+            // OSC 9;4 — ConEmu-style progress-state update.
             //
             // A direct field mutation, not a `window_commands` push:
             // `window_commands` is a fire-once event queue and the wrong
@@ -187,7 +187,7 @@ impl TerminalHandler {
 
             // OSC 9 / OSC 777 — desktop notification.  Forward to the GUI via
             // the window-command channel; the GUI's notification router
-            // (Task 76.4) applies the `[notifications]` routing policy.
+            // applies the `[notifications]` routing policy.
             AnsiOscType::Notify {
                 source,
                 title,
@@ -201,7 +201,7 @@ impl TerminalHandler {
                 });
             }
 
-            // OSC 99 stateful notification (Task 99). See `handle_osc99`: while
+            // OSC 99 stateful notification. See `handle_osc99`: while
             // unsupported every chunk is dropped before anything else; while
             // supported, control payloads (`p=?`, `p=close`, `p=alive`) act at
             // once and content payloads are reassembled.
@@ -234,7 +234,7 @@ impl TerminalHandler {
                 self.ftcs_state = FtcsState::InPrompt;
                 // mark_prompt_row() powers PrevCommand/NextCommand navigation
                 // and must stay. start_command_block() is a sibling that
-                // opens the new CommandBlock storage introduced in 72.2/72.3.
+                // opens the new CommandBlock storage.
                 self.buffer.mark_prompt_row();
                 let cwd = self.current_working_directory().map(str::to_owned);
                 let _id = self.buffer.start_command_block(cwd, fid.clone());
@@ -596,14 +596,14 @@ mod tests {
     }
 
     /// A handler whose host supports OSC 99: while it does not, every OSC 99
-    /// request is dropped (130 adversarial review finding 14).
+    /// request is dropped.
     fn osc99_supported_handler() -> TerminalHandler {
         let mut handler = TerminalHandler::new(80, 24);
         handler.set_host_capabilities(osc99_supported_caps());
         handler
     }
 
-    // ── OSC 99 emit tests (Task 99.4) ─────────────────────────────────────────
+    // ── OSC 99 emit tests ─────────────────────────────────────────────────────
 
     /// A single done title-only notification finalizes and pushes exactly one
     /// `Notification99` window command with defaults mapped correctly.
@@ -750,7 +750,7 @@ mod tests {
         }
     }
 
-    // ── OSC 99 control routing (Task 99.5c) ───────────────────────────────────
+    // ── OSC 99 control routing ────────────────────────────────────────────────
 
     /// A `p=close` payload finalizing must push `Osc99Control { kind: Close }`,
     /// NOT a `Notification99` (Gap 1 fix — control payloads were previously
@@ -799,7 +799,7 @@ mod tests {
     }
 
     /// A `p=?` payload finalizing is answered by the handler and pushes no
-    /// window command (Task 130.5).
+    /// window command.
     #[test]
     fn osc_notify99_query_is_answered_without_window_command() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -835,7 +835,7 @@ mod tests {
     }
 
     /// A display payload type (`Title`) still produces `Notification99`, not
-    /// `Osc99Control` — the display path is unchanged by the 99.5c branch.
+    /// `Osc99Control` — the display path is unchanged by the control branch.
     #[test]
     fn osc_notify99_title_still_pushes_notification99_not_control() {
         let mut handler = osc99_supported_handler();
@@ -856,7 +856,7 @@ mod tests {
         }
     }
 
-    // ── 138.3: reassembly rework, fed as real escape sequences ────────────────
+    // ── reassembly, fed as real escape sequences ──────────────────────────────
 
     /// A full terminal state whose host supports OSC 99, and the receiver of
     /// everything it writes to the PTY.
@@ -1221,7 +1221,7 @@ mod tests {
         assert_eq!(notes[0].app_name, None);
     }
 
-    // ── 138.C7: rejected chunks, i=0, plain multi-byte text, g= priming ───────
+    // ── rejected chunks, i=0, plain multi-byte text, g= priming ───────────────
 
     /// Metadata for a middle chunk of transfer `id` with 65 items, one more
     /// than the parser accepts.
@@ -1420,7 +1420,7 @@ mod tests {
         );
     }
 
-    // ── Payload-free warn logging (129.14) ───────────────────────────────────
+    // ── Payload-free warn logging ────────────────────────────────────────────
 
     /// Feed `bytes` through the whole parser + handler pipeline and return
     /// every log event emitted on this thread while doing so.

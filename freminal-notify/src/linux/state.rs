@@ -333,7 +333,7 @@ impl DispatcherState {
         }
     }
 
-    /// Build the `Notify` arguments for a plain `notification` (Task 149.2).
+    /// Build the `Notify` arguments for a plain `notification`.
     ///
     /// What the notification asks for is its summary, body and urgency. The
     /// rest is fixed: freminal as the application and its icon (by name, and
@@ -343,7 +343,7 @@ impl DispatcherState {
     /// no category or sound hint. Summary and body are escaped only when the
     /// daemon has the `body-markup` capability, as OSC 99's body is: the
     /// specification only defines markup in the body, but some daemons also
-    /// format the summary (issue #560), and OSC 9 / OSC 777 text is untrusted.
+    /// format the summary, and OSC 9 / OSC 777 text is untrusted.
     ///
     /// An icon that does not decode is left out (and logged once).
     pub(super) fn plain_notify_args(&self, notification: &PlainNotification) -> NotifyArgs {
@@ -460,8 +460,8 @@ impl DispatcherState {
     }
 
     /// The event for an `ActionInvoked` signal. The mappings stay: the
-    /// service closes the activated notification next, which drops them
-    /// (138.C23). `None` for an id with no live
+    /// service closes the activated notification next, which drops them.
+    /// `None` for an id with no live
     /// instance or an action freminal never registered.
     fn on_action(&self, dbus_id: u32, action_key: &str) -> Option<SystemNotifyEvent> {
         let instance = *self.by_dbus_id.get(&dbus_id)?;
@@ -638,7 +638,7 @@ mod tests {
         );
     }
 
-    // ── Plain notifications (Task 149.2) ────────────────────────────────
+    // ── Plain notifications ──────────────────────────────────────────────
 
     fn plain(summary: &str, body: &str, urgency: NotificationUrgency) -> PlainNotification {
         PlainNotification {
@@ -1352,7 +1352,7 @@ mod tests {
         );
     }
 
-    // ── Sender filtering (138.C2) ───────────────────────────────────────
+    // ── Sender filtering ────────────────────────────────────────────────
 
     /// A state that believes `owner`, with instances 1 and 2 shown as ids 7
     /// and 8 by that owner (or with no recorded owner, when there is none).

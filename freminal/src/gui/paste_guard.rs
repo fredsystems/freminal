@@ -3,11 +3,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Smart paste guard analyzer (Task 77).
+//! Smart paste guard analyzer.
 //!
 //! Classifies a paste payload against the `[paste_guard]` config so the GUI
 //! can decide whether to send it straight to the PTY or first show a
-//! confirmation dialog (77.3, wired in 77.4).
+//! confirmation dialog.
 //!
 //! Two pieces live here:
 //!
@@ -34,7 +34,7 @@ use super::tabs::TabId;
 /// Captured at dialog-open time and carried through to confirmation so the
 /// payload lands in the originating pane even if focus moved in the meantime
 /// — e.g. with focus-follows-mouse enabled, moving the cursor onto the
-/// dialog's "Paste Anyway" button changes the active pane (Task 106 bug).
+/// dialog's "Paste Anyway" button changes the active pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::gui) struct PasteTarget {
     /// The tab that owned the paste when the dialog opened.
@@ -255,7 +255,7 @@ pub(in crate::gui) enum PasteDialogOutcome {
     /// The user cancelled. The pending paste must be discarded.
     Cancelled,
     /// The user confirmed. The carried payload (original or edited) must be
-    /// sent to the PTY by the caller (77.4), which owns bracketed-paste
+    /// sent to the PTY by the caller, which owns bracketed-paste
     /// wrapping and PTY routing. `target` identifies the pane the paste was
     /// destined for when the dialog opened, so the caller routes there rather
     /// than to whatever pane is active at confirmation time.
@@ -283,9 +283,9 @@ struct PasteDialogState {
     target: PasteTarget,
 }
 
-/// The confirm-paste modal dialog (Task 77.3).
+/// The confirm-paste modal dialog.
 ///
-/// Lives on `PerWindowState`. Opened by the paste path (77.4) when the
+/// Lives on `PerWindowState`. Opened by the paste path when the
 /// analyzer flags a payload, rendered every frame while open via [`show`],
 /// and resolved when the user confirms, cancels, or presses a shortcut.
 ///
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn dialog_outcome_equality() {
-        // Sanity-check the outcome enum used by 77.4's wire-in.
+        // Sanity-check the outcome enum used by the dialog wiring.
         assert_eq!(PasteDialogOutcome::Idle, PasteDialogOutcome::Idle);
         assert_ne!(
             PasteDialogOutcome::Paste {
@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn dialog_preserves_target_across_open() {
-        // Regression (Task 106): the destination pane is captured at open time
+        // Regression: the destination pane is captured at open time
         // so a confirmed paste routes to the originating pane even if focus
         // moved (e.g. focus-follows-mouse onto the dialog buttons). A distinct
         // target must round-trip through the dialog state unchanged.

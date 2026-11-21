@@ -254,8 +254,9 @@ This is not a hypothetical footgun. It shipped in the `default` shell from
 cost a full bisect plus a session of invalidated agent measurements before
 anyone looked at the environment. Worse, it is invisible to A/B comparison:
 both endpoints are equally affected, so the ~12% floor simply swamps
-whatever is under test. See 123.C2 in
-`PLAN_123_GL_MEASUREMENT_HARNESS.md`.
+whatever is under test. See `DESIGN_DECISIONS.md`, "GL Call Boundary and
+Measurement Harnesses (Task 123)" / "Phase 2: the pixel harness", and the
+`flake.nix` comment on `glPixelEnv`.
 
 **Always report frame rate and per-frame cost as a pair, never a single CPU
 number.** Total CPU is the product of the two, so a single figure cannot
@@ -282,10 +283,10 @@ cumulative mean read 388 µs/frame while the differenced steady-state window was
 measurements, the three findings, and the known gaps in the Finding 3 spike. Do
 not re-derive those numbers and do not restate them more strongly than §2A does.
 
-## Task 125 parity fixtures
+## Terminal parity fixtures
 
 Task 125 compares Freminal with pinned WezTerm and Ghostty binaries under
-matched configurations. The fixtures live under `assets/profiling/task125/` and
+matched configurations. The fixtures live under `assets/profiling/parity/` and
 must not read normal terminal, shell, or `btop` configuration.
 
 ### Shell and environment
@@ -328,7 +329,7 @@ same-window-size workload and is not claimed to be cell-count-normalized.
 Running `preflight` opens no window:
 
 ```sh
-assets/profiling/task125/run-matrix.sh preflight
+assets/profiling/parity/run-matrix.sh preflight
 ```
 
 `collector-preflight` also opens no window. It validates the unprivileged perf
@@ -336,7 +337,7 @@ events and the privileged scheduler tracepoint syntax; it may request sudo
 authentication:
 
 ```sh
-assets/profiling/task125/run-matrix.sh collector-preflight
+assets/profiling/parity/run-matrix.sh collector-preflight
 ```
 
 Every command that opens a GUI prints the terminal, cursor mode, workload,
@@ -354,9 +355,9 @@ prompt when physical movement must begin.
 Smoke one terminal at a time only after giving that notice:
 
 ```sh
-assets/profiling/task125/run-matrix.sh smoke freminal blink
-assets/profiling/task125/run-matrix.sh smoke wezterm blink
-assets/profiling/task125/run-matrix.sh smoke ghostty blink
+assets/profiling/parity/run-matrix.sh smoke freminal blink
+assets/profiling/parity/run-matrix.sh smoke wezterm blink
+assets/profiling/parity/run-matrix.sh smoke ghostty blink
 ```
 
 After changing feature-gated live profiling, use the sustained-output smoke to
@@ -367,7 +368,7 @@ summary, and the task 125.8 and 125.9 GPU timing flushes before cleanup --
 `--features frame-profiling,gpu-profiling`:
 
 ```sh
-assets/profiling/task125/run-matrix.sh profile-smoke
+assets/profiling/parity/run-matrix.sh profile-smoke
 ```
 
 Collector smoke commands add a 10-second counter interval after the warm-up.
@@ -375,8 +376,8 @@ The one-terminal form is for diagnosis; the three-terminal form checks the
 complete matched collection path:
 
 ```sh
-assets/profiling/task125/run-matrix.sh collector-smoke-one freminal /tmp/task125-one
-assets/profiling/task125/run-matrix.sh collector-smoke /tmp/task125-all
+assets/profiling/parity/run-matrix.sh collector-smoke-one freminal /tmp/parity-one
+assets/profiling/parity/run-matrix.sh collector-smoke /tmp/parity-all
 ```
 
 Teardown is PID/start-time scoped. The driver records the launched PID and
@@ -410,9 +411,9 @@ Freminal only honours an OSC 133 `A`/`B`/`C`/`D` marker tagged
 counter. An earlier revision emitted bare `133;A` and friends, which Freminal
 silently ignored: it recorded no prompt row and no command block, so the
 "marked" samples were plain `sustained-output` under another name. The printf
-formats live in `workloads.sh` (`TASK125_MARKED_PROMPT_FORMAT` and
-`TASK125_MARKED_FINISH_FORMAT`); the integration test
-`freminal-terminal-emulator/tests/task125_marked_workload.rs` reads that file,
+formats live in `workloads.sh` (`PARITY_MARKED_PROMPT_FORMAT` and
+`PARITY_MARKED_FINISH_FORMAT`); the integration test
+`freminal-terminal-emulator/tests/parity_marked_workload.rs` reads that file,
 expands exactly those formats, replays the bytes through a headless emulator
 and asserts that every burst yields a prompt row and a finished command block
 with exit code 0, so the workload cannot regress to untagged marks without
@@ -454,9 +455,9 @@ Do not run seven 60-second captures for every workload.
 Commands write raw captures outside the repository:
 
 ```sh
-assets/profiling/task125/run-matrix.sh screen /tmp/freminal-task125-screen
-assets/profiling/task125/run-matrix.sh pointer-screen /tmp/freminal-task125-pointer
-assets/profiling/task125/run-matrix.sh confirm /tmp/freminal-task125-confirm idle-blink btop
+assets/profiling/parity/run-matrix.sh screen /tmp/freminal-parity-screen
+assets/profiling/parity/run-matrix.sh pointer-screen /tmp/freminal-parity-pointer
+assets/profiling/parity/run-matrix.sh confirm /tmp/freminal-parity-confirm idle-blink btop
 ```
 
 Freminal runs receive a narrow `RUST_LOG` filter inside the otherwise-clean
@@ -470,7 +471,7 @@ mixing sequential runs.
 Terminal order rotates by repeat to reduce thermal/order bias. The deterministic
 summary uses seed 125 and 10,000 bootstrap resamples (`summarize.py`, covered
 by `test_summarize.py`: `python3 -m unittest
-assets/profiling/task125/test_summarize.py`). Screening selects work; a
+assets/profiling/parity/test_summarize.py`). Screening selects work; a
 material final gap is declared only from confirmation when the paired median
 task-clock delta is at least 0.5 ms per wall-second and its bootstrap 95%
 confidence interval excludes zero. A bootstrap percentile interval over fewer
@@ -500,11 +501,11 @@ what its label says:
 - **Renderer identity.** Each Freminal sample's `Active OpenGL renderer` line is
   parsed from `freminal.stdout.log` and saved as `gl-renderer`. A software
   rasteriser (`llvmpipe`, `softpipe`, `swrast`) or a renderer that does not
-  contain `TASK125_EXPECTED_RENDERER` (default `AMD Radeon RX 7900 XTX`) fails
+  contain `PARITY_EXPECTED_RENDERER` (default `AMD Radeon RX 7900 XTX`) fails
   the sample.
 - **GPU fdinfo.** A terminal process that exposes no `drm-engine-gfx` fdinfo on
   the expected render node fails the sample. Set
-  `TASK125_ALLOW_GPU_UNAVAILABLE=1` to record it anyway; `gpu_gfx_ns` is then
+  `PARITY_ALLOW_GPU_UNAVAILABLE=1` to record it anyway; `gpu_gfx_ns` is then
   blank, never zero, and `gpu_status` says `unavailable`.
 - **Counter sanity.** A `drm-engine-gfx` counter that goes backwards, or a
   terminal GUI thread created during the interval, invalidates the sample.
@@ -561,16 +562,16 @@ resolution under an active control, cross-terminal GPU parity is
 `INCONCLUSIVE`; Freminal's later asynchronous GL queries still provide internal
 attribution but cannot prove peer parity.
 
-### Chrome and total-frame GPU timing (Task 125.9)
+### Chrome and total-frame GPU timing
 
 Build with `--features gpu-profiling` (independent of `frame-profiling`). Each
 window measures four asynchronous GPU timestamp pairs per painted frame and
 logs a flush every 60 completed total-frame samples under the target
-`freminal_windowing::task_125::gpu_timing`, with the message
-`Task 125.9 chrome and frame GPU timing flush`. Enable it with
-`RUST_LOG=freminal_windowing::task_125::gpu_timing=debug`; `run-matrix.sh`
+`freminal_windowing::gpu_timing`, with the message
+`chrome and frame GPU timing flush`. Enable it with
+`RUST_LOG=freminal_windowing::gpu_timing=debug`; `run-matrix.sh`
 already does. The terminal renderer's own upload and draw timings (Task 125.8)
-use the separate target `freminal::task_125::gpu_timing`.
+use the separate target `freminal::gpu_timing`.
 
 | Field | Meaning |
 | --- | --- |
@@ -616,15 +617,13 @@ count for a mean. Read them with these rules:
 
 ## What this cannot measure
 
-- **Pixels.** There is no headless-GL or pixel-readback harness — the "436.9
-  pixel harness" never landed (issue #440, tracked as subtask 121.28).
-  Everything in Task 121 is validated by counters, `perf` samples and human
-  observation. **A regression that changes what is drawn, rather than how often,
-  is undetectable in CI.** This is the single biggest gap in the methodology, and
-  it is why changes to the render path should prefer differential testing
-  (new fast path versus the existing path, asserted equal) over appearance
-  checks wherever that is possible.
-- **Typing.** Still unmeasured (subtask 121.25).
+- **Pixels, in the required CI gate.** Task 123 built a pixel-readback
+  harness (`.#gl-pixel` dev shell, `pixel_harness.rs`, golden images), but it
+  runs on llvmpipe in an advisory weekly workflow, not in the required test
+  matrix, and nothing spans egui, the app paint callback and the windowing
+  clear (`FUTURE_PLANS.md` B.14). Render-path changes should still prefer
+  differential testing (new fast path versus the existing path, asserted
+  equal) and add a pixel test where what is drawn changes.
 - **Sustained-motion cost under btop.** A pre-124.3b capture found the
   then-current pane-wide `mouse_tracking_active` veto firing on 216 of 217
   checks, but that capture averaged ~8 pointer events/s, so it was not a
@@ -636,8 +635,9 @@ count for a mean. Read them with these rules:
 
 The pre-124.3b pane-wide pointer-motion vetoes (`has_urls`, a nonzero
 scroll offset, `mouse_tracking_active`, the gutter strip) were measured in
-subtask 121.17/124.13 (`PLAN_121_PERF_REMEDIATION.md` and
-`PLAN_124_RENDER_EFFICIENCY.md`). Task 124.3b replaced the `has_urls` and
+subtasks 121.17/124.13 (retired plans; see `DESIGN_DECISIONS.md`, "Damage
+Model (Task 124)" / "Pointer motion and PTY mouse reports are separate
+axes"). Task 124.3b replaced the `has_urls` and
 scroll-offset vetoes with the cell-granular positional terms named in the
 table row above; a fresh capture pairing `pointer_repaint_conditions_fired`
 with the observed event rate is the correct way to characterize the

@@ -1961,7 +1961,7 @@ mod tests {
         assert!(parsed.total_duration_us >= parsed.events.last().unwrap().timestamp_us);
     }
 
-    // ── File permissions (issue #563) ───────────────────────────────────────
+    // ── File permissions ────────────────────────────────────────────────────
 
     #[cfg(unix)]
     #[test]
@@ -2002,7 +2002,7 @@ mod tests {
         assert_eq!(read_frec_file(&path).metadata, test_metadata());
     }
 
-    // ── Echo-off redaction (issue #563) ─────────────────────────────────────
+    // ── Echo-off redaction ──────────────────────────────────────────────────
 
     fn sample_keyboard_input() -> EventPayload {
         EventPayload::KeyboardInput {

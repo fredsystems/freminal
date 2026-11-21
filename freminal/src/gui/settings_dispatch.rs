@@ -118,7 +118,7 @@ impl FreminalGui {
     /// pane in every window.
     ///
     /// Called from both the Settings "Apply" path (`SettingsAction::Applied`)
-    /// and the "Reload Config" menu action (subtask 71.17).  A single
+    /// and the "Reload Config" menu action.  A single
     /// definition keeps the two paths in lock-step; any new config-derived
     /// side-effect only needs to be added here.
     ///
@@ -249,7 +249,7 @@ impl FreminalGui {
             }
         }
 
-        // Broadcast cursor shape/blink changes to all panes (issue #406).
+        // Broadcast cursor shape/blink changes to all panes.
         // Like the initial pane-spawn seed, this only supplies the value in
         // effect until a running program's own DECSCUSR / `XTCBlink`
         // request overrides it, exactly as on a real terminal.
@@ -283,8 +283,7 @@ impl FreminalGui {
             }
         }
 
-        // Broadcast host-dependent capability changes to all panes (Task
-        // 130.4), e.g. when the OSC 99 routing gains or loses a system leg.
+        // Broadcast host-dependent capability changes to all panes, e.g. when the OSC 99 routing gains or loses a system leg.
         self.broadcast_config_host_capabilities(
             &self.config,
             &new_cfg,
@@ -302,7 +301,7 @@ impl FreminalGui {
         #[cfg(all(unix, not(target_os = "macos")))]
         self.ensure_notification_service_started();
 
-        // Adopt the persisted chrome style profile (Task 112.13). A previewed
+        // Adopt the persisted chrome style profile. A previewed
         // profile may have set `gui_theme` ephemerally; on Apply we re-derive it
         // from the now-saved config so it persists. On a cancelled preview, the
         // saved config still carries the original profile, so this also reverts
@@ -310,7 +309,7 @@ impl FreminalGui {
         self.gui_theme = self.config.chrome.profile.defaults();
 
         // Keep the previewer's "currently applied" baseline in sync with the
-        // just-committed config (issue #452 phase A). Every draft edit before
+        // just-committed config. Every draft edit before
         // Apply already flows through `apply_visual_preview` via
         // `SettingsAction::Preview`, so this is normally a no-op; it matters
         // when a config changes without going through that flow at all --
@@ -319,7 +318,7 @@ impl FreminalGui {
             VisualPreview::from_config(&self.config, self.settings_modal.os_dark_mode());
 
         // Discard any pending font-preview debounce stash and re-baseline it
-        // to the just-committed font (issue #452 phase C). `font_manager`
+        // to the just-committed font. `font_manager`
         // already reflects `new_cfg.font` for real via
         // `apply_config_changes_no_ctx` above; without this, a stash left
         // over from an in-progress edit could settle later (via the
@@ -329,7 +328,7 @@ impl FreminalGui {
             .apply_immediately(self.applied_preview.font.clone());
 
         // Same re-baselining for the background-image-path and shader-path
-        // debounce holders (issue #452 phase D), and reset the shader error
+        // debounce holders, and reset the shader error
         // route back to the default (toast): whatever compile result the
         // committed shader below produces is a real, committed failure, not
         // a live-preview one, regardless of what was being previewed a
@@ -428,7 +427,7 @@ impl FreminalGui {
 
     /// Re-read `config.toml` from disk and apply every change live.
     ///
-    /// Invoked by the "Reload Config" menu entry (subtask 71.17).  If the
+    /// Invoked by the "Reload Config" menu entry.  If the
     /// current session has no configured path (i.e. freminal was launched
     /// before any config existed and no `--config` was supplied) this is a
     /// no-op with a user-visible toast.  Parse errors are logged and a
@@ -485,7 +484,7 @@ impl FreminalGui {
     /// "preview a change" and "revert by re-previewing the committed config"
     /// go through here identically, since [`VisualPreview`] carries no
     /// distinction between the two. See `visual_preview`'s module doc for why
-    /// that unification is the point. `trigger` (issue #452 phase C) is the
+    /// that unification is the point. `trigger` is the
     /// one place that distinction actually matters: the debounced font
     /// fields must apply immediately and bypass the debounce entirely on a
     /// revert, whereas every other field here already applies immediately
@@ -559,8 +558,7 @@ impl FreminalGui {
         // can legitimately skip the push that would reset it (its early
         // return when the debounce baseline already matches the committed
         // path), which used to leave `SettingsStatus` stuck with the window
-        // gone, silently dropping a later hot-reload compile error (issue
-        // #452 post-review Blocker 2). See
+        // gone, silently dropping a later hot-reload compile error. See
         // `shader_error_route_on_settings_close`.
         self.shader_error_route = visual_preview::shader_error_route_on_settings_close();
     }
@@ -660,7 +658,7 @@ impl FreminalGui {
             return;
         };
         // Live chrome re-style: update the runtime GuiTheme the per-frame
-        // style hook (112.4) reads. Not persisted here (Apply does that via
+        // style hook reads. Not persisted here (Apply does that via
         // `apply_new_config`). The style_cache keys on GuiTheme, so the next
         // frame rebuilds and re-applies the visuals across all chrome.
         self.gui_theme = profile.defaults();
@@ -669,7 +667,7 @@ impl FreminalGui {
 
     /// Preview cursor shape/blink (broadcast to every pane, same as Apply)
     /// and cursor trail/duration and unfocused-cursor style (GUI-side,
-    /// per-window `terminal_widget` state) — issue #452 phase B, Task 127.7.
+    /// per-window `terminal_widget` state).
     fn apply_preview_cursor(
         &mut self,
         diff: &VisualPreviewDiff,
@@ -716,7 +714,7 @@ impl FreminalGui {
             self.request_repaint_all_windows(handle);
         }
 
-        // Unfocused-cursor style (Task 127.7): GUI-side, cached on each
+        // Unfocused-cursor style: GUI-side, cached on each
         // window's `terminal_widget`. The blink-wake gate in `app_impl.rs`
         // reads the committed config, which is fine: a non-focused cursor
         // never blinks, so it never asks for a blink wake.
@@ -730,7 +728,7 @@ impl FreminalGui {
     }
 
     /// Preview the ligature mode (GUI-side cached value on each window's
-    /// `terminal_widget`, no `FontManager::rebuild`) — issue #452 phase B.
+    /// `terminal_widget`, no `FontManager::rebuild`).
     ///
     /// A ligature change alters shaping output, so each window whose toggle
     /// actually changed needs its pane atlases invalidated to re-shape
@@ -752,7 +750,7 @@ impl FreminalGui {
     }
 
     /// Preview background image opacity/mode (GUI-side only, read directly
-    /// from `self.config` at render time) — issue #452 phase B.
+    /// from `self.config` at render time).
     fn apply_preview_background_image(
         &mut self,
         diff: &VisualPreviewDiff,
@@ -772,7 +770,7 @@ impl FreminalGui {
     }
 
     /// Preview the "hide menu bar" toggle (GUI-side chrome layout only,
-    /// read directly from `self.config` at render time) — issue #452 phase B.
+    /// read directly from `self.config` at render time).
     fn apply_preview_hide_menu_bar(
         &mut self,
         diff: &VisualPreviewDiff,
@@ -785,8 +783,7 @@ impl FreminalGui {
         self.request_repaint_all_windows(handle);
     }
 
-    /// Preview the command-block gutter position (GUI-side write; issue
-    /// #452 phase D).
+    /// Preview the command-block gutter position (GUI-side write).
     ///
     /// Unlike every other GUI-side preview field, this changes the
     /// terminal's usable width: `GutterPosition::total_inset_px()` feeds
@@ -813,7 +810,7 @@ impl FreminalGui {
     }
 
     /// Preview the OSC 9;4 progress-bar display toggle (GUI-side only, a
-    /// per-window widget toggle `show()` reads each frame) -- issue #507.
+    /// per-window widget toggle `show()` reads each frame).
     fn apply_preview_progress_enabled(
         &mut self,
         diff: &VisualPreviewDiff,
@@ -829,7 +826,7 @@ impl FreminalGui {
     }
 
     /// Preview the tab bar position (GUI-side chrome layout only, read
-    /// directly from `self.config` at render time) -- issue #452 phase D.
+    /// directly from `self.config` at render time).
     fn apply_preview_tab_bar_position(
         &mut self,
         diff: &VisualPreviewDiff,
@@ -843,7 +840,7 @@ impl FreminalGui {
     }
 
     /// Preview an in-progress edit to the font family/size/line-height
-    /// triplet (issue #452 phase C) through the time-based debounce.
+    /// triplet through the time-based debounce.
     ///
     /// Unlike every other `apply_preview_*` helper, this does not act on
     /// `diff` directly beyond checking whether *anything* font-related
@@ -885,16 +882,14 @@ impl FreminalGui {
 
     /// Check whether any stashed debounced-preview value (font, background
     /// image path, or shader path) has settled, without a new
-    /// `SettingsAction::Preview` having arrived this frame (issue #452
-    /// phases C and D).
+    /// `SettingsAction::Preview` having arrived this frame.
     ///
     /// Called on every settings-window frame regardless of what
     /// `SettingsAction` (if any) that frame produced -- see the doc on
     /// [`Self::apply_preview_font_debounced`] for why this is the only path
     /// that ever applies a settled value once the user stops editing. Named
-    /// generically (phase C called this `tick_font_preview_debounce`)
-    /// because phase D adds two more debounce holders that need the exact
-    /// same per-frame poll.
+    /// generically because the font, background-image and shader debounce
+    /// holders all need the exact same per-frame poll.
     pub(super) fn tick_visual_preview_debounces(
         &mut self,
         handle: &freminal_windowing::WindowHandle<'_>,
@@ -922,8 +917,7 @@ impl FreminalGui {
     }
 
     /// Revert the font family/size/line-height triplet immediately, bypassing
-    /// the debounce entirely and discarding any pending stash (issue #452
-    /// phase C).
+    /// the debounce entirely and discarding any pending stash.
     ///
     /// Used only for [`PreviewTrigger::Revert`]: closing Settings without
     /// applying must not leave a previewed font lingering for the debounce
@@ -986,8 +980,7 @@ impl FreminalGui {
 
     /// Apply a settled font-preview value to every window's `FontManager`,
     /// choosing the cheaper `set_font_size` path when only the size changed
-    /// and reserving the full `rebuild` for a family or line-height change
-    /// (issue #452 phase C).
+    /// and reserving the full `rebuild` for a family or line-height change.
     fn apply_settled_font_preview(
         &mut self,
         previous: &FontPreview,
@@ -1014,8 +1007,8 @@ impl FreminalGui {
         self.request_repaint_all_windows(handle);
     }
 
-    /// Preview an in-progress edit to the background image path (issue #452
-    /// phase D) through the same generic time-based debounce as the font
+    /// Preview an in-progress edit to the background image path
+    /// through the same generic time-based debounce as the font
     /// fields.
     ///
     /// The path is a text field with real filesystem I/O and a GPU texture
@@ -1053,7 +1046,7 @@ impl FreminalGui {
     }
 
     /// Revert the background image path immediately, bypassing the debounce
-    /// entirely and discarding any pending stash (issue #452 phase D).
+    /// entirely and discarding any pending stash.
     ///
     /// Used only for [`PreviewTrigger::Revert`] -- same shape as
     /// [`Self::apply_preview_font_immediate`].
@@ -1080,7 +1073,7 @@ impl FreminalGui {
     }
 
     /// Push a settled (or reverted) background image path to every pane in
-    /// every window (issue #452 phase D).
+    /// every window.
     ///
     /// Mirrors the per-pane loop `apply_new_config` already runs on Apply --
     /// same `RenderState::set_pending_bg_image` call, same per-tab error
@@ -1117,7 +1110,7 @@ impl FreminalGui {
         self.request_repaint_all_windows(handle);
     }
 
-    /// Preview an in-progress edit to the shader path (issue #452 phase D)
+    /// Preview an in-progress edit to the shader path
     /// through the same generic time-based debounce as the background image
     /// path.
     ///
@@ -1149,7 +1142,7 @@ impl FreminalGui {
     }
 
     /// Revert the shader path immediately, bypassing the debounce entirely
-    /// and discarding any pending stash (issue #452 phase D).
+    /// and discarding any pending stash.
     ///
     /// Used only for [`PreviewTrigger::Revert`] -- same shape as
     /// [`Self::apply_preview_font_immediate`]. Routed through
@@ -1176,8 +1169,7 @@ impl FreminalGui {
             // The shader path was never previewed away from what's already
             // live; nothing to do. Note this early return does NOT reset
             // `shader_error_route` -- that reset is unconditional at the
-            // `app_impl.rs` settings-window close site (issue #452
-            // post-review Blocker 2), independent of whether this function
+            // `app_impl.rs` settings-window close site, independent of whether this function
             // pushes anything.
             return;
         }
@@ -1185,8 +1177,7 @@ impl FreminalGui {
     }
 
     /// Push a settled (or reverted) shader path to every window's
-    /// `WindowPostRenderer`, reading the file from disk if a path is set
-    /// (issue #452 phase D).
+    /// `WindowPostRenderer`, reading the file from disk if a path is set.
     ///
     /// A missing or unreadable file degrades gracefully: the read failure is
     /// logged here and no `pending_shader` write happens at all, leaving
@@ -1501,7 +1492,7 @@ mod tests {
         assert_eq!(visited, [7], "the only window is the in-flight one");
     }
 
-    // ── Host-capability glue of `apply_config_state` (Task 147.11) ──────
+    // ── Host-capability glue of `apply_config_state` ──────
 
     use crate::gui::host_capabilities::host_capabilities;
     use crate::gui::test_support::gui_with_windows;

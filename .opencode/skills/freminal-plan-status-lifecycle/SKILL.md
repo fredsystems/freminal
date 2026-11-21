@@ -99,6 +99,14 @@ Before finishing any edit to `MASTER_PLAN.md`, verify all three:
 3. A version row is `Complete` only when all its member tasks are
    `Complete`.
 
+## After `Complete`: retiring the plan
+
+`Complete` is not the end of a plan document's life. Once every task in it is `Complete` and
+the release that contains them is tagged, the document is retired: its durable decisions move
+to `DESIGN_DECISIONS.md`, open items move on, every reference is repointed, and the file is
+deleted. That procedure is the `freminal-retire-plan` skill; follow it rather than leaving a
+completed plan in `Documents/`.
+
 ## Hard rules
 
 - Status is one-directional. A task never moves backward

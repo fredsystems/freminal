@@ -191,7 +191,7 @@ impl ToastStack {
     /// newest-first (newest toasts are drawn on top) so that during the brief
     /// entry slide — when an arriving toast can transiently overlap its
     /// neighbour — a click in the overlap dismisses only the topmost one
-    /// (review finding #4). Removes the dismissed toast itself. Split out of
+    /// Removes the dismissed toast itself. Split out of
     /// [`Self::show`] to keep it under the line-count limit.
     ///
     /// # Cursor
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn topmost_hit_prefers_the_newest_toast_on_overlap() {
         // Two toasts whose hit rects overlap; the newest (last in `outputs`,
-        // drawn on top) must win the overlap (review finding #4).
+        // drawn on top) must win the overlap.
         let older = ToastLayoutOutput {
             id: 1,
             pill: ToastQuad {
@@ -513,7 +513,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    //  138.C14: button state, press tracking, headless egui interaction
+    //  button state, press tracking, headless egui interaction
     // -----------------------------------------------------------------
 
     use crate::gui::toast::ToastPosition;

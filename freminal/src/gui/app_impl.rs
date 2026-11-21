@@ -44,7 +44,7 @@ use super::window::PerWindowState;
 use super::{FreminalGui, PaneBorderDrag};
 
 /// What `on_close_requested` should do about a window that may own an open
-/// Settings window (issue #401).
+/// Settings window.
 ///
 /// Pure decision over an already-computed boolean (rather than `WindowId`s
 /// or `&FreminalGui` directly) so it is unit-testable without constructing
@@ -127,7 +127,7 @@ fn cursor_wants_blink_wake(inputs: &CursorAppearanceInputs) -> bool {
     cursor_blink_wants_repaint(&resolve_cursor_appearance(inputs), inputs.focus)
 }
 
-/// #459 item 9: whether pointer motion this frame must force a full present.
+/// Whether pointer motion this frame must force a full present.
 /// Motion only changes plain-egui-painter chrome pixels when over a
 /// chrome-interactive region, or while a pane-border drag is latched (the
 /// pointer may be off the sensor mid-drag). Pure so it is unit-testable.
@@ -162,15 +162,15 @@ struct FrameDamageInputs {
 
 /// Observations [`stage_frame_damage`] computes alongside its
 /// [`freminal_windowing::FrameDamage`] decision, needed by `central_body`
-/// after that call returns: the Task 121 frame-profiling duty-cycle
+/// after that call returns: the frame-profiling duty-cycle
 /// counters (gated in the caller, not here — see that function's doc), the
-/// #436 `ChromeSignals` staging (`central_body`, near
+/// chrome-damage `ChromeSignals` staging (`central_body`, near
 /// `publish_pending_chrome_signals`), and the frame-attribution diagnostic
 /// block that immediately follows this frame's decision.
 // struct_excessive_bools: each field is an independent yes/no observation
 // this frame (window-post shader state, toast/overlay presence, per-pane
 // overlay OR-accumulation) feeding two unrelated downstream decisions (the
-// #436 `ChromeSignals` staging and the Task 121 duty-cycle counters) — not
+// chrome-damage `ChromeSignals` staging and the frame-profiling duty-cycle counters) — not
 // a state machine. `force_full`/`unresolved_pane` are additionally
 // `#[cfg(feature = "frame-profiling")]`-gated (mirrors `FrameStats`'s own
 // per-field gating in `window.rs`): they are read only by the caller's
@@ -198,18 +198,18 @@ struct FrameDamageObservations {
     active_pane_damage: Option<crate::gui::renderer::PaneFrameDamage>,
 }
 
-/// Decide this frame's #435 [`freminal_windowing::FrameDamage`], extracted
-/// from `App::update`'s `central_body` closure (Task 122.9).
+/// Decide this frame's partial-present [`freminal_windowing::FrameDamage`], extracted
+/// from `App::update`'s `central_body` closure.
 ///
 /// ## Double-write contract — do not collapse
 ///
 /// `win.pending_frame_damage` is written **twice** per frame, deliberately:
 ///
 /// 1. **Here** (the caller assigns this function's return value) — the
-///    PRE-composition value, decided from #435 signals only.
+///    PRE-composition value, decided from partial-present signals only.
 /// 2. **Again**, unconditionally, by `frame_damage::compose_with_chrome_damage`
 ///    after `central_body` returns (near the end of `update()`) — which can
-///    *upgrade* a `Partial` decided here to `Full` once the #436 chrome-cache
+///    *upgrade* a `Partial` decided here to `Full` once the chrome-cache
 ///    decision is known. That decision is not available yet at this call
 ///    site: it needs the after-toast-render dismissible-presence sample,
 ///    which can only be taken once `central_body` returns.
@@ -237,12 +237,12 @@ struct FrameDamageObservations {
 ///
 /// ## Feature-gated duty-cycle counter — NOT computed here
 ///
-/// The Task 124.2 `frame_damage_none_precomposition` counter reads this
+/// The `frame_damage_none_precomposition` counter reads this
 /// function's returned `FrameDamage` directly (it no longer needs to
 /// recompute "were all panes unchanged" by hand -- `decide_frame_damage`
 /// itself now says so via [`freminal_windowing::FrameDamage::None`]) but is
 /// recorded by the caller under its own `#[cfg(feature = "frame-profiling")]`
-/// block, not inside this function (Subtask 122.5's contract: return what
+/// block, not inside this function (the contract is: return what
 /// the counter needs and gate only the recording).
 fn stage_frame_damage(
     win: &PerWindowState,
@@ -268,7 +268,7 @@ fn stage_frame_damage(
     // Presenting only the cursor rect on such a frame would leave that
     // chrome stale, so both force `Full`.
     let pointer_moving = ctx.input(|i| i.pointer.is_moving());
-    // #459 item 9: pointer motion only changes plain-egui-painter pixels
+    // Pointer motion only changes plain-egui-painter pixels
     // when it is over a chrome-interactive region (menu/tab-bar hover
     // tints, pane-border highlight) or an active pane-border drag is in
     // progress (the drag may have moved the pointer off the ±3px sensor
@@ -296,7 +296,7 @@ fn stage_frame_damage(
             inputs.border_drag_active,
         );
     // A toast being visible animates its own region each frame. The resize
-    // overlay (issue #433) animates the same way — it fades out over its
+    // overlay animates the same way — it fades out over its
     // linger window on the plain painter — so it must force a `Full`
     // present too, or a cursor-only `Partial` frame would leave the fading
     // overlay outside the damage rect stale/ghosted.
@@ -308,7 +308,7 @@ fn stage_frame_damage(
     // from non-rendered siblings and wrongly force `Full` every frame. The
     // per-pane -> `FrameDamage` decision itself (and its full
     // case-by-case rationale) is extracted into `decide_frame_damage`
-    // (#436.2b) so both this path and the future REPLAY path compute it
+    // so both this path and the future REPLAY path compute it
     // identically.
     let active_tab = win.tabs.active_tab();
     let mut unresolved_pane = false;
@@ -317,8 +317,8 @@ fn stage_frame_damage(
     // `Order::Foreground` context menu or command-history palette, the
     // `Order::Tooltip` URL-hover tooltip, or a search overlay whose safety
     // classification is `TooltipMayEscape`? This is the *unbounded*
-    // foreground-overlay set, with bounded search as the named exception
-    // (Task 124.14d): a normal (bounded) search frame no longer sets this
+    // foreground-overlay set, with bounded search as the named exception:
+    // a normal (bounded) search frame no longer sets this
     // signal, because its highlight-row and popup-rect geometry already
     // joined `FrameDamage` directly (see `PaneDamageInput::search_overlay_rects`
     // and `build_bounded_damage`'s `EmptyBoundedDamage` handling in
@@ -326,7 +326,7 @@ fn stage_frame_damage(
     // hatch this signal represents. Every OTHER foreground overlay paints
     // as TAIL chrome outside the captured terminal-band range, so a REPLAY
     // frame (which reuses the stale cached tail) must not be permitted
-    // while one is open, or it would vanish/ghost (#436.4b fix — see
+    // while one is open, or it would vanish/ghost (fix — see
     // `ChromeSignals::foreground_overlay_open`). The URL tooltip is driven
     // by `render_cache.cached_hovered_url`, which is recomputed even under
     // a STATIONARY mouse when PTY output scrolls new content under the
@@ -334,7 +334,7 @@ fn stage_frame_damage(
     // exactly the frame a REPLAY would otherwise be chosen.
     let mut foreground_overlay_open = false;
     // Diagnostic: capture the active pane's per-frame damage class (reused
-    // from the #435 signal) for the frame-attribution stats flushed by the
+    // from the partial-present signal) for the frame-attribution stats flushed by the
     // caller; `None` if the active pane isn't resolved.
     let mut active_pane_damage: Option<crate::gui::renderer::PaneFrameDamage> = None;
     let mut per_pane_damage: Vec<frame_damage::PaneDamageInput> =
@@ -351,7 +351,7 @@ fn stage_frame_damage(
             foreground_overlay_open = true;
             break;
         };
-        // Task 124.14d: normal (bounded) search no longer sets this signal
+        // Normal (bounded) search no longer sets this signal
         // -- its geometry already joined `FrameDamage` via
         // `PaneDamageInput::search_overlay_rects` below. Only a
         // tooltip-escaping search frame counts, alongside the other
@@ -394,11 +394,11 @@ fn stage_frame_damage(
     )
 }
 
-/// Per-frame §3.3 boolean signals [`stage_chrome_signals`] needs from its
+/// Per-frame boolean signals [`stage_chrome_signals`] needs from its
 /// caller, computed earlier in `central_body` from state this function has
 /// no access to (the style-cache comparison, the previous-active-pane
-/// cache, the #435 `stage_frame_damage` observations, DPI/focus/size
-/// bookkeeping, and the #436 warm-up counter). Grouped into a params
+/// cache, the partial-present `stage_frame_damage` observations, DPI/focus/size
+/// bookkeeping, and the chrome-damage warm-up counter). Grouped into a params
 /// struct to stay under clippy's `too_many_arguments` threshold —
 /// [`FrameDamageInputs`] (above, in this same file) is the in-tree
 /// precedent for this pattern. Each field is an independent,
@@ -435,9 +435,9 @@ struct ChromeSignalInputs {
     foreground_overlay_open: bool,
 }
 
-/// Stage this frame's #436.3 [`chrome_damage::ChromeTabSnapshot`] and the
+/// Stage this frame's [`chrome_damage::ChromeTabSnapshot`] and the
 /// [`chrome_damage::ChromeSignals`] it partly feeds, extracted from
-/// `App::update`'s `central_body` closure (Task 122.10).
+/// `App::update`'s `central_body` closure.
 ///
 /// Returns both values rather than assigning them: the caller is
 /// responsible for replacing `win.prev_chrome_tab_snapshot` with the
@@ -449,7 +449,7 @@ struct ChromeSignalInputs {
 /// `central_body` returns (the toast overlay renders after it), so this
 /// function only stages the signals; it does not decide or publish
 /// anything. This mirrors [`stage_frame_damage`]'s "return, don't mutate"
-/// shape (122.9) for the same reason: keeping both writes visible at the
+/// shape for the same reason: keeping both writes visible at the
 /// call site.
 ///
 /// `bell_active` and `active_tab_id` are computed here, inline, exactly as
@@ -510,17 +510,16 @@ fn stage_chrome_signals(
     (chrome_tab_snapshot, chrome_signals)
 }
 
-/// Task 124.3b: which pane(s), if any, in `active_tab` currently have an
+/// Which pane(s), if any, in `active_tab` currently have an
 /// in-progress selection drag (`ViewState::selection.is_selecting`) —
-/// extracted out of [`App::pointer_motion_needs_repaint`]'s body (Task
-/// 124.3b review) purely to keep that method under clippy's
+/// extracted out of [`App::pointer_motion_needs_repaint`]'s body purely to keep that method under clippy's
 /// `too_many_lines` limit; it has no independent reason to be
 /// unit-testable (`Tab`/`PaneTree`/`Pane` cannot be constructed headlessly
 /// either way).
 ///
 /// `PaneError::InvalidState` (empty tree) is a bug state that should never
 /// happen in normal operation -- conservative `Multiple` (forces
-/// unconditionally) on `Err`, mirroring the pre-124.3b `any_selecting`'s
+/// unconditionally) on `Err`, mirroring the old `any_selecting`'s
 /// conservative-true-on-`Err`.
 fn classify_selecting_panes(active_tab: &Tab) -> pointer_motion::SelectingPanes {
     active_tab
@@ -538,14 +537,14 @@ fn classify_selecting_panes(active_tab: &Tab) -> pointer_motion::SelectingPanes 
         })
 }
 
-/// Task 124.3b: resolve ONE pointer position to a
+/// Resolve ONE pointer position to a
 /// [`pointer_motion::PointerObservation`] against `active_tab`'s current
 /// layout. Extracted out of [`App::pointer_motion_needs_repaint`]'s body
-/// (Task 124.3b review) so the previous and current positions are resolved
+/// so the previous and current positions are resolved
 /// by the IDENTICAL code path, called twice, rather than once per position
 /// inline; also keeps that method under clippy's `too_many_lines` limit.
 ///
-/// Review fix: `central_rect`/`split_layout` are now supplied by the
+/// `central_rect`/`split_layout` are now supplied by the
 /// caller rather than recomputed here — `pointer_motion_needs_repaint`
 /// resolves the split/zoom layout exactly ONCE per `CursorMoved` call and
 /// borrows it for both the previous and current position, rather than each
@@ -559,7 +558,7 @@ fn classify_selecting_panes(active_tab: &Tab) -> pointer_motion::SelectingPanes 
 /// `command_blocks` feeds [`PaneSnapshotInputs::gutter_eligible`], computed
 /// here at the pane-lookup boundary (this function has `self.config` in
 /// scope via its caller) alongside `snap.is_alternate_screen`/
-/// `snap.command_blocks` — review fix: neither this function nor
+/// `snap.command_blocks` — neither this function nor
 /// [`resolve_pane_under_pointer`] takes a `bool` for this
 /// (`freminal-state-representation` forbids bool parameters outright); the
 /// caller passes the config section itself, and the eligibility bool is
@@ -616,7 +615,7 @@ fn resolve_pointer_observation_for(
     )
 }
 
-/// Task 124.3b review: resolve BOTH the previous and current pointer
+/// Resolve BOTH the previous and current pointer
 /// position against the SAME split/zoom layout, computed exactly ONCE.
 /// Extracted out of [`App::pointer_motion_needs_repaint`]'s body purely to
 /// keep that method under clippy's `too_many_lines` limit — it has no
@@ -624,14 +623,14 @@ fn resolve_pointer_observation_for(
 /// constructed headlessly either way; the pure resolution chain itself is
 /// [`resolve_pane_under_pointer`]).
 ///
-/// # Review fix (item 4): one layout computation, not two
+/// # One layout computation, not two
 ///
 /// Before this extraction, `resolve_pointer_observation_for` was called
 /// twice — once per position — and each call independently ran
 /// `PaneTree::layout`. This function computes the layout ONCE and passes
 /// the same borrowed `Vec` to both resolutions.
 ///
-/// # Review fix (item 2): a layout error forces, it does not silently empty
+/// # A layout error forces, it does not silently empty
 ///
 /// `PaneTree::layout` returning `Err` (an empty tree — a bug state) is NOT
 /// silently substituted with an empty layout, which would resolve every
@@ -641,7 +640,7 @@ fn resolve_pointer_observation_for(
 /// `unknown_geometry_force` turns into an unconditional force at the call
 /// site.
 ///
-/// # Review fix: named [`PointerObservations`], not a same-typed tuple
+/// # Named [`PointerObservations`], not a same-typed tuple
 ///
 /// Returns [`PointerObservations`] (`previous`/`current` named fields)
 /// rather than `(PointerObservation, PointerObservation)` — see that
@@ -721,8 +720,8 @@ impl freminal_windowing::App for FreminalGui {
             // action before `handle.create_window()` was called). Do NOT
             // overwrite it with this settings window's own id here — doing
             // so used to make `settings_owner == settings_window_id`
-            // always, which broke the owning-window-close guard (issue
-            // #401: the guard compares `settings_owner` against a real
+            // always, which broke the owning-window-close guard (the
+            // guard compares `settings_owner` against a real
             // terminal window id, which could then never match) and the
             // "Test Paste" routing / os_dark_mode lookup, both of which key
             // off `settings_owner` to find the owning terminal window.
@@ -929,11 +928,11 @@ impl freminal_windowing::App for FreminalGui {
     /// Removes the window's state — its PTY threads will be dropped when
     /// the channels close. Returns `false` to veto the close: either the
     /// settings modal has unsaved edits to confirm (this window's own
-    /// close, or the owning terminal window's — issue #401), or the window
-    /// has a running foreground command pending confirmation (Task 98).
+    /// close, or the owning terminal window's), or the window
+    /// has a running foreground command pending confirmation.
     fn on_close_requested(&mut self, window_id: WindowId) -> bool {
-        // Consume this window's membership in an in-flight `QuitAll` batch
-        // (issue #509), if any -- unconditionally, up front, regardless of
+        // Consume this window's membership in an in-flight `QuitAll` batch,
+        // if any -- unconditionally, up front, regardless of
         // which branch below ultimately resolves this call. That is what
         // makes membership self-clearing rather than sticky: a LATER,
         // independent close of this same window (e.g. after the user
@@ -970,7 +969,7 @@ impl freminal_windowing::App for FreminalGui {
             return true;
         }
         // If this window owns an open Settings window, decide what to do
-        // about it before this window closes (issue #401: the settings
+        // about it before this window closes (the settings
         // window used to be orphaned — left open with its internal `is_open`
         // flag force-cleared but the actual OS window never told to close,
         // freezing it, and never counted against the "all windows closed"
@@ -1008,7 +1007,7 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
-        // Close-on-running-command guard (Task 98.7).  If the user already
+        // Close-on-running-command guard.  If the user already
         // confirmed a force-close for this window, let it through and clear
         // the flag.  Otherwise, if any pane in the window has a running
         // foreground command, open the confirmation dialog and veto the OS
@@ -1045,7 +1044,7 @@ impl freminal_windowing::App for FreminalGui {
         // periodic save already wrote the current state, so this shutdown call
         // is a no-op — by design, so we no longer depend on a write surviving
         // an abrupt teardown.
-        // Skipped when a `QuitAll` (issue #509) is in flight: that path
+        // Skipped when a `QuitAll` is in flight: that path
         // already wrote the complete multi-window topology up front, before
         // any window was removed from `self.windows`. Without this guard,
         // this per-window check re-fires as each subsequent window in the
@@ -1095,8 +1094,7 @@ impl freminal_windowing::App for FreminalGui {
         true
     }
 
-    /// Free this window's GL objects while its context is current (Task
-    /// 125.C2).
+    /// Free this window's GL objects while its context is current.
     ///
     /// For a close that went through `on_close_requested` the window's state
     /// is already gone and its teardown handles are waiting in
@@ -1176,7 +1174,7 @@ impl freminal_windowing::App for FreminalGui {
                 pos,
                 win.published.chrome_head_rects(),
                 win.published.chrome_border_rects(),
-                // Subtask 121.14 (review item 2 follow-up): the most
+                // The most
                 // recently laid-out toast pill rects — see
                 // `PublishedFrameState`'s doc for the staleness discipline.
                 // Hovering a toast DOES change chrome pixels (close-button
@@ -1189,15 +1187,14 @@ impl freminal_windowing::App for FreminalGui {
         })
     }
 
-    /// Task 121 pointer-motion repaint-gate spike, rewritten to
-    /// cell-granular positional suppression by Task 124.3b: wires real
-    /// per-window/per-pane state into [`pointer_motion_needs_repaint_decision`].
+    /// Pointer-motion repaint gate with cell-granular positional
+    /// suppression: wires real per-window/per-pane state into [`pointer_motion_needs_repaint_decision`].
     /// See that function's doc for the exact forcing conditions, and
     /// `pointer_motion`'s module doc for the pane-wide-veto-to-positional
     /// rewrite this method's body reflects.
     ///
     /// Reuses `win.published`'s `pending_chrome_signals().any_overlay_open`/
-    /// `foreground_overlay_open` — the persisted #436 §3.3 signals from the
+    /// `foreground_overlay_open` — the persisted chrome-damage signals from the
     /// most recently rendered frame — for the "any overlay/popup/tooltip/
     /// context menu is open" bullet, rather than recomputing the
     /// `ui_overlay_open`/`foreground_overlay_open` scans (`update()`'s
@@ -1206,11 +1203,11 @@ impl freminal_windowing::App for FreminalGui {
     /// (menu state, dialog `Ui`s, etc.) are not in scope.
     ///
     /// `positions.previous` is resolved against the SAME frame's
-    /// layout/geometry as `positions.current` — Task 124.3b's positional
+    /// layout/geometry as `positions.current` — the positional
     /// forcing terms compare the two [`pointer_motion::PointerObservation`]s
     /// this produces, rather than looking at `positions.current` alone.
     ///
-    /// Subtask 122.5 / 124.3b: the pane-resolution chain itself (layout ->
+    /// The pane-resolution chain itself (layout ->
     /// hit-test -> snapshot lookup -> classification) lives in the pure,
     /// headlessly-testable [`resolve_pane_under_pointer`] — see that
     /// function's doc for the zoomed-vs-split mirroring requirement this
@@ -1238,8 +1235,8 @@ impl freminal_windowing::App for FreminalGui {
         // rather than a freeze, but a real visual regression reachable from an
         // already-shipped feature.
         //
-        // Subtask 121.14: both terms below test ANIMATION, not PRESENCE — the
-        // superset-but-wasteful bug this subtask fixes. A toast spends most of
+        // Both terms below test ANIMATION, not PRESENCE — the
+        // superset-but-wasteful behaviour a presence test would have. A toast spends most of
         // its life fully settled in its steady hold; the resize HUD is fully
         // opaque for the first `RESIZE_OVERLAY_LINGER - RESIZE_OVERLAY_FADE` of
         // its life. Presence alone (the old `win.published.resize_overlay().is_some()` /
@@ -1274,7 +1271,7 @@ impl freminal_windowing::App for FreminalGui {
 
         let pointer_pane_unresolved = win.published.cached_central_rect().is_none();
 
-        // Review fix (items 1, 2, 4): resolve the split/zoom layout ONCE
+        // Resolve the split/zoom layout ONCE
         // for this `CursorMoved` call and hit-test BOTH endpoints against
         // the SAME borrowed layout, with a `PaneTree::layout` error forcing
         // conservatively rather than silently resolving to an empty layout
@@ -1306,14 +1303,14 @@ impl freminal_windowing::App for FreminalGui {
         );
         let unknown_geometry =
             pointer_motion::unknown_geometry_force(observations.previous, observations.current);
-        // Task 124.3b: an in-progress scrollbar drag forces unconditionally,
+        // An in-progress scrollbar drag forces unconditionally,
         // regardless of where the pointer currently resolves -- see
         // `scrollbar_boundary_force`'s doc for why this cannot be tied to
         // the resolved pane's own flag alone.
         let scrollbar_drag_forced = win.published.any_pane_scrollbar_dragging();
 
         // Focus-follows-mouse turns pointer motion into a state change, so
-        // the gate must not suppress the frame that would apply it (#495).
+        // the gate must not suppress the frame that would apply it.
         // Narrow by construction: only motion that lands on a pane other than
         // the active one qualifies, so moving around inside the focused pane
         // still suppresses exactly as before.
@@ -1323,7 +1320,7 @@ impl freminal_windowing::App for FreminalGui {
                 .pane
                 .is_some_and(|id| id != active_tab.active_pane);
 
-        // Task 121 diagnostic, rewritten by 124.3b (and its review pass): count
+        // Diagnostic: count
         // which condition(s) actually forced a repaint for this call,
         // `saturating_add`'d into `win.frame_stats`'s counters (see
         // `FrameStats::record_pointer_motion_check`'s doc for why `Cell`
@@ -1412,7 +1409,7 @@ impl freminal_windowing::App for FreminalGui {
     ) {
         trace!("Starting new frame");
         let now = std::time::Instant::now();
-        // Task 121 frame-profiling harness (defect-1 fix): captured at the
+        // Frame-profiling harness: captured at the
         // VERY top of `update`, before either early-return branch below, so
         // its eventual `.elapsed()` (taken after `compose_with_chrome_damage`,
         // near the end of this function) covers the whole productive body of
@@ -1448,7 +1445,7 @@ impl freminal_windowing::App for FreminalGui {
             // window with its own `ctx`, and this branch returns before the
             // per-frame style hook in the terminal render path runs — so
             // without this the settings window stays on egui's default visuals
-            // and ignores the active theme + profile (112.7 follow-up).
+            // and ignores the active theme + profile.
             //
             // Style from the *draft* (unsaved) theme so selecting a new theme
             // in the picker repaints the settings window live, instead of
@@ -1474,8 +1471,7 @@ impl freminal_windowing::App for FreminalGui {
             self.handle_settings_action(&settings_action, handle, window_id);
 
             // Check whether a stashed debounced-preview value -- font,
-            // background image path, or shader path (issues #452 phases C
-            // and D) -- has settled. This runs every frame regardless of
+            // background image path, or shader path -- has settled. This runs every frame regardless of
             // `settings_action` because a stable draft produces no further
             // `SettingsAction::Preview` on its own -- the scheduled
             // `request_repaint_after` wake that fires once a debounce
@@ -1577,7 +1573,7 @@ impl freminal_windowing::App for FreminalGui {
         #[cfg(all(unix, not(target_os = "macos")))]
         self.ensure_notification_service_started();
 
-        // ── Chrome-damage (#436.3): §3.5 "before" sample + warm-up counter ───
+        // ── Chrome-damage: "before" sample + warm-up counter ───
         //
         // Sampled as early as possible in `update()` — before ANY dialog's
         // `.show(ctx)` this frame (including the toast stack's, which runs
@@ -1586,9 +1582,9 @@ impl freminal_windowing::App for FreminalGui {
         // mutate it. Compared against the "after" sample taken once
         // everything dismissible has shown (see the end of this function) to
         // catch a self-dismissal that happens DURING this frame's rendering
-        // (adversarial finding 1; see `chrome_damage`'s module doc).
+        // (see `chrome_damage`'s module doc).
         let chrome_dismissible_before = self.sample_dismissible_presence(&win);
-        // #436 §7 warm-up: force `Changed` for the first few frames after
+        // chrome-damage warm-up: force `Changed` for the first few frames after
         // window creation, while font atlas / layout / PanelState id-maps
         // are still settling.
         let chrome_warming_up = chrome_damage::is_chrome_warming_up(win.chrome_frames_rendered);
@@ -1597,12 +1593,12 @@ impl freminal_windowing::App for FreminalGui {
         // ── Drain shader/renderer errors stashed by last frame's PaintCallback ──
         // PaintCallbacks run on the render thread and can't access `self`, so
         // they stash compile/init errors in `WindowPostRenderer::last_error`.
-        // Drained here every frame (71.4 bug fix): previously only ran in the
+        // Drained here every frame: it used to only run in the
         // subsequent-window branch of `on_window_created`, which never fires
         // for the first/only window and never re-runs after window creation.
         //
-        // Where the drained error is surfaced depends on `self.shader_error_route`
-        // (issue #452 phase D): a committed change (Apply / Reload Config,
+        // Where the drained error is surfaced depends on `self.shader_error_route`:
+        // a committed change (Apply / Reload Config,
         // the initial config, `hot_reload`, or a preview revert) keeps the
         // original toast behaviour, but a shader path still being live-edited
         // in the Settings window routes to that window's own status message
@@ -1632,7 +1628,7 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
-        // ── Destroy GL objects of panes closed since last frame (125.C2) ─────
+        // ── Destroy GL objects of panes closed since last frame ─────
         // This window's GL context is current here. Renderers retire into the
         // window's queue when their pane drops -- after the previous frame's
         // paint callbacks released them -- so they are deleted at the top of
@@ -1660,7 +1656,7 @@ impl freminal_windowing::App for FreminalGui {
         // Query the windowing layer directly.  See the settings-window branch
         // above for why `ctx.input().viewport()` is not reliable here.
         //
-        // `chrome_size_before` is captured for the #436.3 §3.3 "window
+        // `chrome_size_before` is captured for the "window
         // resize" chrome signal: compared against `win.last_known_size`
         // after this block updates it.
         let chrome_size_before = win.last_known_size;
@@ -1673,7 +1669,7 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
         let chrome_size_changed = win.last_known_size != chrome_size_before;
-        // Resize-overlay trigger (issue #433): a GENUINE OS-window resize is a
+        // Resize-overlay trigger: a GENUINE OS-window resize is a
         // change between two KNOWN sizes. The first observation of a new
         // window is `None -> Some(initial)`, which `chrome_size_changed`
         // (correctly, for chrome damage) treats as a change but which must NOT
@@ -1780,9 +1776,9 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
-        // ── Drain CommandFinishedEvent from each pane (Task 72.9) ─────────────
+        // ── Drain CommandFinishedEvent from each pane ─────────────
         // See `drain_command_finished_events` for the full description;
-        // extracted as a zero-egui helper (Task 122.7). Read focus live
+        // extracted as a zero-egui helper. Read focus live
         // from egui rather than a per-pane cached flag: the latter is only
         // ever updated while a given pane happens to be the active one, so
         // it goes permanently stale for every other pane (regression that
@@ -1805,15 +1801,15 @@ impl freminal_windowing::App for FreminalGui {
 
         // ── Poll all tabs for PTY death signals ───────────────────────────────
         // See `process_dead_panes` for the full description; extracted as a
-        // zero-egui, zero-`self.windows` helper (Task 122.7). It cannot
+        // zero-egui, zero-`self.windows` helper. It cannot
         // itself close the window, so a `CloseWindow` outcome means the
         // caller must perform the reinsert-and-close dance that the
         // original inline code did directly.
         match process_dead_panes(&mut win, &self.recording_swap) {
             DeadPaneOutcome::Continue => {}
             DeadPaneOutcome::CloseWindow => {
-                // Reinserts without draining `win.lifecycle_requests` (issue
-                // #512). Currently safe: both writers (the menu render and
+                // Reinserts without draining `win.lifecycle_requests`.
+                // Currently safe: both writers (the menu render and
                 // the deferred key-action dispatch) run later in `update()`,
                 // after this point, so nothing has been requested yet this
                 // frame. Any request already pending from a previous frame
@@ -1829,17 +1825,17 @@ impl freminal_windowing::App for FreminalGui {
         let (snap, pane_scroll_offset) = {
             let Some(active_pane_ref) = win.tabs.active_tab().active_pane() else {
                 warn!("update: active tab has no active pane; skipping render frame");
-                // CLEANUP-436-A: `win` was moved out of `self.windows` at the
+                // `win` was moved out of `self.windows` at the
                 // top of this frame (`self.windows.remove(&window_id)`); every
                 // early return after that point must reinsert it (see the
                 // `CannotCloseLastPane` arm above, which does). Skipping the
                 // reinsert here permanently orphans this window's
-                // `PerWindowState` — including, since #436, its chrome cache and
+                // `PerWindowState` — including its chrome-damage and
                 // self-dismissal settle state — leaving the window rendering a
                 // blank/fatal-error surface forever. Reinsert before returning.
                 //
-                // This also reinserts without draining `win.lifecycle_requests`
-                // (issue #512), which is safe for the same reason as the
+                // This also reinserts without draining `win.lifecycle_requests`,
+                // which is safe for the same reason as the
                 // `CloseWindow` arm above: both writers run later in `update()`,
                 // so nothing pending can be lost — it survives on `win` and is
                 // drained on the next frame.
@@ -1862,7 +1858,7 @@ impl freminal_windowing::App for FreminalGui {
             p.view_state.scroll_offset = snap.scroll_offset;
         }
 
-        // Apply the full palette-derived chrome `Visuals` (112.4) BEFORE any
+        // Apply the full palette-derived chrome `Visuals` BEFORE any
         // chrome is drawn this frame.  The menu bar and tab bar are rendered
         // immediately below, so the style must be in place first — applying it
         // after them (as it was) left the bars styled by the *previous* frame's
@@ -1884,7 +1880,7 @@ impl freminal_windowing::App for FreminalGui {
         // background/chrome stale until a mouseover repaint).
         let bg_opacity = self.config.ui.background_opacity;
         // Hoisted out of the block below (rather than a plain `let` inside
-        // it) so the #436.3 chrome-damage signal computed further down can
+        // it) so the chrome-damage signal computed further down can
         // read this frame's style-change verdict too.
         let chrome_style_changed;
         {
@@ -1982,10 +1978,10 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
-        // Task 121 frame-profiling harness: `central_body` (below) hands its
+        // Frame-profiling harness: `central_body` (below) hands its
         // two measured phase durations OUT through these captured locals
         // rather than writing straight into `win.frame_stats` and flushing
-        // itself. This is the defect-2 fix's other half: the
+        // itself. The
         // `frame_damage_full`/`frame_damage_partial` counters need to be
         // recorded from the FINAL, post-`compose_with_chrome_damage` value
         // of `win.pending_frame_damage`, which is not known until after
@@ -2008,7 +2004,7 @@ impl freminal_windowing::App for FreminalGui {
         // signal staging, and repaint scheduling, called via
         // `CentralPanel::show` below.
         let central_body = |ui: &mut egui::Ui| {
-            // Task 121 frame-profiling harness: wall-clock start of this
+            // Frame-profiling harness: wall-clock start of this
             // whole closure. At the end of the closure this is used, minus
             // the accumulated per-pane `phase_panes_this_frame`, to derive
             // `phase_orchestration` -- freminal's own orchestration overhead as
@@ -2078,13 +2074,13 @@ impl freminal_windowing::App for FreminalGui {
             // the active one, so it goes permanently stale for every other
             // pane (regression that left the visual bell overlay stuck).
             let window_focused = ui.input(|i| i.focused);
-            // #436.3 §3.3 "Window focus change" chrome signal.
+            // "Window focus change" chrome signal.
             let chrome_focus_changed = window_focused != win.prev_window_focused;
             win.prev_window_focused = window_focused;
 
             // Drain window commands for ALL tabs and ALL panes within each
             // tab, then route the OSC 9/777, OSC 52, and OSC 99 events that
-            // drain collected (Task 122.8). See
+            // drain collected. See
             // `drain_window_manipulation_commands`'s doc for the
             // active/non-active discard-rule contract this preserves.
             let window_manipulation_events = drain_window_manipulation_commands(
@@ -2111,7 +2107,7 @@ impl freminal_windowing::App for FreminalGui {
 
             let available_rect = ui.available_rect_before_wrap();
 
-            // #436.4b: cache the content rect so a later REPLAY frame can
+            // cache the content rect so a later REPLAY frame can
             // reconstruct an equivalent `Ui` without rebuilding the menu
             // bar / tab bar / `CentralPanel` chrome that produced it.
             // Idempotent on a REPLAY frame itself (`available_rect` is then
@@ -2139,7 +2135,7 @@ impl freminal_windowing::App for FreminalGui {
                 win.previous_active_pane_key = Some(active_pane_key);
             }
 
-            // Broadcast input (Task 74): when the active tab has broadcast
+            // Broadcast input: when the active tab has broadcast
             // enabled, collect the (pane id, input sender) of every leaf pane
             // up front. Senders are cheap to clone. The active pane's render
             // call mirrors its keyboard input to every *other* pane in this
@@ -2199,7 +2195,7 @@ impl freminal_windowing::App for FreminalGui {
                 all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
             }
 
-            // Smart paste guard confirm dialog (Task 77).  Shown whenever a
+            // Smart paste guard confirm dialog.  Shown whenever a
             // flagged paste is pending for this window.  On confirm, the
             // resolved (possibly edited) payload is sent to the active pane;
             // on cancel the paste is discarded.
@@ -2208,7 +2204,7 @@ impl freminal_windowing::App for FreminalGui {
                     // Route to the pane captured when the dialog opened, not
                     // the currently-active pane: focus-follows-mouse can change
                     // the active pane when the cursor moves onto the dialog
-                    // buttons (Task 106 bug).
+                    // buttons.
                     Self::send_paste_to_target(&mut win, target, payload);
                 }
                 super::paste_guard::PasteDialogOutcome::Cancelled => {
@@ -2223,7 +2219,7 @@ impl freminal_windowing::App for FreminalGui {
                 super::paste_guard::PasteDialogOutcome::Idle => {}
             }
 
-            // Broadcast-input confirm dialog (Task 74.5).  Shown when the user
+            // Broadcast-input confirm dialog.  Shown when the user
             // tried to enable broadcast and `[tabs] confirm_broadcast` is set.
             // On confirm, broadcast is enabled on the dialog's target tab.
             match win.broadcast_dialog.show(ctx) {
@@ -2243,7 +2239,7 @@ impl freminal_windowing::App for FreminalGui {
                 | super::broadcast_guard::BroadcastDialogOutcome::Idle => {}
             }
 
-            // Close-on-running-command guard dialog (Task 98).  Shown while a
+            // Close-on-running-command guard dialog.  Shown while a
             // pane / tab / window close is suspended pending confirmation.  On
             // Force Close the original close is executed with the guard
             // bypassed; on Cancel the close is abandoned.
@@ -2281,7 +2277,7 @@ impl freminal_windowing::App for FreminalGui {
                             // (rather than a separate "confirmed" flag) is
                             // what makes the retry's `on_close_requested`
                             // call see `is_owner == false` and skip the
-                            // guard without re-prompting (issue #401).
+                            // guard without re-prompting.
                             self.settings_modal.is_open = false;
                             self.settings_owner = None;
                             // The Settings window is closed directly here,
@@ -2305,7 +2301,7 @@ impl freminal_windowing::App for FreminalGui {
             // via its own Close button or title-bar X.
             self.show_about_window(ctx);
 
-            // First-run welcome overlay (subtask 71.20).  Opened on first
+            // First-run welcome overlay.  Opened on first
             // launch or from Help -> Show Welcome; persists
             // `first_run_complete = true` on dismissal.
             self.show_welcome_overlay(ctx);
@@ -2344,7 +2340,7 @@ impl freminal_windowing::App for FreminalGui {
             // are consumed here instead of reaching the terminal widgets.
             // Whether a split-border sensor owns the cursor icon this frame.
             // Set from the very same condition that applies the resize cursor
-            // below, so the gate and the write can never disagree (#462).
+            // below, so the gate and the write can never disagree.
             let mut border_owns_cursor = false;
             if has_multiple_panes && zoomed_pane.is_none() && !ui_overlay_open {
                 let borders = win
@@ -2361,7 +2357,7 @@ impl freminal_windowing::App for FreminalGui {
                 // on each side of the 1px border line).
                 let sensor_half: f32 = 3.0;
 
-                // #436.8: split-border drag-sensor rects, rebuilt fresh every
+                // split-border drag-sensor rects, rebuilt fresh every
                 // frame this branch runs, for the region-aware pointer
                 // chrome-gate (`is_chrome_interactive_at`).
                 let mut border_rects: Vec<egui::Rect> = Vec::with_capacity(borders.len());
@@ -2450,7 +2446,7 @@ impl freminal_windowing::App for FreminalGui {
                     // Clear drag state when drag ends.
                     if response.drag_stopped() {
                         // On release, focus the pane the pointer ends in (focus
-                        // was frozen during the drag, issue #453). Use the
+                        // was frozen during the drag). Use the
                         // release pointer position; fall back to leaving focus
                         // unchanged if it isn't over any pane.
                         if let Some(pos) = ui.ctx().pointer_hover_pos()
@@ -2490,7 +2486,7 @@ impl freminal_windowing::App for FreminalGui {
                         // move. Force one more frame so hover is re-evaluated
                         // against the settled layout, otherwise the resize
                         // cursor drops to the default arrow on mouse-up even
-                        // though the pointer is still over the divider (#462).
+                        // though the pointer is still over the divider.
                         ctx.request_repaint();
                     }
                 }
@@ -2499,8 +2495,7 @@ impl freminal_windowing::App for FreminalGui {
             } else {
                 // No sensors built this frame (single pane / zoomed / overlay
                 // open): clear any stale rects from a since-changed layout so
-                // they can't keep classifying terminal content as chrome
-                // (#436.8).
+                // they can't keep classifying terminal content as chrome.
                 win.published.clear_chrome_border_rects();
             }
 
@@ -2508,8 +2503,8 @@ impl freminal_windowing::App for FreminalGui {
             // button is held. If the button is up but `border_drag` is still set,
             // the drag-sensor loop missed its `drag_stopped()` transition (e.g. an
             // overlay opened mid-drag and gated the sensor block off). Clear it so a
-            // stuck value can't permanently freeze input via `border_drag_active`
-            // (issue #453 review). This runs every frame, independent of
+            // stuck value can't permanently freeze input via `border_drag_active`.
+            // This runs every frame, independent of
             // `ui_overlay_open`/`has_multiple_panes`/`zoomed_pane`, so it can never
             // be gated off the same way the sensor block above can be.
             if win.border_drag.is_some() && !ui.ctx().input(|i| i.pointer.primary_down()) {
@@ -2521,7 +2516,7 @@ impl freminal_windowing::App for FreminalGui {
             // had a chance to start/stop it this frame) so the per-pane loop
             // below can pass it to `show()` without holding a borrow of
             // `win.border_drag` across the mutable borrow of
-            // `win.terminal_widget` (issue #453).
+            // `win.terminal_widget`.
             let border_drag_active = win.border_drag.is_some();
 
             // Whether a split-border sensor owns the cursor icon this frame.
@@ -2538,15 +2533,15 @@ impl freminal_windowing::App for FreminalGui {
             // during a drag, so a separate test would disagree with the write
             // exactly when it matters. `border_drag_active` is folded in so an
             // in-flight drag keeps the cursor even on a frame where the
-            // stale sensor rect has fallen behind the pointer entirely (#462).
+            // stale sensor rect has fallen behind the pointer entirely.
             let split_border_hover = if border_owns_cursor || border_drag_active {
                 SplitBorderHover::Over
             } else {
                 SplitBorderHover::Clear
             };
 
-            // ── Terminal band: shape-index range capture (#436.2a, range
-            // exposed via `App::take_terminal_band_range` as of #436.4a) ───
+            // ── Terminal band: shape-index range capture (range exposed via
+            // `App::take_terminal_band_range`) ───
             //
             // Everything from here through the broadcast label that paints
             // via `ui` — pane content (GL callbacks), pane borders, and the
@@ -2557,7 +2552,7 @@ impl freminal_windowing::App for FreminalGui {
             // command-history palette, and search bar — deliberately use
             // their own `Order::Foreground` `egui::Area`s, so they live in a
             // different layer and are correctly excluded from the captured
-            // background range.) An earlier version of this subtask routed
+            // background range.) An earlier version routed
             // the band into a dedicated second `Order::Background` layer
             // instead, but that
             // trips egui 0.35's cross-layer hit-test "hidden" rule
@@ -2572,7 +2567,7 @@ impl freminal_windowing::App for FreminalGui {
             // that single `PaintList` and hand back that `[start, end)` range
             // for `App::take_terminal_band_range`, which `run_frame` uses to
             // slice `full_output.shapes` into head/band/tail and paint each
-            // separately (#436.4a).
+            // separately.
             //
             // Capture point justification: nothing between `available_rect`
             // above and here paints into the background layer. The
@@ -2643,10 +2638,10 @@ impl freminal_windowing::App for FreminalGui {
             // Clone the per-window partial-present flag once, before the pane
             // loop, so each pane's `show()` can pass it into its PaintCallback
             // without re-borrowing `win` while `win` is mutably borrowed in
-            // the loop (#435).
+            // the loop.
             let present_region_for_panes = std::sync::Arc::clone(&win.present_region);
 
-            // Resize overlay (issue #433): whether any pane's char grid
+            // Resize overlay: whether any pane's char grid
             // changed this frame (the debounced-resize check below). Only a
             // trigger — the displayed dimensions are recomputed from the
             // whole window content area after the loop, where `win.tabs` is
@@ -2655,13 +2650,13 @@ impl freminal_windowing::App for FreminalGui {
             // per-pane loop mutably borrows `win.tabs`.
             let mut grid_size_changed = false;
 
-            // Task 121 frame-profiling harness: cumulative time spent this
+            // Frame-profiling harness: cumulative time spent this
             // frame inside `terminal_widget.show()` across every pane in
             // `pane_layout` (accumulated inside the loop below).
             #[cfg(feature = "frame-profiling")]
             let mut phase_panes_this_frame = std::time::Duration::ZERO;
 
-            // Task 124.3a: clear last frame's published pointer-report
+            // Clear last frame's published pointer-report
             // geometry snapshot before the per-pane loop republishes one
             // entry per still-live pane below. Panes come and go
             // (split/close), so this must happen unconditionally every
@@ -2761,7 +2756,7 @@ impl freminal_windowing::App for FreminalGui {
                     pane.view_state.scroll_offset = pane_snap.scroll_offset;
                 }
 
-                // First-observation gate (issue #439 fix #4).
+                // First-observation gate.
                 //
                 // The PTY thread publishes a new `Arc<TerminalSnapshot>` only
                 // when real output arrives (a few times/sec under a settled
@@ -2783,8 +2778,8 @@ impl freminal_windowing::App for FreminalGui {
                 // the redundant self-scheduled repaints of already-drawn
                 // content.
                 //
-                // Task 124.12 switched this from an `Arc::ptr_eq` test on
-                // `visible_chars` to a value comparison on `row_epochs`. The
+                // This compares `row_epochs` values rather than using an
+                // `Arc::ptr_eq` test on `visible_chars`. The
                 // pointer test reported "new" for a byte-identical re-flatten
                 // in a fresh `Arc` (e.g. a cursor-blink repaint), which
                 // re-armed a 16ms wake for pixels that were not changing;
@@ -2796,7 +2791,7 @@ impl freminal_windowing::App for FreminalGui {
                 // vertex-rebuild trigger.
                 let is_new_snapshot = pane.render_cache.observe_row_epochs(&pane_snap.row_epochs);
 
-                // OSC 1338 HISTFILE reload trigger (Task 72.15).  When the
+                // OSC 1338 HISTFILE reload trigger.  When the
                 // shell-integration scripts publish a new HISTFILE path
                 // through `OSC 1338 ; HISTFILE=<path> ST`, the snapshot's
                 // `shell_histfile` will diverge from the last value we
@@ -2851,7 +2846,7 @@ impl freminal_windowing::App for FreminalGui {
                     && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
                 let is_active = pane_id == active_pane_id;
 
-                // Broadcast input (Task 74): only the active pane fans out its
+                // Broadcast input: only the active pane fans out its
                 // keyboard input, and only to the *other* panes. Non-active
                 // panes and the broadcast-off case pass an empty slice.
                 let key_broadcast_targets: Vec<crossbeam_channel::Sender<InputEvent>> = if is_active
@@ -2887,9 +2882,9 @@ impl freminal_windowing::App for FreminalGui {
                 // show() returns (left_clicked, copied_to_clipboard, deferred_key_actions).
                 // left_clicked is true when a primary left-click was pressed inside
                 // this pane's rect — used below for click-to-focus. copied_to_clipboard
-                // is true when a non-empty local selection was copied this frame
-                // (Subtask D3), used below to route a "Copied to clipboard" toast.
-                // Task 121 frame-profiling harness: time only this pane's
+                // is true when a non-empty local selection was copied this frame,
+                // used below to route a "Copied to clipboard" toast.
+                // Frame-profiling harness: time only this pane's
                 // `terminal_widget.show()` call (via the `scope_builder`
                 // wrapper), summed across every pane into
                 // `phase_panes_this_frame`.
@@ -2932,7 +2927,7 @@ impl freminal_windowing::App for FreminalGui {
                 let (left_clicked, copied_to_clipboard, deferred_actions) = show_result.inner;
                 all_deferred_actions.extend(deferred_actions);
 
-                // Subtask 121.12: drain this pane's in-frame repaint needs
+                // Drain this pane's in-frame repaint needs
                 // (bell flash, cursor trail, animated image, gutter hover,
                 // scrollbar damage — folded into `pane.render_cache` by
                 // `show()` rather than requested on the `Context` directly)
@@ -2943,7 +2938,7 @@ impl freminal_windowing::App for FreminalGui {
                         Some(shortest_repaint_delay.map_or(delay, |prev| prev.min(delay)));
                 }
 
-                // Subtask 122.15 / Task 124.3a: lift this pane's
+                // Lift this pane's
                 // pointer-report geometry snapshot — computed by `show()`
                 // above and recorded into
                 // `pane.render_cache.pointer_report_inputs` — into the
@@ -2968,7 +2963,7 @@ impl freminal_windowing::App for FreminalGui {
                     );
                 }
 
-                // Task 114.7: drain any egui-blocked raw key events queued
+                // Drain any egui-blocked raw key events queued
                 // this frame (keypad operators/directional, media,
                 // print/pause/menu keys) for the active pane. Must run
                 // here, after `show()` returned above, so
@@ -2981,7 +2976,7 @@ impl freminal_windowing::App for FreminalGui {
                     // suppress normal terminal input; queued raw keys must be
                     // gated the same way so they cannot bypass those overlays.
                     // A pane-border drag-to-resize is another suppression
-                    // cause (#456 review): the same "no terminal input while
+                    // cause: the same "no terminal input while
                     // a border drag is active" invariant that `show()` is
                     // handed via `border_drag_active` must also apply here,
                     // or queued raw keys leak keypad/media keys to the PTY
@@ -3060,7 +3055,7 @@ impl freminal_windowing::App for FreminalGui {
                     }
                 }
 
-                // Focus transfer (Task 110): a non-active pane is focused either
+                // Focus transfer: a non-active pane is focused either
                 // by an explicit left-click or (when focus-follows-mouse is
                 // enabled) by the mouse hovering it. Following the mouse only
                 // changes the *focused* (keyboard target) pane; it does not
@@ -3072,8 +3067,8 @@ impl freminal_windowing::App for FreminalGui {
                     .pointer_hover_pos()
                     .is_some_and(|pos| content_rect.contains(pos));
                 // Freeze focus while dragging a pane divider so the active pane
-                // doesn't flicker between panes as the pointer moves (issue
-                // #453). On release, focus is set to the pane under the
+                // doesn't flicker between panes as the pointer moves.
+                // On release, focus is set to the pane under the
                 // pointer (see the drag_stopped handler).
                 let should_focus = !is_active
                     && !border_drag_active
@@ -3153,12 +3148,11 @@ impl freminal_windowing::App for FreminalGui {
                     unfocused_style: self.config.cursor.unfocused_style,
                 });
                 // Honour a content change only on the first observation of a
-                // genuinely-new snapshot (issue #439 fix #4). Re-reading the
+                // genuinely-new snapshot. Re-reading the
                 // same published `Arc` on a later frame sees the same
                 // (byte-identical) pixels, so scheduling another content
                 // repaint buys nothing and only perpetuates the 60fps wake.
-                // `is_new_snapshot` (a `row_epochs` value comparison, Task
-                // 124.12) already IS the content-changed signal, so there is
+                // `is_new_snapshot` (a `row_epochs` value comparison) already IS the content-changed signal, so there is
                 // nothing further to AND it against.
                 let content_wants_repaint = is_new_snapshot;
                 // Diagnostic: count the ~2Hz phantom wakes the `show_cursor`
@@ -3199,7 +3193,7 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // Resize overlay (issue #433): show a transient cols×rows HUD only
+            // Resize overlay: show a transient cols×rows HUD only
             // on a genuine OS-window resize, not the last_sent_size churn from
             // new tabs/splits/pane-close/zoom (which reset last_sent_size to
             // (0, 0)) nor the first geometry observation on window creation.
@@ -3237,7 +3231,7 @@ impl freminal_windowing::App for FreminalGui {
                     });
             }
 
-            // ── Frame-damage aggregation (#435) ───────────────────────
+            // ── Frame-damage aggregation ───────────────────────
             //
             // Decide whether this whole frame was a pure cursor-only update,
             // so the windowing layer may skip the full-framebuffer clear and
@@ -3274,21 +3268,19 @@ impl freminal_windowing::App for FreminalGui {
             let per_pane_damage = damage_obs.per_pane_damage;
             let active_pane_damage = damage_obs.active_pane_damage;
 
-            // Task 121 frame-profiling harness (feature-gated), repointed by
-            // Task 124.2.
+            // Frame-profiling harness (feature-gated).
             //
             // `frame_damage_none_precomposition` counts frames where the
-            // #435-only decision (before `compose_with_chrome_damage` can
+            // partial-present-only decision (before `compose_with_chrome_damage` can
             // upgrade it) came out to
-            // [`freminal_windowing::FrameDamage::None`] -- Task 124.2 gave
-            // `decide_frame_damage` a representation for "nothing changed"
-            // distinct from "something needs a full rebuild", so this is a
+            // [`freminal_windowing::FrameDamage::None`] -- `decide_frame_damage` has a
+            // representation for "nothing changed" distinct from "something needs a full rebuild", so this is a
             // direct read of `win.pending_frame_damage` (the value just
             // assigned above) rather than a hand-rolled recomputation of
             // the same per-pane facts `decide_frame_damage` already
             // consumed.
             //
-            // Renamed from the pre-124.2 `zero_change_presented`: a frame
+            // Replaces the old `zero_change_presented` counter: a frame
             // counted here is now typically NOT presented at all (the
             // windowing layer skips the clear, every GL primitive paint,
             // and the swap) -- the opposite of what that name claimed. The
@@ -3309,7 +3301,7 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // Diagnostic frame-attribution stats (reuses the #435 damage
+            // Diagnostic frame-attribution stats (reuses the partial-present damage
             // signal). One `update()` == one drawn frame; classify the active
             // pane's damage so a CPU investigation can see, without a
             // profiler, how many drawn frames were genuinely-unchanged
@@ -3324,13 +3316,13 @@ impl freminal_windowing::App for FreminalGui {
                     Some(crate::gui::renderer::PaneFrameDamage::CursorOnly(_)) => {
                         stats.cursor_only = stats.cursor_only.saturating_add(1);
                     }
-                    // A `Region` frame (Task 124.14) is still a full vertex
+                    // A `Region` frame is still a full vertex
                     // rebuild -- only its reported *damage* is bounded, per
                     // `PaneFrameDamage::Region`'s own doc -- so it counts
                     // alongside `Full` here, consistent with `stats.full`'s
                     // doc ("a `Full` frame rebuilds the visible vertex
                     // data"). Distinguishing the two is a `frame-profiling`
-                    // counter this subtask does not add.
+                    // counter that does not exist.
                     Some(
                         crate::gui::renderer::PaneFrameDamage::Full
                         | crate::gui::renderer::PaneFrameDamage::Region(_),
@@ -3354,16 +3346,16 @@ impl freminal_windowing::App for FreminalGui {
                         cursor_only = stats.cursor_only,
                         full = stats.full,
                         blink_wake_suppressed = stats.blink_wake_suppressed,
-                        "frame-attribution stats (#439 diag): drawn frames split \
+                        "frame-attribution stats (diagnostic): drawn frames split \
                          by active-pane damage class; blink_wake_suppressed = \
                          ~2Hz phantom wakes avoided by the show_cursor gate"
                     );
                 }
             }
 
-            // ── Chrome-damage signals (#436.3 §3.3) ───────────────────
+            // ── Chrome-damage signals ───────────────────
             //
-            // Stage the individual §3.3 signals this frame, computed from
+            // Stage the individual signals this frame, computed from
             // values already available here (several — `ui_overlay_open`,
             // `active_pane_changed`, `shader_recomposites`, `ppp_changed`,
             // `chrome_focus_changed`, per-pane bell state — only exist inside
@@ -3396,8 +3388,7 @@ impl freminal_windowing::App for FreminalGui {
             win.prev_chrome_tab_snapshot = chrome_tab_snapshot;
             win.published.publish_pending_chrome_signals(chrome_signals);
 
-            // Task 121 frame-profiling harness follow-up (issue #459/#461
-            // gate-blocker investigation): count which individual §3.3
+            // Frame-profiling diagnostic: count which individual
             // signal(s) fired this frame, indexed identically to
             // `ChromeSignals::named_fields()`'s exhaustive destructure (see
             // that method's doc for why a future 16th field cannot be
@@ -3509,7 +3500,7 @@ impl freminal_windowing::App for FreminalGui {
 
             // ── Pane borders ─────────────────────────────────────────
             //
-            // Draw "surround the active pane" highlighted borders (Task 109).
+            // Draw "surround the active pane" highlighted borders.
             // Every edge of the active pane that is an interior divider is
             // highlighted full-length in the active color; the rest of each
             // divider is inactive. Outer window edges are never dividers, so
@@ -3526,7 +3517,7 @@ impl freminal_windowing::App for FreminalGui {
             let broadcast_active = win.tabs.active_tab().broadcast_input;
             if has_multiple_panes && zoomed_pane.is_none() {
                 let painter = ui.painter();
-                // Broadcast mode (Task 74) tints every split border yellow so
+                // Broadcast mode tints every split border yellow so
                 // the user has a constant visual reminder that keystrokes are
                 // fanning out to every pane.  Otherwise the active pane's
                 // edges use the theme's bright-blue (ansi[12]) — the themed
@@ -3645,7 +3636,7 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // Broadcast label (Task 74): when broadcast is active, paint a
+            // Broadcast label: when broadcast is active, paint a
             // small "BROADCAST" tag in the top-right corner of every visible
             // pane.  Top-right is chosen so it never collides with the
             // password-prompt lock icon (which lives in the tab/menu bar, not
@@ -3673,7 +3664,7 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // Resize overlay HUD (issue #433): a passive, window-centered
+            // Resize overlay HUD: a passive, window-centered
             // "cols × rows" readout, drawn on the plain painter like the
             // broadcast label above — no input, no `ui_overlay_open`
             // registration needed. Bind the `Copy` state up front so the
@@ -3715,7 +3706,7 @@ impl freminal_windowing::App for FreminalGui {
                     painter.rect_filled(text_rect, 6.0, egui::Color32::from_black_alpha(bg_alpha));
                     painter.galley(text_rect.min + egui::vec2(12.0, 12.0), galley, text_color);
                     // Keep animating/timing-out even without further input.
-                    // Subtask 121.12: fold into `shortest_repaint_delay`
+                    // Fold into `shortest_repaint_delay`
                     // (same closure, in scope here) instead of calling
                     // `ctx.request_repaint_after()` directly — a direct call
                     // would be invisible to `effective_repaint_delay`'s
@@ -3725,7 +3716,7 @@ impl freminal_windowing::App for FreminalGui {
                     // mechanism changes; the overlay's own timing/alpha is
                     // untouched.
                     //
-                    // Subtask 121.14: request only the delay actually
+                    // Request only the delay actually
                     // needed rather than an unconditional 16ms every frame
                     // the HUD is alive — a wake timed to land exactly at
                     // fade-start while still opaque, then 16ms once
@@ -3736,7 +3727,7 @@ impl freminal_windowing::App for FreminalGui {
                     // engages while this still requested a fast wake) or
                     // never sleeps (this keeps requesting 16ms while
                     // suppression was already judged safe). Without this
-                    // step, Part A's suppression fix would be worthless: the
+                    // step, the suppression would be worthless: the
                     // unconditional 16ms request folded into
                     // `shortest_repaint_delay` every frame would still
                     // schedule the window at 60fps regardless of what the
@@ -3751,21 +3742,21 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // ── Terminal band: capture the end of the shape range (#436.4a) ──
+            // ── Terminal band: capture the end of the shape range ──
             //
             // Read the background layer's current shape count as
             // `band_shape_end`, so `[band_shape_start, band_shape_end)` is
             // exactly the band's range within `LayerId::background()`'s
             // `PaintList`. `run_frame` slices `full_output.shapes` by this
             // range directly (the background layer drains first into
-            // `full_output.shapes`), so — unlike 436.2a's approach — nothing
+            // `full_output.shapes`), so — nothing
             // is cloned here: this is a pure read of the shape count, and
             // the real shapes are left in place in
             // `LayerId::background()`'s `PaintList` and drain into
             // `FullOutput.shapes` exactly as before. `run_frame`'s 3-way
             // split (head/band/tail, each tessellated and painted
             // separately, in that order) reconstructs the same total shape
-            // set with the same paint order as the pre-#436.4a single-call
+            // set with the same paint order as the pre-single-call
             // path, so this frame renders byte-identically to before.
             //
             // Capture point justification (end): nothing between the
@@ -3787,7 +3778,7 @@ impl freminal_windowing::App for FreminalGui {
             }
 
             // Drain a pending paste injected by the windowing layer's
-            // `Event::Paste` (Task 77). Use the already-read text; do not
+            // `Event::Paste`. Use the already-read text; do not
             // re-read the clipboard here. `bypass_guard` (the PasteUnsafe
             // action, Ctrl+Shift+Alt+V) sends directly without analysis.
             let pending_paste = win
@@ -3804,7 +3795,7 @@ impl freminal_windowing::App for FreminalGui {
             }
 
             // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).
-            // Routed through the close guard (Task 98): a running foreground
+            // Routed through the close guard: a running foreground
             // command opens the confirmation dialog instead of closing.
             if win.pending_close_pane {
                 win.pending_close_pane = false;
@@ -3846,7 +3837,7 @@ impl freminal_windowing::App for FreminalGui {
 
             // Stash this frame's own repaint request (drained by
             // `App::take_terminal_requested_delay`): the windowing layer's
-            // `effective_repaint_delay` (Task 121) uses it to stand in for
+            // `effective_repaint_delay` uses it to stand in for
             // egui's own requested delay when the only thing that happened
             // since the previous frame was pointer motion the app
             // classified as needing no frame.
@@ -3857,7 +3848,7 @@ impl freminal_windowing::App for FreminalGui {
                 ctx.request_repaint_after(delay);
             }
 
-            // Task 121 frame-profiling harness (defect-1/defect-2 fix):
+            // Frame-profiling harness:
             // derive this frame's `phase_orchestration` as `central_body`'s
             // total elapsed time minus `phase_panes_this_frame` (the
             // per-pane `show()` contribution accumulated above), and hand
@@ -3885,7 +3876,7 @@ impl freminal_windowing::App for FreminalGui {
         // Render the app-level toast stack as an overlay on top of all panels.
         // Toasts are shared across every window, so they appear consistently
         // regardless of which window the user is looking at. TAIL chrome.
-        // Review item 2 follow-up to 121.14: `win.published`'s toast
+        // `win.published`'s toast
         // rects must be written on EVERY `Full` frame reaching this
         // point, not only when the block below actually runs
         // `stack.show()` — see `PublishedFrameState`'s doc for why (an
@@ -3945,7 +3936,7 @@ impl freminal_windowing::App for FreminalGui {
                 pixels_per_point,
             );
 
-            // Subtask 121.14 (review item 2 follow-up): the laid-out
+            // The laid-out
             // toast pill rects go into their own dedicated slot, not
             // `chrome_border_rects` — see `PublishedFrameState`'s doc
             // for the full staleness-discipline reasoning and why a
@@ -3953,7 +3944,7 @@ impl freminal_windowing::App for FreminalGui {
             // append-to-border-rects approach.
             win.published.publish_chrome_toast_rects(outcome.rects);
 
-            // Subtask 121.12: `ToastStack::show` returns its wanted delay
+            // `ToastStack::show` returns its wanted delay
             // rather than calling `ctx.request_repaint_after()` itself. This
             // runs AFTER `central_body` already published
             // `win.pending_terminal_requested_delay` (~3768 above), so it is
@@ -4006,7 +3997,7 @@ impl freminal_windowing::App for FreminalGui {
         // of `update()` needs a frame to run in.
         self.wake_for_osc99_pending_work(ctx);
 
-        // ── Retired GL objects need one more frame (125.C2 review) ──────────
+        // ── Retired GL objects need one more frame ──────────
         // A pane closed during this update retired its renderer after the
         // top-of-frame drain ran. Without a further frame the objects would
         // linger on an idle window; ask for exactly one (its drain empties
@@ -4018,14 +4009,13 @@ impl freminal_windowing::App for FreminalGui {
             ctx.request_repaint();
         }
 
-        // ── Chrome-damage (#436.3): §3.5 "after" sample + final decision ─────
+        // ── Chrome-damage: "after" sample + final decision ─────
         //
         // Taken here — after every dismissible element's `.show(ctx)` this
         // frame, including the toast stack's above — and diffed against
         // `chrome_dismissible_before` (sampled at the very top of this
         // function, before any of them showed) to catch a self-dismissal
-        // that happened DURING this frame's rendering (adversarial finding
-        // 1: e.g. a toast expiring in its own `.show()` and requesting no
+        // that happened DURING this frame's rendering (e.g. a toast expiring in its own `.show()` and requesting no
         // further repaint because the stack is now empty). Also diffed
         // against `win.prev_dismissible_presence` (last frame's own "after"
         // sample) to catch a transition caused by something other than the
@@ -4043,7 +4033,7 @@ impl freminal_windowing::App for FreminalGui {
         );
         win.prev_dismissible_presence = chrome_dismissible_after;
 
-        // §3.5's "+ next frame FULL" half: read last frame's pending flag as
+        // The settle rule's "+ next frame FULL" half: read last frame's pending flag as
         // this frame's settle input, then reassign it to THIS frame's own
         // transition result for the next frame to read (no separate "reset"
         // step — see `decide_chrome_damage`'s doc).
@@ -4057,15 +4047,15 @@ impl freminal_windowing::App for FreminalGui {
             chrome_settle_frame_pending,
         );
 
-        // ── #435/#436 composition (§6): chrome change forces FrameDamage::Full ──
+        // ── Composition of the two damage decisions: chrome change forces FrameDamage::Full ──
         //
-        // The #435 partial-present decision (`pending_frame_damage`, computed
-        // in `central_body`) and the #436 chrome-cache decision
+        // The partial-present decision (`pending_frame_damage`, computed
+        // in `central_body`) and the chrome-cache decision
         // (`pending_chrome_damage`, just computed) are separate but MUST
         // agree. See `frame_damage::compose_with_chrome_damage` for the full
         // rationale; in short, a frame that changed chrome pixels must not be
         // presented `Partial` (it would leave chrome outside the cursor rect
-        // stale under #435's `buffer_age() == 1` assumption). Reconciled here,
+        // stale under the `buffer_age() == 1` assumption). Reconciled here,
         // after both decisions are final, via the pure helper.
         win.pending_frame_damage = frame_damage::compose_with_chrome_damage(
             std::mem::replace(
@@ -4075,10 +4065,9 @@ impl freminal_windowing::App for FreminalGui {
             win.pending_chrome_damage,
         );
 
-        // Task 121 frame-profiling harness: single recording point covering
-        // the defect-1 (`phase_app_update`), defect-2 (`frame_damage_full`/
-        // `frame_damage_partial` counted from the FINAL value), and
-        // defect-3 (`window_id` on the tracing line) fixes.
+        // Frame-profiling harness: single recording point covering
+        // `phase_app_update`, `frame_damage_full`/`frame_damage_partial`
+        // (counted from the FINAL value), and `window_id` on the tracing line.
         //
         // Placed here -- after `compose_with_chrome_damage` and before `win`
         // is reinserted into `self.windows` -- rather than inside
@@ -4094,8 +4083,8 @@ impl freminal_windowing::App for FreminalGui {
         // measurement and therefore misattributed to "egui overhead".
         #[cfg(feature = "frame-profiling")]
         {
-            // Defect 2: count the FINAL, post-composition frame damage kind.
-            // Task 124.2 added the `None` arm: a frame reaching it is
+            // Count the FINAL, post-composition frame damage kind.
+            // A frame reaching the `None` arm is
             // genuinely NOT presented (no clear, no primitive paint, no
             // swap) -- distinct from `frame_damage_none_precomposition`
             // above, which is sampled BEFORE `compose_with_chrome_damage`
@@ -4115,7 +4104,7 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // Defect 1: `phase_app_update` covers the whole productive body
+            // `phase_app_update` covers the whole productive body
             // of `update()`, from `update_start` (captured at the very top
             // of this function) through this point.
             let phase_app_update_this_frame = update_start.elapsed();
@@ -4134,7 +4123,7 @@ impl freminal_windowing::App for FreminalGui {
                 .frames_drawn
                 .is_multiple_of(super::window::FrameStats::FLUSH_EVERY)
             {
-                // Defect 3: `window_id` on the tracing line, `{:?}` -- the
+                // `window_id` on the tracing line, `{:?}` -- the
                 // same representation the windowing crate's own
                 // `frame_profiling` line uses for its `window_id` field, so
                 // the two crates' lines for the same OS window can be
@@ -4168,8 +4157,7 @@ impl freminal_windowing::App for FreminalGui {
                         stats.frames_drawn
                     )
                     .as_micros(),
-                    // Gate-blocker investigation (issue #459/#461 follow-up):
-                    // which individual §3.3 `ChromeSignals` field(s) fired,
+                    // Which individual `ChromeSignals` field(s) fired,
                     // cumulative since window creation, name=count joined --
                     // only the non-zero entries (see
                     // `format_nonzero_counts`'s doc for why: 15
@@ -4185,8 +4173,7 @@ impl freminal_windowing::App for FreminalGui {
                             )
                         })
                     ),
-                    // Task 121 pointer-motion repaint-gate spike follow-up:
-                    // of the `pointer_motion_needs_repaint` calls this flush
+                    // Of the `pointer_motion_needs_repaint` calls this flush
                     // window, how many total, and which of the ten named
                     // forcing conditions fired on how many of them (non-exclusive --
                     // several can fire on the same call; each counted
@@ -4199,9 +4186,9 @@ impl freminal_windowing::App for FreminalGui {
                         %super::window::FrameStats::format_nonzero_counts(
                             &stats.pointer_condition_counts()
                         ),
-                    "app-side frame-profiling stats (task 121 harness): \
-                     frame_damage_none_precomposition (Task 124.2: the \
-                     #435-only decision, before compose_with_chrome_damage, \
+                    "app-side frame-profiling stats (frame-profiling harness): \
+                     frame_damage_none_precomposition (the \
+                     partial-present-only decision, before compose_with_chrome_damage, \
                      resolved to FrameDamage::None -- nothing changed) vs. \
                      frame_damage_none/frame_damage_full/frame_damage_partial \
                      (the FINAL, post-composition classification -- a \
@@ -4209,7 +4196,7 @@ impl freminal_windowing::App for FreminalGui {
                      freminal-owned phase_app_update/phase_orchestration/phase_panes \
                      wall-clock split (phase_app_update = the whole productive body of \
                      update(); phase_orchestration = central_body total minus the \
-                     per-pane show() contribution), which individual §3.3 \
+                     per-pane show() contribution), which individual \
                      ChromeSignals field(s) fired (chrome_signals_fired, cumulative, \
                      non-zero entries only) over frames_drawn drawn frames for this \
                      window_id, and -- the pointer-motion repaint-gate spike \
@@ -4238,7 +4225,7 @@ impl freminal_windowing::App for FreminalGui {
 
         trace!("{}", frame_time);
 
-        // ── Window-lifecycle requests (issue #512) ───────────────────────────
+        // ── Window-lifecycle requests ───────────────────────────
         //
         // Both requests below are raised from two places: the Freminal menu
         // (during the menu-bar render, above) and `dispatch_deferred_action`
@@ -4255,7 +4242,7 @@ impl freminal_windowing::App for FreminalGui {
         // current frame. That meant a request could never be observed in its
         // own frame and depended on some later event scheduling another one.
         // Clicking a menu item happens to schedule that frame (the dropdown
-        // closes); an otherwise-idle key press does not. That is issue #512:
+        // closes); an otherwise-idle key press does not. That was a real bug:
         // `QuitAll` via the menu worked, via `Ctrl+Shift+Q` it silently did
         // nothing. `NewWindow` had the identical defect, merely less visibly.
         //
@@ -4310,7 +4297,7 @@ impl freminal_windowing::App for FreminalGui {
         event: freminal_windowing::RawKeyEvent,
         mods: freminal_windowing::RawKeyMods,
     ) {
-        // Task 114.7: queue only -- do NOT encode here. This callback fires
+        // Queue only -- do NOT encode here. This callback fires
         // at winit-event time, outside the render/`update()` path where the
         // active pane, its snapshot, and the true per-pane `super_pressed`
         // are in scope. The queue is drained and encoded on the render path
@@ -4327,7 +4314,7 @@ impl freminal_windowing::App for FreminalGui {
         win.pending_raw_keys.push((event, mods));
     }
 
-    /// Task 124.3a: synchronous, out-of-frame pointer-motion observation.
+    /// Synchronous, out-of-frame pointer-motion observation.
     /// Resolves the active pane of the active tab (mirroring the frame-time
     /// active-pane routing exactly — see
     /// `terminal::pty_mouse_report::maybe_send_immediate_motion_report`'s
@@ -4341,7 +4328,7 @@ impl freminal_windowing::App for FreminalGui {
         let Some(win) = self.windows.get_mut(&window_id) else {
             return;
         };
-        // Task 124.3a (review correction #1): the held-button identity is
+        // The held-button identity is
         // window-owned (`held_pointer_button`), not pane-owned — read it
         // here, before resolving the pane, and pass it through explicitly.
         let held_button = win.held_pointer_button;
@@ -4362,9 +4349,8 @@ impl freminal_windowing::App for FreminalGui {
         );
     }
 
-    /// Task 124.3a: synchronous, out-of-frame pointer-button observation.
-    /// Updates the WINDOW-owned held-button state (review correction #1 —
-    /// see `PerWindowState::held_pointer_button`'s doc for why this is not
+    /// Synchronous, out-of-frame pointer-button observation.
+    /// Updates the WINDOW-owned held-button state (see `PerWindowState::held_pointer_button`'s doc for why this is not
     /// pane-owned), used by `on_pointer_moved`'s `?1002`/`?1003`
     /// reporting; does not itself emit any PTY report.
     fn on_pointer_button(
@@ -4383,7 +4369,7 @@ impl freminal_windowing::App for FreminalGui {
         );
     }
 
-    /// Task 124.3a (review correction): reset window-owned held-button
+    /// Reset window-owned held-button
     /// state and the active pane's immediate-report position baseline when
     /// pointer presence over this window is lost (the pointer left the
     /// window, or the window lost focus). Without this, re-entry or
@@ -4426,7 +4412,7 @@ impl freminal_windowing::App for FreminalGui {
 }
 
 impl FreminalGui {
-    /// Sample the presence of every dismissible chrome element (#436 §3.5).
+    /// Sample the presence of every dismissible chrome element.
     ///
     /// Called twice per `update()` for the window being rendered — once as
     /// early as possible (before any dialog's `.show(ctx)` this frame) and
@@ -4434,7 +4420,7 @@ impl FreminalGui {
     /// which runs against the still-local `win` before it is reinserted into
     /// `self.windows` at the end of `update()` — see the call site) — so the
     /// two samples can be diffed to catch a self-dismissal that happens
-    /// DURING a `.show()` call this same frame (adversarial finding 1).
+    /// DURING a `.show()` call this same frame.
     fn sample_dismissible_presence(
         &self,
         win: &PerWindowState,
@@ -4470,11 +4456,11 @@ impl FreminalGui {
     /// that borrow.
     ///
     /// There are three routing destinations (OSC 9/777 toasts, OSC 52 toasts,
-    /// and OSC 99 requests), and each has its own block below, deliberately
-    /// (Task 122.8 prohibition): they route to different destinations. The
+    /// and OSC 99 requests), and each has its own block below, deliberately:
+    /// they route to different destinations. The
     /// OSC 99 block installs a deferred filter change and prunes dead panes,
     /// then routes displays, controls and icon primings as ONE ordered list
-    /// (Task 138.C10, G1); its controls write PTY responses through the
+    /// (in arrival order); its controls write PTY responses through the
     /// effects they return. Do not fold the blocks into one. The OSC 99 routing
     /// itself lives in `gui::osc99::glue`.
     fn route_window_manipulation_events(
@@ -4482,7 +4468,7 @@ impl FreminalGui {
         window_focus: WindowFocus,
         events: WindowManipulationEvents,
     ) {
-        // Route OSC 9 / OSC 777 notifications collected above (Task 76.4).
+        // Route OSC 9 / OSC 777 notifications collected above.
         // `self.config` and the toast stack are borrowable here without
         // conflicting with the drain's tab-list borrow.
         if !events.osc_notifications.is_empty()
@@ -4503,7 +4489,7 @@ impl FreminalGui {
             }
         }
 
-        // Surface OSC 52 remote-clipboard events as toasts (issue #433).
+        // Surface OSC 52 remote-clipboard events as toasts.
         for event in &events.osc52_events {
             let (title, detail) = rendering::osc52_toast_text(event);
             self.route_freminal_toast(
@@ -4535,7 +4521,7 @@ impl FreminalGui {
         // Route every OSC 99 request of the frame (displays, `p=close` /
         // `p=alive` controls, icon primings) in the order the panes emitted
         // them. The `p=?` handshake never gets here: the PTY thread answers
-        // it (Task 130.5).
+        // it.
         self.route_osc99_requests(window_focus, events.osc99_requests);
     }
 
@@ -5167,14 +5153,14 @@ mod tests {
     }
 
     /// Pins the `stage_frame_damage` double-write contract (see that
-    /// function's doc): the #435 pre-composition `FrameDamage` decided by
+    /// function's doc): the partial-present pre-composition `FrameDamage` decided by
     /// `decide_frame_damage` (write #1, assigned to
     /// `win.pending_frame_damage` at the `stage_frame_damage` call site) and
-    /// the #436 post-composition value produced by
+    /// the chrome-damage post-composition value produced by
     /// `compose_with_chrome_damage` (write #2, applied after `central_body`
     /// returns) must be able to disagree — that disagreement is the entire
     /// reason the second write exists (a chrome-changed frame must not be
-    /// presented `Partial` even if #435's signals alone said so). If the two
+    /// presented `Partial` even if the partial-present signals alone said so). If the two
     /// writes were ever collapsed into one, this frame's pre-composition
     /// `Partial` and post-composition `Full` would silently converge and
     /// this assertion would start failing loudly instead of the bug
@@ -5200,7 +5186,7 @@ mod tests {
             "expected write #1 (pre-composition) to be Partial, got {pre_composition:?}"
         );
 
-        // The #436 chrome-cache decision independently found chrome pixels
+        // The chrome-cache decision independently found chrome pixels
         // changed this same frame (e.g. a hover tint moved) -> write #2
         // upgrades the pre-composition `Partial` to `Full`.
         let post_composition = frame_damage::compose_with_chrome_damage(
@@ -5243,14 +5229,14 @@ mod tests {
         );
     }
 
-    // ── Terminal band shape-index-range extraction (#436.2a / #436.4a) ──
+    // ── Terminal band shape-index-range extraction ──
     //
     // These tests pin the underlying mechanism `update()` uses to bound the
     // terminal band's shape-index range: paint the band into the SAME
     // `LayerId::background()` layer chrome already uses (no dedicated
     // layer), remember the shape count before ("`band_shape_start`"), and
     // read `all_entries().skip(start)` to identify exactly the range
-    // appended since. Production (as of #436.4a) captures `band_shape_end`
+    // appended since. Production captures `band_shape_end`
     // the same way and hands back `[band_shape_start, band_shape_end)` as a
     // range via `App::take_terminal_band_range`, rather than cloning the
     // shapes out here — but the boundary-counting primitive these tests
@@ -5270,7 +5256,7 @@ mod tests {
         // range.
         let mut extracted: Vec<egui::epaint::ClippedShape> = Vec::new();
         let mut chrome_shape_count = 0usize;
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let discarded_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             // "Chrome" shape, painted before the band region starts.
@@ -5326,15 +5312,14 @@ mod tests {
 
     #[test]
     fn band_shape_range_extraction_is_a_clone_not_a_drain() {
-        // 436.2a's correctness requirement: extraction must NOT remove the
-        // shapes from the background layer (that is deferred to 436.4,
-        // alongside separate band painting). Confirms the real shapes are
+        // Correctness requirement: extraction must NOT remove the
+        // shapes from the background layer. Confirms the real shapes are
         // still present after our clone-only extraction, and that egui's
         // own `end_pass` still drains them into `FullOutput.shapes` — i.e.
         // rendering is unaffected by the extraction seam existing.
         let ctx = egui::Context::default();
 
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let band_shape_start = ui.ctx().graphics(|g| {
@@ -5349,7 +5334,7 @@ mod tests {
             );
 
             // Clone-only extraction (no removal from the layer), exactly as
-            // production does in this subtask.
+            // production does.
             let extracted: Vec<egui::epaint::ClippedShape> = ui.ctx().graphics(|g| {
                 g.get(egui::LayerId::background())
                     .map_or_else(Vec::new, |list| {
@@ -5363,15 +5348,14 @@ mod tests {
         assert!(
             !full_output.shapes.is_empty(),
             "the background layer's shapes must still drain into FullOutput.shapes \
-             (byte-identical rendering) because this subtask does not remove them \
-             — that is 436.4's job, done together with separate band painting"
+             (byte-identical rendering) because extraction does not remove them"
         );
     }
 
     // ── Regression test: same-layer widgets are not cross-layer-hidden ──
     //
-    // This is the blocker the adversarial review caught in the FIRST attempt
-    // at 436.2a: routing the terminal band into a *second*
+    // This is the blocker an earlier design hit: routing the terminal band
+    // into a *second*
     // `Order::Background` layer (distinct from `LayerId::background()`,
     // which chrome — menu bar, tab bar, and the `CentralPanel`'s own root
     // widget rect — paints into) trips egui 0.35's cross-layer hit-test
@@ -5405,7 +5389,7 @@ mod tests {
         // `band_layer_id`. `big` mimics `CentralPanel`'s content-area
         // widget rect (which fully contains the band); `small` mimics a
         // band-region interactive widget (e.g. the command-block gutter).
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let discarded_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let _big = ui.interact(
@@ -5432,7 +5416,7 @@ mod tests {
             ..Default::default()
         };
         let mut small_hovered = false;
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let discarded_output = ctx.run_ui(raw_input, |ui| {
             let _big = ui.interact(
@@ -5459,7 +5443,7 @@ mod tests {
 
     #[test]
     fn dedicated_background_layer_hides_contained_widget_cross_layer() {
-        // Reproduces the actual blocker: the FIRST 436.2a attempt routed the
+        // Reproduces the actual blocker: the earlier design routed the
         // band into `band_layer_id` (a second `Order::Background` layer,
         // keyed by window id, exactly as constructed below) instead of
         // `LayerId::background()`. This deterministically demonstrates that
@@ -5479,7 +5463,7 @@ mod tests {
         );
 
         let ctx = egui::Context::default();
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let discarded_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let _big = ui.interact(
@@ -5505,7 +5489,7 @@ mod tests {
             ..Default::default()
         };
         let mut small_hovered = false;
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let discarded_output = ctx.run_ui(raw_input, |ui| {
             let _big = ui.interact(

@@ -52,8 +52,8 @@ use freminal_common::{
 /// `total_rows` alone is **not** enough to tell: at scrollback capacity it
 /// freezes while `row_base` keeps advancing by one per evicted row, so a
 /// corpus fetched a moment ago has the same `total_rows` as the live buffer
-/// but is made of different rows. Comparing the pair (Task 125.17) is what
-/// lets staleness checks notice that.
+/// but is made of different rows. Comparing the pair is what lets staleness
+/// checks notice that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferExtent {
     /// Logical number of the oldest retained row (retained index `0`).
@@ -156,10 +156,9 @@ pub struct TerminalSnapshot {
 
     /// Logical row number of the oldest retained row (retained index `0`).
     ///
-    /// Row `i` of the buffer is numbered `row_base + i`. Stable row numbers
-    /// (Task 125.14) are what `prompt_rows` and `command_blocks` carry: a
-    /// number never changes while its row lives, and falls below `row_base`
-    /// once the row has been evicted. Convert between numbers and the
+    /// Row `i` of the buffer is numbered `row_base + i`. Stable row numbers are what
+    /// `prompt_rows` and `command_blocks` carry: a number never changes while
+    /// its row lives, and falls below `row_base` once the row has been evicted. Convert between numbers and the
     /// retained indices the GUI's row math uses with [`Self::row_number_at`]
     /// and [`Self::retained_index_of`].
     pub row_base: RowNumber,
@@ -205,8 +204,7 @@ pub struct TerminalSnapshot {
     /// renders: a change made between two rendered frames still shows up as a
     /// differing epoch on the next one the GUI actually consumes, instead of
     /// being silently lost. This replaced a sticky `content_changed: bool`
-    /// field (deleted by Task 124.12) that went stale across exactly those
-    /// unrendered snapshots.
+    /// field that went stale across exactly those unrendered snapshots.
     pub row_epochs: Arc<[u64]>,
 
     /// Indices into `visible_tags` of tags that carry a URL (`url.is_some()`).
@@ -369,8 +367,7 @@ pub struct TerminalSnapshot {
     /// (`A`), command input start (`B`), output start (`C`), command finished
     /// (`D`) — along with optional exit code, captured CWD, and start/finish
     /// timestamps.  Surfaced through the snapshot so the GUI can render
-    /// command gutters (Task 73), copy-output actions (Task 72.11), and fold
-    /// state (Task 72.10).
+    /// command gutters, copy-output actions, and fold state.
     ///
     /// Ordering: oldest-first.  Capped at the buffer's `scrollback_limit`.
     ///
@@ -406,7 +403,7 @@ pub struct TerminalSnapshot {
     /// (the OS default arrow).
     pub pointer_shape: PointerShape,
 
-    /// Current progress state reported via OSC 9;4 (issue #507).
+    /// Current progress state reported via OSC 9;4.
     ///
     /// Stale reports (no update within
     /// `TerminalHandler::PROGRESS_STALE_TIMEOUT`) are expired before this
@@ -606,7 +603,7 @@ mod tests {
         );
     }
 
-    // ── logical row numbers (Task 125.14) ───────────────────────────────
+    // ── logical row numbers ─────────────────────────────────────────────
 
     /// A snapshot of `total_rows` rows whose oldest row is numbered `base`.
     fn snap_at(base: u64, total_rows: usize, term_height: usize) -> TerminalSnapshot {

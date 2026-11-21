@@ -89,7 +89,7 @@ pub enum InputEvent {
     AutoDetectUrls(bool),
     /// Request text extraction from the full buffer for clipboard copy.
     ///
-    /// Rows are stable logical [`RowNumber`]s (Task 125.17) and columns are
+    /// Rows are stable logical [`RowNumber`]s and columns are
     /// 0-indexed, so the request names the same text however many rows were
     /// evicted between the GUI forming it and the PTY thread serving it. The
     /// PTY thread resolves the rows against its buffer (a start row that has
@@ -113,7 +113,7 @@ pub enum InputEvent {
     /// next frame renders from the live view).
     ClearScrollback,
     /// The user changed the cursor shape/blink Settings while a pane was
-    /// already running (issue #406).
+    /// already running.
     ///
     /// Sent by the Settings Modal when `cursor.shape` / `cursor.blink`
     /// change on Apply (or a config reload). The PTY thread calls
@@ -124,7 +124,7 @@ pub enum InputEvent {
     /// style normally afterward.
     CursorConfigChange(freminal_common::cursor::CursorVisualStyle),
     /// The host-dependent capability facts changed while a pane was already
-    /// running (Task 130.4).
+    /// running.
     ///
     /// Sent by the GUI when a config change alters what the host can do (for
     /// example the OSC 99 routing). The PTY thread calls
@@ -134,7 +134,7 @@ pub enum InputEvent {
     HostCapabilitiesChange(freminal_common::host_capabilities::HostCapabilities),
     /// A reply only the GUI can produce (window geometry, title, clipboard,
     /// OSC 99 reports), carried as data so the PTY thread frames it in the
-    /// application's S8C1T mode (Task 130.6).
+    /// application's S8C1T mode.
     ///
     /// The PTY thread serialises it with `TerminalEmulator::write_gui_reply`.
     /// It writes only to the child fd, so it requests no repaint, and it is not

@@ -7,8 +7,8 @@
 //!
 //! Resolves, from the config, the platform and what is known about the
 //! Linux/BSD notification daemon, the capability facts the PTY thread cannot
-//! know by itself (Tasks 130.4, 138.15), and re-sends them to every pane when
-//! they change. Later facets (Task 146) are added here.
+//! know by itself, and re-sends them to every pane when
+//! they change. Later facets are added here.
 
 use freminal_common::config::{Config, NotificationRouting, NotificationsConfig};
 use freminal_common::host_capabilities::{
@@ -29,7 +29,7 @@ use super::window::PerWindowState;
 /// Resolve the host-dependent capability facts from the config, the platform
 /// and what is known about the Linux/BSD notification daemon.
 ///
-/// The PTY thread cannot know these itself (Task 130.4); the GUI computes this
+/// The PTY thread cannot know these itself; the GUI computes this
 /// value at pane spawn and re-sends it via `InputEvent::HostCapabilitiesChange`
 /// whenever it changes.
 ///
@@ -60,7 +60,7 @@ fn osc99_support(config: &Config, daemon: LinuxDaemon) -> Osc99Support {
 
 /// The kitty file-transmission facet of [`host_capabilities`]:
 /// [`KittyFileTransmission::Allowed`] only when `[security]
-/// allow_kitty_file_transfer` is on (GHSA-8prj-mhmf-xpjg).
+/// allow_kitty_file_transfer` is on.
 const fn kitty_file_transmission(config: &Config) -> KittyFileTransmission {
     if config.security.allow_kitty_file_transfer {
         KittyFileTransmission::Allowed
@@ -344,7 +344,7 @@ pub(super) const fn toast_leg() -> Osc99Features {
 ///   nor urgency; it shows a body and icons but no buttons.
 /// - **Windows** is the same as macOS. Its toast has no urgency levels (the
 ///   "reminder" scenario needs buttons, which this leg cannot report), so
-///   urgency is not advertised (138.C17).
+///   urgency is not advertised.
 ///
 /// `daemon` is read only for [`NotifyPlatform::LinuxBsd`].
 #[must_use]
@@ -964,8 +964,8 @@ mod tests {
 
     #[test]
     fn system_on_windows() {
-        // No `a`, `c`, `w` or `u` (the Windows toast has no urgency levels,
-        // 138.C17); a body and icons; no buttons.
+        // No `a`, `c`, `w` or `u` (the Windows toast has no urgency levels);
+        // a body and icons; no buttons.
         assert_eq!(
             combine(
                 NotificationRouting::System,
@@ -1131,7 +1131,7 @@ mod tests {
             Osc99SoundNames::Standard
         );
     }
-    // ── Daemon state changes (Task 138.15) ──────────────────────────────
+    // ── Daemon state changes ──────────────────────────────
 
     /// A daemon reply that differs from [`DaemonCapabilities::ASSUMED`]
     /// only in lacking `actions`.
@@ -1534,7 +1534,7 @@ mod tests {
         }
     }
 
-    // ── End to end through a pane's handler (Task 138.15) ───────────────
+    // ── End to end through a pane's handler ───────────────
 
     /// A pane's terminal state seeded with `capabilities`, and its PTY write
     /// receiver.

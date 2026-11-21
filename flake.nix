@@ -459,7 +459,7 @@
               # devShell does not build heavy dev-only tools.
               ciRustTools = [
                 pkgs.tombi
-                # Test runner behind `cargo xtask test` / `pc` (issue #538).
+                # Test runner behind `cargo xtask test` / `pc`.
                 pkgs.cargo-nextest
                 pkgs.cargo-deny
                 pkgs.cargo-machete
@@ -516,7 +516,7 @@
                 windowsCheck.cc
               ];
 
-              # Task 123 Phase 2 (pixel / readback harness). Linux-only by
+              # Pixel / readback harness. Linux-only by
               # design, following the same `stdenv.isLinux` precedent as
               # `pkgs.perf` and documented as Tier 2 in PROFILING.md.
               #
@@ -571,7 +571,7 @@
                 FREMINAL_WINDOWS_CARGO = "${windowsCheck.toolchain}/bin/cargo";
               };
 
-              # Task 123 Phase 2: point libglvnd at Mesa's software rasteriser
+              # Pixel harness: point libglvnd at Mesa's software rasteriser
               # so an offscreen GL context can be created with no GPU.
               #
               # Set ONLY in the `gl-pixel` shell. It must not go into `default`
@@ -580,7 +580,7 @@
               # `freminal` — and force it to rasterise on CPU instead of the
               # GPU.
               #
-              # That is not hypothetical. 123.10 originally applied this to the
+              # That is not hypothetical. This was once applied to the
               # `default` shell, and the result was a ~100x idle-CPU regression
               # for anyone developing in `nix develop`/direnv: 0.0% -> ~0.4% of
               # a core at idle and a clearly visible cost on mouse movement,
@@ -590,9 +590,8 @@
               # equally affected. Do not re-add it to an interactive shell.
               #
               # These are set explicitly rather than by adding
-              # `pkgs.mesa.llvmpipeHook` to the package list, which is what
-              # PLAN_123's 123.10 originally specified. The hook would set the
-              # same three variables, but its contents cannot be inspected
+              # `pkgs.mesa.llvmpipeHook` to the package list. The hook would
+              # set the same three variables, but its contents cannot be inspected
               # without building it, and a setup hook that silently overrides
               # an explicitly-set variable is exactly the kind of
               # action-at-a-distance this file otherwise avoids. The explicit
@@ -656,7 +655,7 @@
               # cross-check env/toolchain.  Used by nightly.yml.
               ci = mkFreminalShell [ ] { };
 
-              # Lean shell for the Task 123 Phase 2 pixel harness: the `ci`
+              # Lean shell for the pixel harness: the `ci`
               # shell's toolchain plus Mesa/Xvfb and the llvmpipe env, and
               # none of `devOnlyTools`. CI must not build cargo-bundle from
               # source just to read back some pixels.
@@ -668,7 +667,7 @@
               # and cripple an interactively-run `freminal` from `default`.
               gl-pixel = mkFreminalShell glPixelTools glPixelEnv;
 
-              # Fuzzing shell (issue 553): cargo-fuzz plus a pinned-date nightly
+              # Fuzzing shell: cargo-fuzz plus a pinned-date nightly
               # toolchain, and on Linux bubblewrap to sandbox fuzz runs.
               #
               # Separate from `default` and `ci` by maintainer decision: fuzzing

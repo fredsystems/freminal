@@ -12,12 +12,12 @@
 //! - `data_and_format_data_for_gui()` on a pre-populated handler
 //! - `build_snapshot()` on a pre-populated emulator
 //! - End-to-end alternate-screen transitions (parse `?1049h`/`?1049l` ->
-//!   `build_snapshot()`), issue #405 Part C item 4
+//!   `build_snapshot()`)
 //! - Sustained output at the default 10,000-row scrollback capacity
-//!   (`handle_incoming_data()` with every line feed evicting a row), Task 125.12
-//! - Sixel decoding (`parse_sixel()`) of a 400x300 image, Task 148.2
+//!   (`handle_incoming_data()` with every line feed evicting a row)
+//! - Sixel decoding (`parse_sixel()`) of a 400x300 image
 //! - Keyboard encoding (`TerminalInput::to_payload`) over a representative key
-//!   mix, legacy and kitty-keyboard paths, Task 147.4
+//!   mix, legacy and kitty-keyboard paths
 
 // Benchmark harness, not production code: unwrap/expect on setup is acceptable.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -140,7 +140,7 @@ fn bursty_payload() -> Vec<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------
-// Real-world colored scrollback corpora (Task 118 memory bench)
+// Real-world colored scrollback corpora (memory bench)
 //
 // These generate authentic ANSI byte streams that are fed through the REAL
 // parser (`handle_incoming_data`), so the resulting `FormatTag`s are produced
@@ -415,7 +415,7 @@ fn bench_parse_sixel(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// bench_to_payload — keyboard encoding (Task 147.4)
+// bench_to_payload — keyboard encoding
 // ---------------------------------------------------------------
 
 /// A representative key mix: printable and control keys, arrows in both
@@ -628,8 +628,8 @@ fn bench_data_and_format_for_gui(c: &mut Criterion) {
 //   build_snapshot_80x24_partial_dirty
 //     Measures the *partial-dirty path*: exactly ONE visible row is dirtied
 //     per sample (a single-character edit), then `build_snapshot` is called.
-//     This is the "1-of-N rows changed" scenario from issue #405 Part C. The
-//     buffer flatten/merge step is now incremental (#405 Part C item 1): the
+//     This is the "1-of-N rows changed" scenario. The
+//     buffer flatten/merge step is now incremental: the
 //     merge reuses the cached prefix strictly before the first dirty row and
 //     only re-merges from that row onward, sharing the result via `Arc` with
 //     the buffer's merge cache (no extra deep copy). At 80x24 this is a wash
@@ -766,7 +766,7 @@ fn bench_build_snapshot_with_scrollback(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// bench_build_snapshot_command_blocks — Task 125 review (B2)
+// bench_build_snapshot_command_blocks
 //
 // `build_snapshot` copies the buffer's command blocks into the snapshot's
 // `Arc<[CommandBlock]>` on every call; each `CommandBlock` owns heap `String`s
@@ -852,13 +852,14 @@ fn bench_build_snapshot_command_blocks(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// bench_sustained_output_at_capacity — Task 125.12
+// bench_sustained_output_at_capacity
 //
-// Task 125.10 found that sustained output (`seq`, `cat` of a large file) is
+// Profiling found that sustained output (`seq`, `cat` of a large file) is
 // dominated by `Buffer::enforce_scrollback_limit` once scrollback is full:
 // every line feed front-drains the row storage. This group drives that path
 // end to end through the REAL parser and handler via `handle_incoming_data`,
-// on a 124x31 emulator (the Task 125.10 matched-protocol grid) whose
+// on a 124x31 emulator (the matched-protocol grid used for
+// cross-terminal comparison) whose
 // scrollback is already at the default 10,000-row capacity.
 //
 //   seq_200_burst
@@ -936,7 +937,7 @@ fn bench_sustained_output_at_capacity(c: &mut Criterion) {
 // bench_alt_screen_transition_e2e — end-to-end alternate-screen transition
 // cost, driven through the REAL parser and `build_snapshot()`.
 //
-// Issue #405 Part C item 4: the existing `bench_alternate_screen_switch` in
+// The existing `bench_alternate_screen_switch` in
 // `freminal-buffer/benches/buffer_row_bench.rs` measures only the raw
 // `Buffer::switch_to_alternate` / `switch_to_primary` screen swap in isolation. It
 // does NOT drive the full pipeline (parse `?1049h`/`?1049l` -> handler ->
@@ -1102,7 +1103,7 @@ fn bench_scrollback_memory_realworld(c: &mut Criterion) {
         };
 
         // (1) Fresh fill, BEFORE idle compaction — compaction is deferred off
-        //     the hot path (Task 118.9), so nothing is compact yet. This is the
+        //     the hot path, so nothing is compact yet. This is the
         //     transient state for ~250ms right after a burst of output.
         let mut fresh = build();
         let _ = fresh.build_snapshot();
@@ -1125,7 +1126,7 @@ fn bench_scrollback_memory_realworld(c: &mut Criterion) {
         );
 
         // (3) SETTLED + post-search: Ctrl-F full-scrollback flatten on the
-        //     settled buffer; Task 118.4 eviction reclaims the transient
+        //     settled buffer; eviction reclaims the transient
         //     copies, returning to ~the settled number.
         let mut searched = build();
         let _ = searched

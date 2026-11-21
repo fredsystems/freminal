@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Self-contained OpenGL pass that draws toast label/icon TEXT (issue #433).
+//! Self-contained OpenGL pass that draws toast label/icon TEXT.
 //!
 //! Companion to [`super::toast_pass`], which draws the toast "pill"
 //! background. That pass draws a rounded-rect SDF quad; this one draws the
@@ -640,7 +640,7 @@ impl ToastTextRenderer {
     }
 
     /// Delete every GL object this pass owns, whatever its init state, so a
-    /// partially failed `init` is cleaned up too (Task 125.C16). Idempotent:
+    /// partially failed `init` is cleaned up too. Idempotent:
     /// every handle is `take()`n, so a clean pass issues no GL call.
     pub fn release_gl_objects(&mut self, gl: &Gl<'_>) {
         unsafe {

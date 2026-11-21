@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! Auto-wrap at the bottom of the scroll region on the alternate screen must
-//! honour DECLRMM (Task 148.C12).
+//! honour DECLRMM.
 //!
 //! xterm's `xtermScroll` (`util.c`) sets `scroll_full_line` to
 //! `left == 0 && right == max_col`; when it is false the scroll is confined to

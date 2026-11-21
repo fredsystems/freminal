@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Command-block folding helpers (OSC 133, Task 72.10b).
+//! Command-block folding helpers (OSC 133).
 //!
 //! This module is a pure helper layer: it turns the
 //! `(command_blocks, folded_blocks)` pair carried on a terminal snapshot
@@ -18,7 +18,7 @@
 //!
 //! Both data structures are immutable and trivially testable in isolation.
 //! Widget integration (the actual collapse-and-render of folded rows and
-//! placeholder line) lands in subtask 72.10b-2.
+//! placeholder line) lives in the terminal widget.
 //!
 //! ## Invariants
 //!
@@ -31,7 +31,8 @@
 //!   Shells that don't emit OSC 133 C fall back to `command_start_row`
 //!   (the pre-fix behaviour: command line is folded with the output).
 //! - Running blocks (`end_row.is_none()`) cannot be folded, matching the
-//!   spec in `PLAN_VERSION_090.md` §72.10.
+//!   spec (`Documents/DESIGN_DECISIONS.md`, "Command Blocks,
+//!   Gutters and Fold").
 //! - Degenerate ranges where `start > end_row` are dropped.
 //!   They should never occur in well-formed OSC 133 streams; we treat them
 //!   as data corruption and silently ignore them rather than panicking.
@@ -1295,7 +1296,7 @@ mod tests {
         assert_eq!(map.snapshot_to_rendered(4), Some(2));
     }
 
-    // ── logical row numbers (Task 125.14) ────────────────────────────────
+    // ── logical row numbers ────────────────────────────────
 
     #[test]
     fn compute_resolves_block_rows_against_the_row_base() {

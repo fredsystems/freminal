@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn full_reset_keeps_cwd() {
         // The OSC 7 working directory describes the process, not the screen
-        // (maintainer decision, Task 131 reset table), so RIS keeps it.
+        // (a maintainer decision), so RIS keeps it.
         let mut handler = TerminalHandler::new(80, 24);
         let (uri, _) = sample_osc7("");
         handler.handle_osc(&AnsiOscType::RemoteHost(uri));

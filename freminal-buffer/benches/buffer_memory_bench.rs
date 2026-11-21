@@ -3,15 +3,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 118 phase-one memory measurement harness.
+//! Memory measurement harness for the compact and compressed scrollback forms.
 //!
 //! This bench is not primarily a *timing* benchmark: its main deliverable is
 //! the printed per-corpus heap-bytes-per-scrollback-line report, captured as
 //! the "before" baseline ahead of the upcoming compact-cell-representation
-//! change (Task 118). A trivial Criterion `bench_function` per corpus is
+//! change. A trivial Criterion `bench_function` per corpus is
 //! still registered so the file participates in `cargo bench` normally.
 //!
-//! Three synthetic corpora are built, matching the plan's three categories:
+//! Three synthetic corpora are built, matching three categories:
 //!
 //! - `shell_session`: mostly-default-formatting lines resembling shell
 //!   prompts and command output (no SGR changes).
@@ -252,8 +252,8 @@ fn warm_steady_state(buf: &mut Buffer) {
 /// representation — memoizing every compacted row's decompacted cells too).
 ///
 /// This is the transient worst case, reported separately so it is never
-/// conflated with the steady-state number. It is exactly the state Task 118.4
-/// (`row_cache` eviction for compacted rows) exists to reclaim.
+/// conflated with the steady-state number. It is exactly the state that
+/// `row_cache` eviction for compacted rows exists to reclaim.
 fn warm_post_search(buf: &mut Buffer) {
     let _ = buf.scrollback_as_tchars_and_tags(0);
     let _ = buf.visible_as_tchars_and_tags(0);
@@ -262,7 +262,7 @@ fn warm_post_search(buf: &mut Buffer) {
 /// Run idle scrollback compaction to completion, modelling the state a real
 /// terminal settles into ~250ms after output stops.
 ///
-/// Compaction is now a DEFERRED, idle-driven background task (Task 118.9): it
+/// Compaction is now a DEFERRED, idle-driven background task: it
 /// no longer runs on any hot path. In the live application the PTY thread's
 /// idle tick calls `compact_idle_scrollback` in bounded budgets until the
 /// scrollback is fully compacted. A benchmark has no PTY thread, so we invoke
@@ -276,14 +276,15 @@ fn settle_idle_compaction(buf: &mut Buffer) {
 
 /// Run idle scrollback compaction AND compression to completion, modelling
 /// the fully-settled state a real terminal reaches once the PTY thread's
-/// idle tick has both compacted (Task 118) and then compressed (Task 119)
+/// idle tick has both compacted and then compressed
 /// every eligible cold scrollback row into LZ4 blocks.
 ///
 /// Mirrors the ordering the live idle tick enforces
 /// (`freminal/src/gui/pty.rs`): compaction must catch up before compression
 /// has anything eligible to compress, so `compact_idle_scrollback` is always
-/// called first. This is the number the Task 119 "flat + LZ4" plan table
-/// (`Documents/PLAN_VERSION_120.md` ~851-855) is measured against.
+/// called first. This is the "flat + LZ4" number
+/// (see `Documents/DESIGN_DECISIONS.md`, "Scrollback Memory and Resize Cost")
+/// that the design is measured against.
 fn settle_idle_compression(buf: &mut Buffer) {
     let _ = buf.compact_idle_scrollback(usize::MAX);
     let _ = buf.compress_idle_scrollback(usize::MAX);
@@ -301,7 +302,7 @@ fn settle_idle_compression(buf: &mut Buffer) {
 /// allocator-retention class of bug — is visible rather than hidden.
 fn report_block(label: &str, state: &str, buf: &Buffer) -> usize {
     let breakdown = buf.heap_bytes();
-    // `blocks_bytes` (Task 119 — Scrollback Compression) is the resident
+    // `blocks_bytes` is the resident
     // cost of LZ4-compressed blocks evicted out of `rows_bytes`; including it
     // here is what makes this report reflect the compression win rather than
     // just showing `rows_bytes` drop to ~0 for evicted rows with their real
@@ -379,12 +380,13 @@ fn print_report(label: &str, build: impl Fn() -> Buffer) {
         (bpl, process_rss_bytes())
     };
 
-    // (3) FULLY COMPRESSED — idle compaction AND idle compression (Task 119)
+    // (3) FULLY COMPRESSED — idle compaction AND idle compression
     //     have both run to completion, then the render path warms the visible
     //     window (scrollback stays compressed; only the visible window is
     //     touched, mirroring steady-state rendering). This is the "flat + LZ4"
-    //     number from the Task 119 feasibility-spike table
-    //     (`Documents/PLAN_VERSION_120.md` ~851-855) made measurable.
+    //     number from the feasibility-spike table
+    //     (see `Documents/DESIGN_DECISIONS.md`, "Scrollback Memory and Resize
+    //     Cost") made measurable.
     let (compressed_bpl, rss_compressed) = {
         let mut compressed = build();
         settle_idle_compression(&mut compressed);
@@ -399,7 +401,7 @@ fn print_report(label: &str, build: impl Fn() -> Buffer) {
     };
 
     // (4) SETTLED + post-search — Ctrl-F full-scrollback flatten on the settled
-    //     (compaction-only) buffer; eviction (Task 118.4) reclaims the
+    //     (compaction-only) buffer; eviction reclaims the
     //     transient copies, so this returns to the settled number.
     let search_bpl = {
         let mut searched = build();

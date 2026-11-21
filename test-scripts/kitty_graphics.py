@@ -1,6 +1,6 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
-"""Manual exerciser for the kitty graphics protocol (Task 100).
+"""Manual exerciser for the kitty graphics protocol.
 
 Run this INSIDE a freminal window. This script is NOT a unit test and is NOT
 wired into CI: it emits real kitty graphics APC escape sequences to your
@@ -48,7 +48,7 @@ ESC = "\x1b"
 ST = "\x1b\\"  # String Terminator: ESC backslash
 APC_START = "\x1b_G"  # APC (ESC _) followed by the kitty graphics marker 'G'
 
-# Row/column diacritics for unicode placeholders (Task 100.3). This is only
+# Row/column diacritics for unicode placeholders. This is only
 # the first two entries of the full `rowcolumn-diacritics.txt` table
 # (khaledhosny/rowcolumn-diacritics, also used by kitty/iTerm2); that's all
 # that's needed to address a 2x2 grid (rows/cols 0 and 1) in step 9.

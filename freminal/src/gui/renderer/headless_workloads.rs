@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Workload assertions against the headless recording harness (123.8).
+//! Workload assertions against the headless recording harness.
 //!
 //! Each test below drives [`super::headless`] over a described synthetic
 //! frame and asserts **concrete** derived-metric counts, so a future change
@@ -14,11 +14,11 @@
 //!
 //! # What these tests stand in for, and what they do not
 //!
-//! 123.8 requires each assertion to say which real GUI path it represents,
+//! Each assertion must say which real GUI path it represents,
 //! so a later reader can tell "this is exactly what production does" from
 //! "this is a representative approximation". Each test carries that note.
 //!
-//! Two of the six workloads 123.14 names are **deliberately absent**, and
+//! Two of the six intended workloads are **deliberately absent**, and
 //! their absence is a finding rather than an omission:
 //!
 //! - **Pointer motion** (over inert content, and with a URL on screen).
@@ -44,7 +44,7 @@
 //! which depend on the bundled font's rasterised glyph extents. Those are
 //! deterministic for a given font version but would shift if the bundled
 //! font were replaced — pinning them would convert a font bump into a
-//! mysterious test failure. Byte volumes are reported in 123.14 from a
+//! mysterious test failure. Byte volumes are reported from a
 //! single named reference platform instead.
 
 // This module is declared `#[cfg(all(test, feature = "gl-recording"))]`, so
@@ -57,7 +57,7 @@ use super::headless::{
     record_steady_state,
 };
 
-/// The derived metrics 123.8 asserts on, computed from a recorded log using
+/// The derived metrics the workload tests assert on, computed from a recorded log using
 /// the groupings frozen in [`super::gl_facade::surface`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Metrics {
@@ -137,14 +137,14 @@ fn init_dominates_a_single_frame() {
 
     let frame = Metrics::of(&record_steady_state(&standard(), 1).expect("frame records"));
 
-    // Task 125.8: with `gpu-profiling`, `TerminalRenderer::init` also reads
+    // With `gpu-profiling`, `TerminalRenderer::init` also reads
     // `GL_VERSION` once to detect timer-query capability. The recording
     // arm's empty version string resolves `Unavailable`, so that is the
     // only extra call; no query is ever issued.
     //
-    // Task 132.11: the pane base-fill VBO (`create_buffer`) is created
+    // The pane base-fill VBO (`create_buffer`) is created
     // alongside the decoration pass, one call more than before (261 / 262
-    // previously). It is the only init call 132.11 adds, and no per-frame
+    // previously). It is the only init call the base fill adds, and no per-frame
     // count changes while no OSC 11 override is active.
     let expected_init_calls = if cfg!(feature = "gpu-profiling") {
         263
@@ -161,7 +161,7 @@ fn init_dominates_a_single_frame() {
         init.total > frame.total * 4,
         "init ({}) should dwarf one frame ({}) — if this ever stops being \
          true, `record_steady_state`'s init-discarding is no longer \
-         load-bearing and the reporting in 123.14 can be simplified",
+         load-bearing and the reporting can be simplified",
         init.total,
         frame.total
     );
@@ -256,7 +256,7 @@ fn a_toast_more_than_doubles_frame_cost() {
     );
 }
 
-/// Subtask 124.C2: the toast atlas must not replay its rasterisations
+/// The toast atlas must not replay its rasterisations
 /// either.
 ///
 /// The single-frame assertion above could not see this defect and did not
@@ -264,14 +264,14 @@ fn a_toast_more_than_doubles_frame_cost() {
 /// branch on the frame that first rasterises the toast's glyphs, so the
 /// stale-dirty-rect cost lands entirely on **frame 2** — which a one-frame
 /// workload never reaches. That is exactly how the duplicated copy in
-/// `toast_text_pass` survived 124.9.
+/// `toast_text_pass` survived.
 ///
 /// Measured across the fix: frame 2's uploads went from 14 to 8 against a
 /// steady-state 7, and the three-frame total from 370 calls to 358.
 ///
 /// The residual one upload above steady state is the decoration buffer's
 /// second double-buffer slot being sized for the first time, which is
-/// subtask 124.7's expected and permanent warm-up cost, not a replay.
+/// the decoration-buffer gate's expected and permanent warm-up cost, not a replay.
 #[test]
 fn a_toast_does_not_replay_its_glyph_uploads_on_the_second_frame() {
     let toast = standard().with_toast(ToastPresence::Present);
@@ -304,7 +304,7 @@ fn cursor_only_saves_bandwidth_not_call_count() {
     // calls and a comparable number of GL entry points; what it avoids is
     // re-uploading the background and foreground instance buffers. Anyone
     // reasoning about it as "the cheap path" in call-count terms is
-    // mistaken, and 123.14 reports it that way.
+    // mistaken.
     let full = record_steady_state(&standard(), 3).expect("full frames");
     let cursor = record_cursor_only(&standard(), 3).expect("cursor-only frames");
 
@@ -327,7 +327,7 @@ fn cursor_only_saves_bandwidth_not_call_count() {
     );
 }
 
-/// Subtask 124.7: the decoration buffer stops orphaning once its slot is
+/// The decoration buffer stops orphaning once its slot is
 /// already big enough for a small payload.
 ///
 /// Stands in for: the idle cursor-blink frame, which re-uploads only
@@ -335,8 +335,8 @@ fn cursor_only_saves_bandwidth_not_call_count() {
 /// (`CURSOR_QUAD_FLOATS` = 36 floats = 144 bytes).
 ///
 /// The honest size of this win is asserted here rather than described:
-/// **one zero-byte GL call per gated upload, and no bytes at all.** Per
-/// 123.14's correction the cost model is bandwidth, not call count, so this
+/// **one zero-byte GL call per gated upload, and no bytes at all.** The
+/// cost model is bandwidth, not call count, so this
 /// is deliberately not presented as a bandwidth improvement. The first
 /// upload into each of the two double-buffer slots still orphans, because
 /// it is what sizes the storage; only the reuses are gated.
@@ -367,9 +367,10 @@ fn a_small_decoration_payload_reuses_its_allocation_instead_of_orphaning() {
 
 #[test]
 fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
-    // REGRESSION GUARD FOR 124.9 — see `PLAN_124_RENDER_EFFICIENCY.md`.
-    // This test was written by Task 123 to pin the *defect*, and inverted
-    // (not deleted) by 124.9, which is the only guard this behaviour has.
+    // REGRESSION GUARD — see `Documents/DESIGN_DECISIONS.md`, "Damage
+    // Model". This test originally pinned the *defect*; it was inverted (not
+    // deleted) when the defect was fixed, and is the only guard this
+    // behaviour has.
     //
     // Stands in for: the first two frames after a GL context is created,
     // and after any later event that sets the atlas's `full_reupload` flag
@@ -388,12 +389,12 @@ fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
     let frame_two_uploads = two.uploads - one.uploads;
     let frame_three_uploads = three.uploads - two.uploads;
 
-    // Exactly one more than steady state, and the one is nameable: subtask
-    // 124.7 gates the decoration buffer's orphan on the slot already being
+    // Exactly one more than steady state, and the one is nameable: the
+    // decoration buffer's orphan is gated on the slot already being
     // large enough, and `deco_vbo` is double-buffered, so frames 1 and 2
     // each pay a one-off sizing orphan for their own slot and frame 3 is the
     // first to reuse one. That is a known interaction with a known cause,
-    // not a tolerance widened to make a red test green -- before 124.9 this
+    // not a tolerance widened to make a red test green -- before the fix this
     // difference was 30 versus 4.
     assert_eq!(
         frame_two_uploads,
@@ -424,7 +425,7 @@ fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
     );
 }
 
-/// Task 132.11: the OSC 11 pane base fill is free when absent and costs
+/// The OSC 11 pane base fill is free when absent and costs
 /// exactly one draw and one upload when present.
 ///
 /// Stands in for: a pane whose resolved default background differs from the

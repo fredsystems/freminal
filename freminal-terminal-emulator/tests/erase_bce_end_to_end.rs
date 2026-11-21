@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 140.2, end to end: erased cells take only the current background.
+//! End to end: erased cells take only the current background.
 //!
 //! The bytes go through `TerminalState::handle_incoming_data`, as the PTY
 //! thread feeds them, so the SGR handler, the OSC 8 handler and the buffer's

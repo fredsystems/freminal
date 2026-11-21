@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 131.5 tests: parked screens and the screen-switch primitives
+//! Tests: parked screens and the screen-switch primitives
 //! (`switch_to_alternate`, `switch_to_primary`, `clear_alternate_screen`).
 //!
 //! Both screens are real stores that are moved in and out of the `Buffer`.
@@ -530,7 +530,7 @@ fn decrc_with_nothing_saved_on_the_other_screen_homes_the_cursor() {
     assert_eq!(
         (pos.x, pos.y),
         (0, 0),
-        "the alt slot is empty, so DECRC homes the cursor (131.C2)"
+        "the alt slot is empty, so DECRC homes the cursor"
     );
 }
 
@@ -947,7 +947,7 @@ fn parking_the_primary_moves_its_image_store() {
     assert_eq!(buf.rows()[0].characters(), blank.characters());
 }
 
-// ── DECSC saves the pending-wrap flag (Task 147.6) ───────────────────────
+// ── DECSC saves the pending-wrap flag ───────────────────────
 
 #[test]
 fn decrc_restores_pending_wrap_so_the_next_print_wraps() {
@@ -988,7 +988,7 @@ fn decrc_without_pending_wrap_restores_the_column_as_before() {
 
 #[test]
 fn decrc_after_a_narrowing_resize_keeps_pending_wrap_on_the_reflowed_cell() {
-    // Task 147.18: the saved 'j' reflows to the last column of the second
+    // The saved 'j' reflows to the last column of the second
     // piece, so the cursor is still just past it and the next print wraps.
     let mut buf = Buffer::new(10, 5);
     buf.set_cursor_pos(Some(0), Some(2));

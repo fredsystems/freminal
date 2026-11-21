@@ -13,8 +13,8 @@ use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 /// application-keypad mode.
 ///
 /// Freminal recognises `?1035` and does not implement it: the request is
-/// logged and nothing changes. winit exposes no `NumLock` state (Task 114.11),
-/// so the mode cannot be honoured. Because the mode is not implemented,
+/// logged and nothing changes. winit exposes no `NumLock` state, so the
+/// mode cannot be honoured. Because the mode is not implemented,
 /// DECRQM answers `Ps = 0` (not recognised) whatever the variant.
 #[derive(Debug, Eq, PartialEq, Default, Clone, Copy)]
 pub enum NumLockOverridesKeypad {

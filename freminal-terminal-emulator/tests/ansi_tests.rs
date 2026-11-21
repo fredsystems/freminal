@@ -295,7 +295,7 @@ fn ansi_parser_inner_empty_and_data_push_combination() {
     );
 }
 
-// ---------- Phase 8: Trace Buffer & Determinism Tests ----------
+// ---------- Trace Buffer & Determinism Tests ----------
 
 use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 

@@ -85,16 +85,16 @@ pub struct Tab {
     /// "Clear Custom Name" context-menu entry).
     pub custom_name: Option<String>,
 
-    /// Set when an unfocused tab has received a `CommandFinishedEvent`
-    /// (Task 72.9). The tab bar will surface this as a visual indicator
-    /// (badge / dot) in Task 72.10.
+    /// Set when an unfocused tab has received a `CommandFinishedEvent`.
+    /// The tab bar will surface this as a visual indicator
+    /// (badge / dot).
     ///
     /// Cleared by [`TabManager::switch_to`], [`TabManager::next_tab`], and
     /// [`TabManager::prev_tab`] when the tab becomes active again.
     pub has_pending_event: bool,
 
     /// When `true`, keyboard input directed at the active pane is also
-    /// fanned out to every other leaf pane in this tab (Task 74).
+    /// fanned out to every other leaf pane in this tab.
     ///
     /// Mouse events, resize events, and per-pane window commands are never
     /// broadcast.  The flag is per-tab (not per-pane) and defaults to
@@ -1175,7 +1175,7 @@ mod tests {
         assert!(e3.to_string().contains('2'));
     }
 
-    // ── 36.8: Per-tab ViewState isolation ────────────────────────────────
+    // ── Per-tab ViewState isolation ────────────────────────────────
 
     #[test]
     fn view_state_isolated_across_tab_switch() {

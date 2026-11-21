@@ -39,7 +39,7 @@ crossbeam-channel = "0.5.17"
 directories = "6.0.0"
 downcast-rs = "2.0.2"
 duct = "1.1.2"
-# Exact-pinned (`=`) as a matched set: #436 relies on egui_glow's
+# Exact-pinned (`=`) as a matched set: the chrome cache relies on egui_glow's
 # (undocumented) tolerance of multiple `paint_primitives` calls per frame for
 # the chrome-cache head/band/tail split, so even a patch bump must be a
 # deliberate, re-verified change against every assumption in
@@ -52,7 +52,7 @@ egui = { version = "=0.37.0", default-features = false, features = ["default_fon
 egui_glow = { version = "=0.37.0", default-features = false }
 # egui-winit's default features are disabled only to stop it re-enabling
 # `winit/default` (which pulls `wayland-csd-adwaita` -> ab_glyph -> ttf-parser,
-# #530); the list below is its default set minus `winit/default`. The version
+# RUSTSEC-2026-0192); the list below is its default set minus `winit/default`. The version
 # pin is unchanged and the `EGUI_UPGRADE_ASSUMPTIONS.md` checklist still
 # governs any bump.
 egui-winit = { version = "=0.37.0", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
@@ -86,7 +86,7 @@ nix = "0.32.0"
 # Windows through `tauri-winrt-notification`, so `freminal` depends on this
 # crate under `cfg(target_os = "macos")` only. No features: the `z` / `d`
 # D-Bus backends would pull the unmaintained zbus 5 crates (RUSTSEC-2026-0370
-# to -0372, #567), and the `images` features are unused (icons are decoded
+# to -0372), and the `images` features are unused (icons are decoded
 # with the workspace `image` crate).
 notify-rust = { version = "4.19.0", default-features = false }
 open = "5.4.5"
@@ -107,8 +107,8 @@ sys-locale = "0.3.2"
 sysinfo = { version = "0.40.4", default-features = false, features = ["system"] }
 tar = "0.4.46"
 # Direct dependency for every Windows notification: the OSC 99 untracked leg
-# (Task 138.C15, built directly so its image is an `appLogoOverride`) and
-# OSC 9 / 777 / 133 D / Test Notification (Task 149.3, the same toast style).
+# (built directly so its image is an `appLogoOverride`) and OSC 9 / 777 /
+# 133 D / Test Notification (the same toast style).
 # `notify-rust` is not built on Windows.
 tauri-winrt-notification = "0.8.1"
 tempfile = "3.27.0"
@@ -125,7 +125,7 @@ vergen = { version = "10.0.4", features = ["build", "cargo", "rustc", "si"] }
 winapi = "0.3.9"
 # default-features is off because winit's default `wayland-csd-adwaita` pulls
 # sctk-adwaita -> ab_glyph -> owned_ttf_parser -> ttf-parser (unmaintained,
-# RUSTSEC-2026-0192, #530). The list below is winit 0.30's default set with
+# RUSTSEC-2026-0192). The list below is winit 0.30's default set with
 # `wayland-csd-adwaita` swapped for `wayland-csd-adwaita-notitle`. Accepted
 # tradeoff: client-side decorations on Wayland compositors without
 # server-side decorations (e.g. GNOME) lose their title text; buttons and the
@@ -134,9 +134,9 @@ winapi = "0.3.9"
 # off (see its entry above); re-enabling its defaults reintroduces ttf-parser.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita-notitle", "wayland-dlopen", "x11"] }
 winreg = "0.56.0"
-# Direct dependency for the Linux/BSD notification service (Tasks 138.12 and
-# 149): one D-Bus connection carries every Linux/BSD notification (OSC 99, OSC 9
-# / 777, OSC 133 D and the Settings "Test Notification" button). It owns
+# Direct dependency for the Linux/BSD notification service: one D-Bus
+# connection carries every Linux/BSD notification (OSC 99, OSC 9 / 777,
+# OSC 133 D and the Settings "Test Notification" button). It owns
 # `Notify` / `CloseNotification` / `GetCapabilities` and observes
 # `ActionInvoked` / `NotificationClosed`. zbus 6 has no blocking API, so the
 # service's dispatcher and signal-pump threads drive the async API with
@@ -167,7 +167,7 @@ perf = { level = "deny", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 
-# Task 70.H tripwires: explicit deny for the three cast lints that guard
+# Tripwires: explicit deny for the three cast lints that guard
 # against silent truncation/sign-loss/wrap in numeric conversions. These
 # are already part of `clippy::pedantic` above, but naming them directly
 # documents the contract and survives any future reorganization of the

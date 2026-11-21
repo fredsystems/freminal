@@ -3,16 +3,16 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Codegen probes for the zero-overhead claim (Task 123, subtask 123.6b).
+//! Codegen probes for the zero-overhead claim.
 //!
 //! One concept: giving the compiler two functions that differ *only* in
 //! whether they go through [`super::Gl`], so their emitted machine code can
 //! be compared directly.
 //!
-//! # Why this replaces the benchmark 123.6b originally specified
+//! # Why this is a codegen probe and not a benchmark
 //!
-//! 123.6b was scoped as "benchmark the `Real` arm against a direct
-//! `glow::Context` call". That measurement is not resolvable. The facade
+//! The obvious check is to benchmark the `Real` arm against a direct
+//! `glow::Context` call. That measurement is not resolvable. The facade
 //! adds at most a single pointer load; the cheapest real GL call is an
 //! indirect jump into Mesa. The dispatch cost is two to three orders of
 //! magnitude below the thing it would be measured against, so a benchmark
@@ -20,7 +20,7 @@
 //! claim, and a "no difference" result would read as far stronger evidence
 //! than it is.
 //!
-//! The actual question 123.6 left open is narrower and sharper: **is there
+//! The actual question left open is narrower and sharper: **is there
 //! a per-call branch in the emitted code?** That is answered by reading the
 //! code, not by timing it. Reading it is also deterministic, needs no GPU
 //! or display, and gives a categorical answer rather than a statistical
@@ -70,8 +70,8 @@
 //!
 //! **No branch, in either shape.** No `cmp`, no `test`, no conditional
 //! jump, no discriminant load. The single-variant `match` compiles away
-//! even when inlining is forbidden, which is what 123.6's layout test could
-//! only argue for indirectly.
+//! even when inlining is forbidden, which is what the facade's layout test
+//! could only argue for indirectly.
 //!
 //! An earlier revision of this file reported the isolated `mov` as a
 //! correction to the "zero cost" claim. That was wrong, and the error is

@@ -304,7 +304,7 @@ impl GlState {
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         let egl_damage = egl_damage::probe(&gl_display, &surface);
 
-        // Report which present path was selected (#435). On Linux/EGL with a
+        // Report which present path was selected. On Linux/EGL with a
         // compositor advertising the swap-with-damage extension we get the
         // fast path (skip-clear + partial present for cursor-only frames);
         // everywhere else we do a full clear + full present every frame.
@@ -313,7 +313,7 @@ impl GlState {
             tracing::info!(
                 "Present path: damage-aware (EGL swap-with-damage available) — the \
                  skip-clear + partial-present fast path is available for cursor-only \
-                 frames (see 124.17 for whether it is actually taken)"
+                 frames (whether it is actually taken depends on the reported buffer age)"
             );
         } else {
             tracing::info!(
@@ -369,7 +369,7 @@ impl GlState {
     }
 
     /// Clear only `region` of the framebuffer to `color`, leaving every
-    /// pixel outside it untouched (124.20).
+    /// pixel outside it untouched.
     ///
     /// `region` is in physical framebuffer pixels with a bottom-left
     /// origin -- the same convention [`DamageRect`] documents and
@@ -415,7 +415,7 @@ impl GlState {
     /// repair). Values `> 1` mean the buffer holds an *older* frame, which is
     /// **not** the same as unsafe: it is *repairable* by unioning this
     /// frame's own declared damage with the previous `age - 1` frames'
-    /// (see `frame_paint::DamageHistory`, 124.18). A conventionally
+    /// (see `frame_paint::DamageHistory`). A conventionally
     /// double-buffered surface reports `2` in steady state — measured on
     /// real hardware across ~250 queries in 21 flush windows, never `1`,
     /// never `3` or higher — so treating `> 1` as unconditionally unsafe (an

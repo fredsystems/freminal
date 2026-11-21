@@ -5,7 +5,7 @@
 
 //! `TerminalState`-level tests for DCS tmux passthrough (`ESC P tmux; ... ST`).
 //!
-//! Since Task 130.2 a tmux payload is not dispatched by the handler any more.
+//! A tmux payload is not dispatched by the handler any more.
 //! The handler queues the whole un-doubled inner sequence, and `TerminalState`
 //! runs it through a **fresh** instance of the real parser, in event order,
 //! right after the DCS that carried it.  The central property is therefore
@@ -882,7 +882,7 @@ fn malformed_tmux_payloads_have_no_effect() {
 
 /// A `DCS tmux;` wrapper ended by a bare ESC (not ESC `\`) whose payload
 /// switches to VT52: the escape the bare ESC starts is read under VT52, so
-/// `ESC A` moves the cursor up (PR #589 review R28).
+/// `ESC A` moves the cursor up.
 fn bare_esc_vt52_wrapper() -> Vec<u8> {
     let mut wire = tmux_wrap(b"\x1b[?2l");
     // Replace the closing `ESC \` with a bare ESC that starts `ESC A`.

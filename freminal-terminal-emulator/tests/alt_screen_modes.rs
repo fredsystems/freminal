@@ -8,7 +8,7 @@
 //!
 //! Everything is driven through raw bytes, exactly as the PTY thread does.
 //! The reference behaviour is the consensus of xterm, Ghostty, `WezTerm` and
-//! kitty; see `Documents/PLAN_VERSION_130.md` ("131 Decisions").
+//! kitty.
 
 use freminal_buffer::cell::Cell;
 use freminal_common::cursor::CursorVisualStyle;
@@ -281,7 +281,7 @@ fn ris_clears_both_charset_slots() {
 }
 
 // ---------------------------------------------------------------------------
-// Task 131.C5: image placement at the alternate screen's bottom
+// Image placement at the alternate screen's bottom
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -300,7 +300,7 @@ fn kitty_image_on_alternate_last_row_keeps_the_store_at_height() {
 }
 
 // ---------------------------------------------------------------------------
-// Review finding 2: a real screen switch ends the live OSC 8 hyperlink
+// A real screen switch ends the live OSC 8 hyperlink
 // ---------------------------------------------------------------------------
 
 /// How many visible tags (primary or alternate, whichever is active) carry a
@@ -392,7 +392,7 @@ fn idempotent_screen_switch_keeps_the_hyperlink() {
 }
 
 // ---------------------------------------------------------------------------
-// Review finding 1: DECSCUSR 0 restores the configured cursor style
+// DECSCUSR 0 restores the configured cursor style
 // ---------------------------------------------------------------------------
 
 #[test]

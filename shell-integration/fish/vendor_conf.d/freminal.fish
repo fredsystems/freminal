@@ -80,7 +80,7 @@ if __freminal_should_init
         printf '\033]7;file://%s%s\007' $__freminal_hostname $PWD
     end
 
-    # ── sudo keeps TERMINFO (Task 151.12; freminal's own wrapper, Task 151.C5) ─
+    # ── sudo keeps TERMINFO (freminal's own wrapper) ─
     # sudo's environment reset drops TERMINFO, so programs run under sudo lose
     # freminal's terminfo entry.  When $FREMINAL_SHELL_FEATURES (a comma-separated
     # list) names the item `sudo`, TERMINFO is set and no `sudo` function or
@@ -190,7 +190,7 @@ if __freminal_should_init
         end
     end
 
-    # ── OSC 1338 HISTFILE report (Task 72.15) ────────────────────────────────
+    # ── OSC 1338 HISTFILE report ────────────────────────────────
     # Report fish's history file path on the FIRST prompt cycle so freminal
     # can seed the Quick Command History Palette with the file fish actually
     # uses.

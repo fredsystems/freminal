@@ -12,7 +12,9 @@
 //! [`super`]). A default build does not see this code at all — there is no
 //! per-call branch, no log, no counters, nothing to pay for.
 //!
-//! Task 123, `PLAN_123_GL_MEASUREMENT_HARNESS.md`, subtask 123.2.
+//! See `Documents/DESIGN_DECISIONS.md`, "GL Call
+//! Boundary and Measurement Harnesses" / "Phase 1: the recording
+//! harness".
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -24,9 +26,9 @@ use super::surface::{DRAW_CALL_METHODS, STATE_CHANGE_METHODS, UPLOAD_METHODS};
 
 /// What a recorded call carries beyond its name.
 ///
-/// The plan permits either one enum variant per method or a single record
-/// type plus an opcode, and forbids fields 123.8's assertions do not need.
-/// 123.8 needs draw-call count, state-change count, upload count **and
+/// A single record type plus an opcode is used rather than one enum variant
+/// per method, and it carries no fields the workload assertions do not need.
+/// Those assertions need draw-call count, state-change count, upload count **and
 /// byte volume**; this payload carries exactly that without 56 variants of
 /// mostly-unused arguments. It also avoids sentinel-zero fields on
 /// non-upload, non-draw calls — per the `state-representation` skill, a
@@ -87,9 +89,9 @@ pub struct GlCall {
 ///
 /// # Why interior mutability, not `&mut self`
 ///
-/// The plan mandates renderer signatures take `&Gl<'_>` — a shared
+/// Renderer signatures take `&Gl<'_>` — a shared
 /// reference, mirroring `&glow::Context`'s own borrow shape so the
-/// 123.4/123.5 migration is a pure type substitution at call sites, not a
+/// migration is a pure type substitution at call sites, not a
 /// threading of `&mut` through code that never needed it for the real
 /// driver. Recording must therefore mutate through `&self`, which is
 /// exactly what interior mutability is for. `Gl` is always constructed
@@ -105,29 +107,29 @@ pub struct RecordingState {
     next_texture: Cell<u32>,
     next_framebuffer: Cell<u32>,
     next_uniform_location: Cell<u32>,
-    /// Task 125.8: monotonic counter fabricating `glow::Query` handles for
+    /// Monotonic counter fabricating `glow::Query` handles for
     /// `create_query`, the same per-type-counter style as the six handle
     /// types above.
     #[cfg(any(feature = "gpu-profiling", test))]
     next_query: Cell<u32>,
-    /// Task 125.8: which fabricated query handles a test (or the
+    /// Which fabricated query handles a test (or the
     /// `gpu_profiling` adapter's own test suite) has declared "available",
     /// and the nanosecond value each should report -- see
     /// [`Self::mark_query_available`]. Absent from this map means "not yet
     /// available", the correct default for a query that was just issued.
     query_results: RefCell<HashMap<glow::Query, u64>>,
-    /// Task 125.8: the string `super::facade::Gl::get_parameter_string`'s
+    /// The string `super::facade::Gl::get_parameter_string`'s
     /// `Recording` arm reports for `glow::VERSION`. Defaults to empty,
     /// which `freminal_windowing::gpu_profiling::parse_gl_version_string`
     /// cannot parse, so
     /// `gui::renderer::gpu_profiling::PaneGpuTimingProfile::detect_capability`
     /// conservatively resolves `Unavailable` on a fresh recording session
     /// by default -- **deliberately**, so the many other recording-driven
-    /// test suites in this crate (Task 123's headless call-count workload
+    /// test suites in this crate (the headless call-count workload
     /// assertions among them) that never call
     /// [`Self::set_gl_version_string`] see zero query-related GL calls and
     /// their existing, hand-derived call counts stay exactly as they were
-    /// before Task 125.8. Only a test that explicitly opts in via
+    /// before GPU timing queries existed. Only a test that explicitly opts in via
     /// [`Self::set_gl_version_string`] observes `Available` capability.
     gl_version_string: RefCell<String>,
     /// Armed faults: `(method, absolute index among that method's recorded
@@ -379,14 +381,14 @@ impl RecordingState {
         glow::NativeUniformLocation(current)
     }
 
-    /// Fabricate the next `glow::Query` (Task 125.8).
+    /// Fabricate the next `glow::Query`.
     #[cfg(any(feature = "gpu-profiling", test))]
     pub(super) fn next_query(&self) -> glow::Query {
         glow::NativeQuery(Self::bump(&self.next_query))
     }
 
     /// Override the string `super::facade::Gl::get_parameter_string`'s
-    /// `Recording` arm reports for `glow::VERSION` (Task 125.8). Test/
+    /// `Recording` arm reports for `glow::VERSION`. Test/
     /// adapter-support API, mirroring [`Self::mark_query_available`]: a
     /// test that wants `gui::renderer::gpu_profiling::PaneGpuTimingProfile::detect_capability`
     /// to resolve `Available` against a recording session calls this with
@@ -398,7 +400,7 @@ impl RecordingState {
         *self.gl_version_string.borrow_mut() = version.into();
     }
 
-    /// The current fabricated `GL_VERSION` string (Task 125.8) -- empty
+    /// The current fabricated `GL_VERSION` string -- empty
     /// until [`Self::set_gl_version_string`] is called. Backs the
     /// `Recording` arm of `Gl::get_parameter_string(glow::VERSION)`.
     #[cfg(any(feature = "gpu-profiling", test))]
@@ -406,8 +408,8 @@ impl RecordingState {
         self.gl_version_string.borrow().clone()
     }
 
-    /// Declare `query`'s result available, with the given nanosecond value
-    /// (Task 125.8). Purely a test/adapter-support API: production code
+    /// Declare `query`'s result available, with the given nanosecond value.
+    /// Purely a test/adapter-support API: production code
     /// never calls this (a real driver decides availability on its own
     /// schedule); it exists so a deterministic test -- or the
     /// `gpu_profiling` adapter's own test suite -- can simulate a query's
@@ -424,7 +426,7 @@ impl RecordingState {
     }
 
     /// Whether `query` has been marked available via
-    /// [`Self::mark_query_available`] (Task 125.8). Backs the `Recording`
+    /// [`Self::mark_query_available`]. Backs the `Recording`
     /// arm of `Gl::get_query_parameter_u32(query, GL_QUERY_RESULT_AVAILABLE)`.
     #[cfg(any(feature = "gpu-profiling", test))]
     pub(super) fn query_is_available(&self, query: glow::Query) -> bool {
@@ -432,8 +434,8 @@ impl RecordingState {
     }
 
     /// The nanosecond value marked for `query` via
-    /// [`Self::mark_query_available`], or `0` if it was never marked (Task
-    /// 125.8). Backs the `Recording` arm of
+    /// [`Self::mark_query_available`], or `0` if it was never marked.
+    /// Backs the `Recording` arm of
     /// `Gl::get_query_parameter_u64(query, GL_QUERY_RESULT)`. The
     /// no-premature-read invariant is enforced by
     /// `freminal_windowing::gpu_profiling::GpuQueryRing` (never reads a

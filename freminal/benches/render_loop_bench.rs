@@ -22,10 +22,6 @@
 //! in CI headless environments.  A separate `render_full_egui` benchmark is
 //! included but is gated so it only runs when an egui `Context` can be
 //! constructed without panicking.
-//!
-//! Note: After Task 9, `show()` will accept `&TerminalSnapshot` directly and
-//! the render benchmarks will be updated to the snapshot-based form described
-//! in Section 8.5 of the performance plan.
 
 // Benchmark harness, not production code: unwrap/expect on setup is acceptable.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -135,7 +131,7 @@ fn ansi_heavy_payload(num_lines: usize, width: usize) -> Vec<u8> {
 /// with 8-character segments, each preceded by `ESC[38;5;Nm ESC[48;5;Mm`.
 /// N cycles 0..=255 with stride 1, M with stride 7 (coprime with 256, so out
 /// of phase with N).  Equivalent to `sgr_indexed_payload` in
-/// `buffer_benches.rs` (Task 132.1), shaped as a full screen.
+/// `buffer_benches.rs`, shaped as a full screen.
 fn indexed_screen_payload(num_lines: usize, width: usize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut seg = 0usize;
@@ -391,7 +387,7 @@ fn ligature_heavy_visible_chars(
     (chars, tags)
 }
 
-/// Partial-dirty path (issue #405 Part B): prime the cache, then change a
+/// Partial-dirty path: prime the cache, then change a
 /// single visible row's content each sample and re-shape. `ShapingCache` is
 /// per-row content-hashed, so only the one changed row re-shapes (harfrust)
 /// while every other row is an `Arc::clone` hit. This isolates the shaping
@@ -409,8 +405,8 @@ fn bench_shape_partial_dirty(group: &mut BenchmarkGroup<'_, WallTime>) {
     group.bench_function("shape_visible_partial_dirty_200x50", |b| {
         // `iter_batched_ref` (not `iter_batched`): the routine takes the
         // primed `FontManager`/`ShapingCache` by `&mut`, so their teardown
-        // (freeing the cached `ShaperData` and compiled `ShapePlan`,
-        // Task #430) happens OUTSIDE the timed region. In production the
+        // (freeing the cached `ShaperData` and compiled `ShapePlan`)
+        // happens OUTSIDE the timed region. In production the
         // `FontManager` lives for the whole session and is never dropped
         // per frame, so timing its `Drop` here would measure a cost that
         // never occurs in the real render loop. See `shape_visible_persistent_fm_cache`
@@ -605,7 +601,7 @@ fn crossframe_shaping_frames(
 /// btop that rewrites most cells every frame.
 ///
 /// Because the `FontManager` persists across frames, this benchmark exercises
-/// the cross-frame shaper/`ShapePlan` cache (Task #430): the cached
+/// the cross-frame shaper/`ShapePlan` cache: the cached
 /// `harfrust::ShaperData` and compiled `ShapePlan` are reused across every
 /// frame, so a changed row re-shapes via the cached plan without rebuilding
 /// the shaper data or recompiling the plan. It is the faithful cross-frame
@@ -645,23 +641,23 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
         });
     });
 
-    // ── Subtask 124.16 ──────────────────────────────────────────────
+    // ── Redundant-redraw workloads ──────────────────────────────────
     //
     // The bench above models a TUI whose content genuinely *changes* on
-    // half its rows. The two below model the workloads Task 124 actually
+    // half its rows. The two below model the workloads the damage model
     // exists for, neither of which was covered.
 
     // (1) A full-screen redraw of IDENTICAL content — the full-screen TUI
     // idiom of rewriting unchanged bytes every tick, which is the workload
-    // this whole task is named for. Against
+    // the damage model is built for. Against
     // `shape_visible_persistent_fm_cache` (half the rows changed) this is
     // the floor: every line is an `Arc` refcount bump.
     //
     // Finding, pinned by
     // `gui::shaping::shaping_cache_hit_rate::identical_full_screen_redraw_is_a_total_hit`:
     // shaping already handles this perfectly at a 100% hit rate. So shaping
-    // is NOT where that workload's cost lives, and 124.6 should not be
-    // justified on it.
+    // is NOT where that workload's cost lives, and a run-level cache would not
+    // be justified by it.
     {
         let (chars, tags) = ligature_heavy_visible_chars(width, height);
         group.bench_function("shape_visible_identical_redraw", |b| {
@@ -696,8 +692,8 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
     // (2) A scroll by one line. `ShapingCache` is keyed by **line index**,
     // so every line lands in a different slot and the whole cache misses,
     // even though all but one line is byte-identical to a line shaped on
-    // the previous frame. This is the measured case for 124.6's first
-    // lever, a content-addressed run-level cache.
+    // the previous frame. This is the measured case for the
+    // content-addressed run-level cache.
     //
     // Expect this to cost about the same as a cold full-screen shape, and
     // roughly the reciprocal of `shape_visible_identical_redraw`. That gap
@@ -1075,7 +1071,7 @@ fn bench_bg_instances(c: &mut Criterion) {
 
 // ---------------------------------------------------------------
 // bench_bg_instances_decorated — same builder as `instanced_bg`, fed by a
-// corpus dense in underline styles and strikethrough (Task 140.3 baseline).
+// corpus dense in underline styles and strikethrough (baseline).
 // ---------------------------------------------------------------
 fn bench_bg_instances_decorated(c: &mut Criterion) {
     bench_bg_instances_decorated_group(c, "instanced_bg_decorated", LineWidthPattern::Normal);
@@ -1238,7 +1234,7 @@ fn bench_fg_instances(c: &mut Criterion) {
 // ---------------------------------------------------------------
 // bench_bg_instances_indexed / bench_fg_instances_indexed — same builders as
 // above, fed by a real emulator snapshot of indexed-colour (`38;5;N` /
-// `48;5;M`) output (Task 132.1 baseline).
+// `48;5;M`) output (baseline).
 // ---------------------------------------------------------------
 fn bench_bg_instances_indexed(c: &mut Criterion) {
     let colors = mocha_colors();
@@ -1351,7 +1347,7 @@ fn bench_fg_instances_indexed(c: &mut Criterion) {
 
 // ---------------------------------------------------------------
 // bench_bg_instances_partial_dirty — all-rows-vs-one-row headroom
-// (issue #405 Part C item 2) for `build_background_instances`.
+// for `build_background_instances`.
 // ---------------------------------------------------------------
 //
 // `build_background_instances` `clear()`s its output buffers and walks every
@@ -1470,7 +1466,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
 
 // ---------------------------------------------------------------
 // bench_fg_instances_partial_dirty — all-rows-vs-one-row headroom
-// (issue #405 Part C item 2) for `build_foreground_instances`.
+// for `build_foreground_instances`.
 // ---------------------------------------------------------------
 //
 // Same rationale as `bench_bg_instances_partial_dirty`, applied to
@@ -1606,7 +1602,7 @@ fn bench_fg_atlas_rasterization(c: &mut Criterion) {
 //
 // Measures the cost of shaping a single fold-placeholder row, which is
 // invoked once per folded command block on the full-rebuild path. Folded
-// workspaces with many command blocks (Task 72.10) call this for each
+// workspaces with many command blocks call this for each
 // collapsed range; the per-line cost must stay well below the per-row
 // cost of `shape_visible` for it to remain free.
 fn bench_shape_placeholder_line(c: &mut Criterion) {
@@ -1661,7 +1657,7 @@ fn bench_shape_placeholder_line(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// Chrome style: build_visuals (Task 112.4 / 112.5)
+// Chrome style: build_visuals
 // ---------------------------------------------------------------
 //
 // `build_visuals` maps a `(GuiTheme, ThemePalette)` pair to a fully-specified
@@ -1699,8 +1695,8 @@ fn bench_build_visuals(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// bench_image_animation_tick — GUI wall-clock animation frame selector
-// (Task 100.2c). Measures the per-frame CPU cost of
+// bench_image_animation_tick — GUI wall-clock animation frame selector.
+// Measures the per-frame CPU cost of
 // `ViewState::tick_image_animations` against a representative set of
 // concurrently-animating kitty images (e.g. multiple animated GIFs/spinners
 // visible at once).
@@ -1760,9 +1756,9 @@ fn bench_image_animation_tick(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// bench_build_image_verts — image-quad vertex generation (Task 100.17b).
+// bench_build_image_verts — image-quad vertex generation.
 // Measures the per-frame CPU cost of `build_image_verts` (which calls
-// `compute_image_quad` per image, including the Task 100.17b size-mode
+// `compute_image_quad` per image, including the size-mode
 // branch) against a representative set of concurrently-displayed images
 // stamped across the cell grid.
 // ---------------------------------------------------------------
@@ -1819,11 +1815,11 @@ fn bench_build_image_verts(c: &mut Criterion) {
                     placement_id: None,
                     z_index: 0,
                     source_crop: None,
-                    // Distinct per-image instance id (Task 100.18) — each
+                    // Distinct per-image instance id — each
                     // of the 8 images is its own separate on-screen
                     // placement, so bucketing must keep them as 8 separate
-                    // draw_order entries, matching the pre-100.18 (keyed by
-                    // image_id) benchmark workload shape.
+                    // draw_order entries, matching the earlier image_id-keyed
+                    // benchmark workload shape.
                     placement_instance: id,
                     subcell_offset: None,
                 });
@@ -1864,21 +1860,20 @@ fn bench_build_image_verts(c: &mut Criterion) {
 // callbacks and NO terminal content.
 //
 // HISTORY, because the framing changed and the numbers did not. It was
-// written for issue #436, which cached egui chrome primitives and skipped
-// `run_ui` + `tessellate` on a `ChromeMode::Replay` frame; it measured the
-// cost such a frame *avoided*. **That machinery was deleted in Task 124
-// subtask 124.5** — it was structurally unsound (egui resolves hit-testing
-// against the previous frame's widget set, so unbuilt widgets are
-// uninteractable) and had been disabled by default since 121.32. There is
-// no REPLAY path any more, and this bench no longer measures an avoided
-// cost.
+// written for the chrome cache, which cached egui chrome primitives and
+// skipped `run_ui` + `tessellate` on a `ChromeMode::Replay` frame; it
+// measured the cost such a frame *avoided*. **That machinery was deleted**:
+// it was structurally unsound (egui resolves hit-testing against the previous
+// frame's widget set, so unbuilt widgets are uninteractable) and had been
+// disabled by default before that. There is no REPLAY path any more, and this
+// bench no longer measures an avoided cost.
 //
 // It measures a cost that is now always paid, which is why it is kept
-// rather than deleted. That figure is a live input to Task 124: once
-// `FrameDamage::None` (124.2) lands, chrome construction becomes the thing
+// rather than deleted. That figure is a live input to the damage model: now
+// that `FrameDamage::None` exists, chrome construction is the thing
 // forcing a full frame on frames the terminal grid would otherwise skip
-// entirely, so this is the baseline that trade is judged against. 124.15
-// measured the same quantity through a different harness at 43.2 us
+// entirely, so this is the baseline that trade is judged against. A
+// different harness measured the same quantity at 43.2 us
 // (32.9 construct + 10.3 tessellate); this bench is the repeatable form.
 //
 // It mirrors `freminal-windowing`'s frame path — `EguiState::new` constructs
@@ -1951,13 +1946,13 @@ fn bench_chrome_frame_record(c: &mut Criterion) {
         // Warm the context once so the timed region measures the recurring
         // steady-state cost, not the first-frame font-atlas population.
         let ctx = egui::Context::default();
-        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
         let discarded_output = ctx.run_ui(chrome_bench_raw_input(), chrome_bench_ui);
         discarded_output.drop_without_applying_deltas();
 
         b.iter(|| {
-            // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+            // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (egui#8356)
             // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
             let mut full_output = ctx.run_ui(chrome_bench_raw_input(), chrome_bench_ui);
             full_output.textures_delta.clear();

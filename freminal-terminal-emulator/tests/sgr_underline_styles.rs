@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Tests for SGR underline style extensions (subtask 47.6).
+//! Tests for SGR underline style extensions.
 //!
 //! Covers:
 //! - Colon-form underline styles (`4:0` through `4:5`)

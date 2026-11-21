@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! Deciding whether a hyperlink target may be handed to the OS opener, and
-//! opening it (GHSA-jhw2-xjg6-mwhq).
+//! opening it.
 //!
 //! OSC 8 lets terminal output attach an arbitrary URI to text, and a single
 //! Ctrl/Cmd-click then passes it to the platform opener. Left unchecked that
@@ -16,7 +16,7 @@
 //! The allowed schemes are exactly the set auto-detection produces
 //! (`freminal-buffer/src/url_detect.rs`), so one rule covers both the
 //! auto-detected and the OSC 8 entry points. Confirmation of any other scheme
-//! waits for the shared consent prompt (Task 133); refusing is the strict
+//! waits for the shared consent prompt; refusing is the strict
 //! subset of that behaviour.
 //!
 //! Two allowed schemes can still launch things, so they are narrowed further:

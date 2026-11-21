@@ -67,7 +67,7 @@ impl PreviousMouseState {
     /// UTF-8), via [`motion_position_changed`], which picks this or
     /// [`Self::pixel_position_changed`] based on the active encoding —
     /// deliberately compares only the cell fields, not the whole
-    /// [`FreminalMousePosition`], so gaining pixel fields (Task 124.3a)
+    /// [`FreminalMousePosition`], so gaining pixel fields
     /// cannot change this method's answer for callers that never populate
     /// them.
     #[must_use]
@@ -79,8 +79,7 @@ impl PreviousMouseState {
     /// Returns `true` if the PIXEL-granular mouse position has changed
     /// relative to `new` — the precision [`MouseEncoding::SgrPixels`]
     /// (`?1016`) needs. Distinct from [`Self::should_report`] so two
-    /// pointer moves that stay within one cell still compare unequal here
-    /// (Task 124.3a).
+    /// pointer moves that stay within one cell still compare unequal here.
     #[must_use]
     pub const fn pixel_position_changed(&self, new: &Self) -> bool {
         self.mouse_position.x_as_physical_pixel != new.mouse_position.x_as_physical_pixel
@@ -133,8 +132,8 @@ pub enum MotionPositionChange {
 /// encodes the escape sequence) and the frame-time selection-drag gate in
 /// `write_input_to_terminal`, which needs the SAME reportable-or-not
 /// decision `handle_pointer_moved` used to return, without asking it to
-/// encode bytes nobody will send — Task 124.3a moved PTY motion-report
-/// sending to the out-of-frame immediate-report hook path
+/// encode bytes nobody will send — PTY motion-report
+/// sending lives in the out-of-frame immediate-report hook path
 /// (`terminal::pty_mouse_report`), so the frame-time arm must decide
 /// whether a report *would* have been sent without producing one.
 #[must_use]
@@ -157,7 +156,7 @@ pub const fn motion_track_wants_report(
 }
 
 /// GUI-owned, per-pane state for the immediate (out-of-frame) PTY
-/// motion-report path (Task 124.3a).
+/// motion-report path.
 ///
 /// Lives on `ViewState` (see that field's doc) — read and written by
 /// `FreminalGui::on_pointer_moved` (`terminal::pty_mouse_report`), which
@@ -173,7 +172,7 @@ pub const fn motion_track_wants_report(
 /// doc for why that is window-owned instead: a physical button press and
 /// its matching release are events on the SAME OS pointer device,
 /// independent of which pane happens to be active at either moment, and
-/// storing that identity per-pane (this type's original Task 124.3a shape)
+/// storing that identity per-pane (this type's original shape)
 /// could leave a pane's button "permanently held" across a focus change
 /// between press and release.
 ///
@@ -194,8 +193,7 @@ pub struct ImmediateMouseReportState {
 }
 
 impl ImmediateMouseReportState {
-    /// Reset this pane's report baseline (Task 124.3a, review correction —
-    /// pointer-presence-loss reset).
+    /// Reset this pane's report baseline (pointer-presence-loss reset).
     ///
     /// Called when the app observes `App::on_pointer_presence_lost` (the
     /// pointer left the window, or the window lost focus): once no further
@@ -223,7 +221,7 @@ pub enum MouseEvent {
 ///
 /// Character-cell coordinates are used by every cell-granular mouse
 /// encoding (X11, SGR, UTF-8); physical-pixel coordinates are used only by
-/// `MouseEncoding::SgrPixels` (`?1016` — Task 124.3a).
+/// `MouseEncoding::SgrPixels` (`?1016`).
 ///
 /// Both coordinate pairs are relative to the terminal content area's
 /// top-left, zero-based. The pixel fields default to `0` via
@@ -325,7 +323,7 @@ pub fn handle_pointer_button(
 /// first motion event on this report stream, or the report baseline was
 /// just reset via [`ImmediateMouseReportState::reset`] after a
 /// pointer-presence loss) is unambiguously [`MotionPositionChange::Changed`],
-/// regardless of where `current` lands. Task 124.3a's original
+/// regardless of where `current` lands. An earlier
 /// implementation substituted a synthetic cell/pixel `(0, 0)` baseline
 /// for "no previous position", which conflated "never observed a
 /// position" with "previously observed at the origin": a genuine first
@@ -372,7 +370,7 @@ pub fn handle_pointer_moved(
     encoding: &MouseEncoding,
     s8c1t: S8c1t,
 ) -> Option<Vec<u8>> {
-    // Task 124.3a: `?1016` (SgrPixels) motion must be distinguishable at
+    // `?1016` (SgrPixels) motion must be distinguishable at
     // pixel granularity — two moves that stay within one cell must still
     // compare unequal — so the position-changed check is granularity-aware
     // rather than always comparing cell coordinates.
@@ -550,7 +548,7 @@ fn encode_x11_mouse_wheel(
             Some(csi_report(s8c1t, &[b'M', cb, x, y]))
         }
         MouseEncoding::SgrPixels => {
-            // Task 124.3a: same SGR framing as `?1006`, but `x`/`y` are
+            // Same SGR framing as `?1006`, but `x`/`y` are
             // one-based PHYSICAL PIXEL coordinates relative to the
             // terminal content area's top-left, not cell column/row.
             let cb = button_code + modifiers_code;
@@ -609,7 +607,7 @@ fn encode_x11_mouse_button(
             csi_report(s8c1t, &[b'M', cb, x, y])
         }
         MouseEncoding::SgrPixels => {
-            // Task 124.3a: same SGR framing as `?1006`, but `x`/`y` are
+            // Same SGR framing as `?1006`, but `x`/`y` are
             // one-based PHYSICAL PIXEL coordinates relative to the
             // terminal content area's top-left, not cell column/row.
             let x = pos.x_as_physical_pixel + 1;
@@ -1017,7 +1015,7 @@ mod tests {
         assert_eq!(bytes, b"\x1b[M &$", "X11 button press wrong: {bytes:?}");
     }
 
-    // ── Task 124.3a: `motion_track_wants_report` ─────────────────────────
+    // ── `motion_track_wants_report` ─────────────────────────
 
     #[test]
     fn motion_track_wants_report_xtmsebtn_needs_both_button_and_position_change() {
@@ -1068,7 +1066,7 @@ mod tests {
         }
     }
 
-    // ── Task 124.3a (review correction #2): `ImmediateMouseReportState::reset` ─
+    // ── `ImmediateMouseReportState::reset` ─
 
     #[test]
     fn immediate_mouse_report_state_reset_clears_a_real_position() {
@@ -1087,7 +1085,7 @@ mod tests {
         assert_eq!(report.position, None);
     }
 
-    // ── Task 124.3a: `PreviousMouseState::pixel_position_changed` ────────
+    // ── `PreviousMouseState::pixel_position_changed` ────────
 
     #[test]
     fn pixel_position_changed_true_when_pixels_differ_within_the_same_cell() {
@@ -1122,7 +1120,7 @@ mod tests {
         assert!(!a.pixel_position_changed(&b));
     }
 
-    // ── Task 124.3a: `?1016` (SgrPixels) exact-byte encoding ─────────────
+    // ── `?1016` (SgrPixels) exact-byte encoding ─────────────
 
     #[test]
     fn sgr_pixels_button_press_uses_physical_pixel_coordinates() {
@@ -1201,7 +1199,7 @@ mod tests {
     fn sgr_pixels_two_moves_within_one_cell_produce_two_distinct_reports() {
         // Both positions floor to the same cell (5, 5), but the pixel
         // offset differs — under SgrPixels this must still be treated as
-        // motion (Task 124.3a's headline distinctness requirement).
+        // motion (the headline distinctness requirement).
         let start_pos = FreminalMousePosition::new_with_pixels(5, 5, 50, 50);
         let start = PreviousMouseState::new(
             PointerButton::Primary,
@@ -1266,7 +1264,7 @@ mod tests {
         );
     }
 
-    // ── Task 124.3a (review correction #3): first motion at the origin ──
+    // ── first motion at the origin ──
 
     #[test]
     fn motion_position_changed_is_true_with_no_previous_position_even_at_the_origin() {
@@ -1393,7 +1391,7 @@ mod tests {
         );
     }
 
-    // ── Task 147.4: the CSI introducer follows S8C1T ─────────────────────
+    // ── the CSI introducer follows S8C1T ─────────────────────
     //
     // One row per mouse encoder. The 8-bit column is written out in full,
     // not derived from the 7-bit one.
@@ -1561,7 +1559,7 @@ mod tests {
         });
     }
 
-    // ── Task 147.21: `?1001` is not a mouse-tracking level ───────────────
+    // ── `?1001` is not a mouse-tracking level ───────────────
 
     fn pane_terminal_state() -> freminal_terminal_emulator::state::internal::TerminalState {
         let (tx, _rx) = crossbeam_channel::unbounded();

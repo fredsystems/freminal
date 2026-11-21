@@ -182,7 +182,7 @@ fn terminal_state_none_scrollback_limit_uses_default() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// Mode wiring tests (subtasks 7.7–7.10, 7.15)
+// Mode wiring tests
 //
 // Each test sends a DEC-set/reset escape sequence through
 // handle_incoming_data and verifies that TerminalState.modes is updated.

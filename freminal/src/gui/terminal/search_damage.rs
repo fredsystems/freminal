@@ -3,14 +3,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Cross-frame search-overlay damage state (Task 124.14d).
+//! Cross-frame search-overlay damage state.
 //!
 //! [`SearchDamageState`] is the one place that remembers what the search
 //! overlay actually painted last frame -- the screen rows the search-match
 //! tint was baked into, and the floating search-bar popup's paint bounds --
 //! so [`super::widget::build_bounded_damage`] can union the old and new
-//! extents into this frame's damage instead of forcing the whole pane (or,
-//! before this subtask, the whole window) `Full` while search is open.
+//! extents into this frame's damage instead of forcing the whole pane (or
+//! the whole window) `Full` while search is open.
 //!
 //! Owned as one field on [`super::widget::PaneRenderCache`], per
 //! `freminal-extend-or-extract`'s guidance to give cross-frame state a
@@ -20,7 +20,7 @@ use crate::gui::renderer::PaneDamageRect;
 use crate::gui::search::SearchOverlaySafety;
 
 /// What the search overlay painted last frame, and what it paints this
-/// frame, kept as one focused piece of cross-frame state (Task 124.14d).
+/// frame, kept as one focused piece of cross-frame state.
 ///
 /// Two independent extents are tracked:
 ///
@@ -133,7 +133,7 @@ impl SearchDamageState {
         self.previous_popup_rect = current_popup_rect;
     }
 
-    /// This frame's popup damage rects (Task 124.14d), for union into
+    /// This frame's popup damage rects, for union into
     /// `frame_damage::PaneDamageInput::search_overlay_rects`. Search
     /// highlight rows take the separate [`Self::replace_highlight_rows`]
     /// path into `build_bounded_damage`.

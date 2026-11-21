@@ -133,7 +133,7 @@ pub struct Row {
     /// current cursor row.  This is a rendering attribute only — the renderer
     /// uses it to apply per-row glyph scaling in the vertex builder.
     pub line_width: LineWidth,
-    /// Diagnostic marker (Task 119 — Scrollback Compression): `true` when
+    /// Diagnostic marker: `true` when
     /// this row's real content has been moved out into a
     /// [`crate::compressed_block::CompressedBlock`] by
     /// `Buffer::compress_scrollback_block`, leaving `storage` as an inert
@@ -161,8 +161,8 @@ pub struct Row {
 /// tag, **and it carries no image placement**. An image cell is a default-tag
 /// space as far as its glyph and tag are concerned, but it is content: popping
 /// it would drop an image cell without the owning `Buffer` decrementing
-/// `image_cell_count` and could strand a cell-owned image that nothing frees
-/// (Tasks 125.C11 and 125.C13). Cells that an operation intends to destroy are
+/// `image_cell_count` and could strand a cell-owned image that nothing frees.
+/// Cells that an operation intends to destroy are
 /// replaced (and accounted for) by the caller before this runs, so stopping at
 /// any remaining image cell is always correct.
 fn trim_trailing_blanks(cells: &mut Vec<Cell>, is_blank_tag: impl Fn(&FormatTag) -> bool) {
@@ -230,7 +230,7 @@ impl Row {
     /// a `Compact` row in place if necessary. A no-op when already `Live`.
     ///
     /// This is the mutation seam every cell-mutating method calls first:
-    /// compact rows are never mutated in place (Task 118.3 design decision).
+    /// compact rows are never mutated in place.
     pub fn ensure_live(&mut self) {
         let _ = self.cells_vec_mut();
     }
@@ -339,8 +339,7 @@ impl Row {
     }
 
     /// Returns `true` if this row's content currently lives only inside a
-    /// [`crate::compressed_block::CompressedBlock`] (Task 119 — Scrollback
-    /// Compression), leaving `storage` as an inert blank placeholder.
+    /// [`crate::compressed_block::CompressedBlock`], leaving `storage` as an inert blank placeholder.
     ///
     /// See the [`Row::evicted_to_block`](Row) field doc for the full
     /// rationale. Mirrors [`Row::is_compact`]'s "storage representation,
@@ -365,8 +364,8 @@ impl Row {
         }
     }
 
-    /// Move this row's content out to a compressed block (Task 119 —
-    /// Scrollback Compression), replacing `storage` with an inert blank
+    /// Move this row's content out to a compressed block,
+    /// replacing `storage` with an inert blank
     /// placeholder and setting [`Row::is_evicted`].
     ///
     /// Only ever called by `Buffer::compress_scrollback_block` on a row that
@@ -386,7 +385,7 @@ impl Row {
     /// evicted to, clearing [`Row::is_evicted`].
     ///
     /// Restores directly to [`Row::is_compact`] storage (not fully `Live`)
-    /// to preserve the Task-118 memory win: `width`/`origin`/`join`/
+    /// to preserve the memory win: `width`/`origin`/`join`/
     /// `line_width` are left as-is (they were never touched by
     /// [`Row::evict_to_block`], so they are already correct) rather than
     /// re-derived from `compact`, avoiding a full decompaction just to read
@@ -408,7 +407,7 @@ impl Row {
     /// leaving the row as a permanently blank (but no-longer-flagged) `Live`
     /// row. This deliberately favors "wrong but readable" over "correct
     /// content lost forever behind an assert that fires on every future
-    /// read": per the Task 119 design decision "correctness over ratio,"
+    /// read": per the design decision "correctness over ratio,"
     /// silently returning blank content for one corrupted row is the lesser
     /// failure compared to a debug-build panic (or a permanently
     /// unreadable row) every time that row is next touched.
@@ -421,7 +420,7 @@ impl Row {
     /// for a `Live` row or an as-yet-unwarmed `Compact` row.
     ///
     /// After this call, the next read accessor (e.g. [`Row::cells`] /
-    /// [`Row::characters`]) re-decompacts on demand. This is the Task 118.4
+    /// [`Row::characters`]) re-decompacts on demand. This is the
     /// cold-scrollback-eviction hook: a one-off full-scrollback flatten (the
     /// Ctrl-F search-buffer path) warms every compacted row's decompaction
     /// cache just to read it once, and that cache is otherwise cold dead
@@ -490,7 +489,7 @@ impl Row {
         // A compact row is guaranteed to contain zero image cells (image
         // rows opt out of compaction — see `CompactRow::from_row`), so this
         // returns 0 immediately without triggering a decompaction. A row
-        // evicted to a compressed block (Task 119) is compacted first, so
+        // evicted to a compressed block is compacted first, so
         // the same guarantee applies — and short-circuiting here (before
         // `cells_ref`'s debug_assert) is what lets whole-buffer sweeps like
         // `enforce_scrollback_limit`'s image accounting run safely over
@@ -560,7 +559,7 @@ impl Row {
     /// Image cells at or beyond `new_width` are dropped like any other cell; the
     /// row cannot account for them, so the caller (`Buffer::set_size`, via
     /// `clip_rows_to_width`) must reduce `image_cell_count` and free any
-    /// cell-owned image left without a cell (Task 125.C15).
+    /// cell-owned image left without a cell.
     pub fn truncate_cells_to_width(&mut self, new_width: usize) {
         // Fast path: if we already have no more cells than the target width,
         // truncation is a no-op — do NOT decompact a compact row just to
@@ -644,7 +643,7 @@ impl Row {
     /// its memoized decompaction if a prior read warmed it, or decompacts
     /// once otherwise. Used by `Buffer::reflow_to_width`, which owns every
     /// old row and discards it right after reading its cells, so moving the
-    /// cells out avoids a clone and a drop per cell (Task 120.3).
+    /// cells out avoids a clone and a drop per cell.
     ///
     /// Like [`Row::cells`], this must not be called on a row whose content is
     /// evicted to a compressed block; call `Buffer::ensure_decompressed`
@@ -683,8 +682,8 @@ impl Row {
     /// defeat its own memory savings the moment any image exists anywhere
     /// in the buffer.
     ///
-    /// A row evicted to a compressed block (Task 119,
-    /// [`Row::is_evicted`]) is always compacted first, so the same
+    /// A row evicted to a compressed block
+    /// ([`Row::is_evicted`]) is always compacted first, so the same
     /// zero-images guarantee holds; this is also why this accessor
     /// deliberately does **not** carry `cells_ref`'s `debug_assert` — an
     /// evicted row legitimately reads as empty here (matching a compact
@@ -1087,7 +1086,7 @@ impl Row {
         // Trim trailing default blanks to maintain the sparse-row invariant.
         // An image cell is a default-tag space too, but it is content, not a
         // blank: ECH only erases `[col .. erase_end)`, so an image cell outside
-        // that range must survive (see `trim_trailing_blanks`; Task 125.C11).
+        // that range must survive (see `trim_trailing_blanks`).
         trim_trailing_blanks(cells, |t| *t == FormatTag::default());
     }
 
@@ -1893,7 +1892,7 @@ mod tests {
         assert_eq!(row.resolve_cell(4).tchar(), &TChar::Ascii(b'C'));
     }
 
-    /// Regression (Task 125.C11): the sparse-row trim at the end of
+    /// Regression: the sparse-row trim at the end of
     /// `erase_cells_at` treated image cells (default-tag spaces) as blanks,
     /// deleting image cells outside the erased range.
     #[test]
@@ -2889,7 +2888,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Row-internal storage compaction (Task 118.3)
+    // Row-internal storage compaction
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2993,8 +2992,7 @@ mod tests {
         row.compact();
         assert!(row.is_compact());
 
-        // Any mutating method must decompact the row back to `Live` first
-        // (Task 118.3: compact rows are never mutated in place).
+        // Any mutating method must decompact the row back to `Live` first.
         row.insert_text(2, &[TChar::Ascii(b'C')], &tag);
         assert!(!row.is_compact());
         assert_eq!(row.resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
@@ -3023,7 +3021,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // release_decompacted_cache (Task 118.4)
+    // release_decompacted_cache
     // -----------------------------------------------------------------------
 
     #[test]

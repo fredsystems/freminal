@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! A narrowing resize must not strand the cursor past the right edge, and CBT
-//! must survive one if it ever happens (Task 148.3, GHSA-8f32-mj37-fw6v).
+//! must survive one if it ever happens.
 //!
 //! The terminal starts at 100 columns and the fuzz harness resizes it to the
 //! target width. DECLRMM (`?69`) was on with its default margins, which stayed

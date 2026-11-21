@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Phase 13: DEC private modes and queries (broad set)
+//! DEC private modes and queries (broad set)
 
 use freminal_terminal_emulator::ansi_components::csi::AnsiCsiParser;
 

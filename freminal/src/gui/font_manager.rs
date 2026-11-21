@@ -43,7 +43,7 @@ static CASKAYDIA_BOLD_ITALIC: &[u8] =
     include_bytes!("../../../res/CaskaydiaCoveNerdFont-BoldItalic.ttf");
 
 /// Bundled color emoji font (Noto Color Emoji, OFL-1.1). Guarantees emoji
-/// rendering even on a system with no emoji font installed (Task #402).
+/// rendering even on a system with no emoji font installed.
 static NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../res/NotoColorEmoji.ttf");
 
 /// The Unicode blocks that make up the emoji repertoire, as inclusive
@@ -51,7 +51,7 @@ static NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../res/NotoColorEmoji.ttf
 ///
 /// Test-only: used by [`LoadedFace::emoji_coverage`] to assert the bundled
 /// Noto Color Emoji face carries broad emoji coverage. Production code no
-/// longer ranks candidate faces by coverage (issue #431) — the bundled face
+/// longer ranks candidate faces by coverage — the bundled face
 /// is always used — so this table only backs regression tests. Ranges are
 /// the emoji-bearing blocks per the Unicode Standard (the pictographic/emoji
 /// blocks; not every codepoint in these blocks is an emoji, but the count is
@@ -205,7 +205,7 @@ struct LoadedFace {
 /// (`from_owned`). Holding a single owner type means [`LoadedFace::arc_bytes`]
 /// is *always* a cheap `Arc::clone` (refcount bump), so constructing a
 /// [`CachedShaper`] on a cache miss never copies the font bytes — not even for
-/// bundled fonts (Task #430).
+/// bundled fonts.
 #[derive(Debug)]
 struct FontData(Arc<[u8]>);
 
@@ -221,7 +221,7 @@ impl LoadedFace {
     /// The `&'static` bytes are copied into an `Arc<[u8]>` exactly once here,
     /// at load time, so that later shaper-cache misses reuse the same allocation
     /// via a cheap `Arc::clone` rather than re-copying the (multi-MB) bundled
-    /// font on every miss (Task #430).
+    /// font on every miss.
     fn from_static(data: &'static [u8]) -> Option<Self> {
         let data: Arc<[u8]> = Arc::from(data);
         let font_ref = swash::FontRef::from_index(&data, 0)?;
@@ -260,7 +260,7 @@ impl LoadedFace {
     }
 
     /// Return this face's bytes as a stable, cheaply-cloneable `Arc<[u8]>`
-    /// owner, suitable for constructing a [`CachedShaper`] (Task #430).
+    /// owner, suitable for constructing a [`CachedShaper`].
     ///
     /// Always a cheap `Arc::clone` (refcount bump) — the one-time copy of any
     /// `&'static` bundled bytes into the `Arc` happened at load time in
@@ -285,7 +285,7 @@ impl LoadedFace {
     /// codepoint to a monochrome outline.
     ///
     /// Test-only: production code no longer gates candidate emoji faces on
-    /// this (the bundled face is always used, issue #431); it remains as a
+    /// this (the bundled face is always used); it remains as a
     /// regression check that the bundled face really is a color font and
     /// that a plain text font is not mistaken for one.
     #[cfg(test)]
@@ -300,7 +300,7 @@ impl LoadedFace {
     /// character map.
     ///
     /// Test-only: production code no longer ranks candidate emoji faces by
-    /// coverage (issue #431); it remains as a regression check that the
+    /// coverage; it remains as a regression check that the
     /// bundled face carries broad emoji coverage.
     #[cfg(test)]
     fn emoji_coverage(&self) -> u32 {
@@ -321,7 +321,7 @@ impl LoadedFace {
     }
 }
 
-/// Per-face shaping state cached across shape calls (Task #430, issue #530).
+/// Per-face shaping state cached across shape calls.
 ///
 /// Holds the expensive, owned `harfrust::ShaperData` (the per-font OpenType
 /// caches and table ranges) together with the `Arc<[u8]>` font bytes it was
@@ -340,7 +340,7 @@ struct CachedShaper {
     data: harfrust::ShaperData,
 }
 
-/// Cache key for a compiled `harfrust::ShapePlan` (Task #430).
+/// Cache key for a compiled `harfrust::ShapePlan`.
 ///
 /// Distinguishes plans by face, ligature mode (which fully determines the
 /// feature list, see [`LigatureShaping::features`]), and the buffer's guessed
@@ -394,7 +394,7 @@ impl PrimaryFaces {
 }
 
 /// A fallback face's own cell metrics, used to normalise its glyphs into the
-/// primary cell (Task #411).
+/// primary cell.
 ///
 /// All three are measured at the current rasterisation ppem. Cached per
 /// [`FaceId`] because recomputing them (`compute_cell_metrics`, which parses the
@@ -459,14 +459,14 @@ pub struct FontManager {
     /// Resolved glyph cache: (codepoint, style) -> (`face_id`, `glyph_id`).
     glyph_cache: HashMap<(char, GlyphStyle), (FaceId, u16)>,
 
-    /// Per-face cache of fallback cell metrics (Task #411). Populated lazily by
+    /// Per-face cache of fallback cell metrics. Populated lazily by
     /// [`Self::fallback_cell_metrics`] and cleared on rebuild alongside
     /// `glyph_cache`. `None` means the face has no measurable metrics (or is a
     /// primary face). Interior mutability so the renderer can read metrics
     /// through a shared `&FontManager` while still caching.
     fallback_metrics_cache: RefCell<FxHashMap<FaceId, Option<FallbackCellMetrics>>>,
 
-    /// Per-face cache of `harfrust` shaping data (Task #430).
+    /// Per-face cache of `harfrust` shaping data.
     /// Populated lazily by [`Self::build_cached_shaper`] (invoked from
     /// [`Self::shape_cached`]). A cached `ShaperData` is tied to the exact
     /// bytes and collection index it was built from, so an entry must be
@@ -487,7 +487,7 @@ pub struct FontManager {
     shaper_cache: RefCell<FxHashMap<FaceId, Option<CachedShaper>>>,
 
     /// Per-`(face, ligatures, script, direction)` cache of compiled
-    /// `harfrust::ShapePlan`s (Task #430). Plan compilation is the
+    /// `harfrust::ShapePlan`s. Plan compilation is the
     /// second-most expensive part of cold shaping after shaper-data
     /// construction; caching it avoids recompiling an identical plan on every
     /// shape call. Invalidated together with `shaper_cache` and for the same
@@ -591,7 +591,7 @@ impl FontManager {
                 (bundled, None, None)
             };
 
-        // Always resolves to the bundled Noto Color Emoji face (issue #431).
+        // Always resolves to the bundled Noto Color Emoji face.
         let emoji_face = discover_emoji_face();
 
         let font_size_ppem = pt_to_ppem(font_size_pt, pixels_per_point);
@@ -748,7 +748,7 @@ impl FontManager {
     }
 
     /// Shape `text` for `face_id` using cached `harfrust::ShaperData` and a
-    /// cached compiled `harfrust::ShapePlan` (Task #430), instead of
+    /// cached compiled `harfrust::ShapePlan`, instead of
     /// rebuilding the per-font shaping data and recompiling the plan on every
     /// call.
     ///
@@ -914,7 +914,7 @@ impl FontManager {
     }
 
     /// The own cell height, baseline, and cell width of a **fallback** face, at
-    /// the current rasterisation ppem (Task #411).
+    /// the current rasterisation ppem.
     ///
     /// A glyph resolved from a fallback face (bundled or system) was designed
     /// against *that* font's cell, not the primary font's. To place it into the
@@ -1048,7 +1048,7 @@ impl FontManager {
         // (built from a specific `FaceId`'s byte buffer) or `ShapePlan`
         // (compiled against a specific face) may now reference the wrong
         // font entirely — this clear is required for correctness, not just
-        // consistency (Task #430).
+        // consistency.
         self.shaper_cache.borrow_mut().clear();
         self.plan_cache.borrow_mut().clear();
 
@@ -1099,7 +1099,7 @@ impl FontManager {
         // A size change does not touch the primary, bundled or emoji faces'
         // bytes (only `rebuild` replaces them), and `ShaperData` / `ShapePlan`
         // are independent of size (no scale is set; positions are font
-        // units), so the other entries stay valid (Task #430).
+        // units), so the other entries stay valid.
         self.evict_system_face_shaping_caches();
 
         Ok(true)
@@ -1149,7 +1149,7 @@ impl FontManager {
         // A DPI change does not touch the primary, bundled or emoji faces'
         // bytes (only `rebuild` replaces them), and `ShaperData` / `ShapePlan`
         // are independent of DPI (no scale is set; positions are font units),
-        // so the other entries stay valid (Task #430).
+        // so the other entries stay valid.
         self.evict_system_face_shaping_caches();
 
         Ok(true)
@@ -1558,7 +1558,7 @@ fn suggest_similar_families(query: &str, font_db: &Database) -> Vec<String> {
 /// emoji-block coverage, but a font's aggregate coverage count is not a
 /// stable guarantee that it maps any *particular* codepoint the terminal
 /// needs to render — a system font could win the ranking and then still
-/// produce tofu for a codepoint it happens not to carry (issue #431). Always
+/// produce tofu for a codepoint it happens not to carry. Always
 /// using the bundled face removes that host-dependent guessing entirely: the
 /// set of codepoints that render correctly is fixed and known at build time,
 /// regardless of what is or isn't installed on the system.
@@ -1965,7 +1965,7 @@ mod tests {
     // CaskaydiaCove IS a Nerd Font (it has the core Powerline separator
     // glyphs — see `caskaydia_is_detected_as_nerd_font` below), so the
     // win-metrics height floor legitimately applies to it and this test
-    // must still pass after the fix for issue 403: gating that floor on
+    // must still pass: gating that floor on
     // `has_powerline_glyphs` does not regress the one bundled font that
     // actually needs the extra headroom.
 
@@ -2028,7 +2028,7 @@ mod tests {
         );
     }
 
-    // --- Task 402 / issue #431: bundled Noto Color Emoji, always used ---
+    // --- bundled Noto Color Emoji, always used ---
 
     #[test]
     fn bundled_noto_is_a_color_emoji_face() {
@@ -2072,7 +2072,7 @@ mod tests {
     fn emoji_face_is_always_bundled_noto() {
         // `discover_emoji_face` takes no font database — it must always
         // resolve to the bundled color face, independent of what is (or
-        // isn't) installed on the host (issue #431).
+        // isn't) installed on the host.
         let face = discover_emoji_face().expect("bundled Noto Color Emoji must load");
         assert!(
             face.has_color_glyphs(),
@@ -2082,7 +2082,7 @@ mod tests {
 
     #[test]
     fn discover_emoji_face_returns_bundled_color_face() {
-        // Regression guard for issue #431: the snowflake emoji (U+2744) must
+        // Regression guard: the snowflake emoji (U+2744) must
         // resolve to a real glyph in the always-used bundled face, not tofu
         // from a ranked-but-incomplete system font.
         let face = discover_emoji_face().expect("bundled Noto Color Emoji must load");
@@ -2450,7 +2450,7 @@ mod tests {
         assert!(!style.italic);
     }
 
-    // --- Test 14: cached harfrust shaper construction (Task #430) ---
+    // --- Test 14: cached harfrust shaper construction ---
 
     #[test]
     fn build_cached_shaper_creation() {
@@ -2598,7 +2598,7 @@ mod tests {
         );
     }
 
-    // --- Task #430: shape_cached reuses the ShaperData + ShapePlan caches ---
+    // --- shape_cached reuses the ShaperData + ShapePlan caches ---
 
     #[test]
     fn shape_cached_reuses_shaper_and_plan_across_calls() {

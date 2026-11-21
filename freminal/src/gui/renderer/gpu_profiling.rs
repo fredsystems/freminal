@@ -3,12 +3,12 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Terminal upload/draw GPU timing (Task 125.8), built on 125.7's
+//! Terminal upload/draw GPU timing, built on the
 //! GL-independent [`GpuQueryRing`] foundation
 //! (`freminal_windowing::gpu_profiling`).
 //!
 //! One concept: a per-pane, renderer-side adapter that turns the pure
-//! ring/state-machine from 125.7 into real asynchronous GPU timestamp
+//! ring/state-machine into real asynchronous GPU timestamp
 //! measurements of exactly two phases per drawn frame -- the terminal
 //! upload commands (`gui::renderer::gpu::TerminalRenderer::draw_with_verts`
 //! / `draw_with_cursor_only_update`'s atlas/image/vertex uploads) and the
@@ -20,14 +20,12 @@
 //! [`freminal_windowing::gpu_profiling::GpuProfilePhase`] is a bare
 //! `&'static str` name with no room for a dynamic pane id, and
 //! [`freminal_windowing::gpu_profiling::CompletedSample`] does not return
-//! the query handles it just destroyed -- both are 125.7 design decisions
-//! this subtask must not reopen (125.7 is already reviewed and merged, and
-//! `freminal-windowing/src/gpu_profiling.rs` is outside this subtask's
-//! modification scope). Encoding a pane id into the phase string and
-//! parsing it back out would be exactly the string-parsing metadata
-//! anti-pattern the plan explicitly warns against.
+//! the query handles it just destroyed -- both are deliberate design decisions of
+//! `freminal-windowing/src/gpu_profiling.rs`. Encoding a pane id into the
+//! phase string and parsing it back out would be exactly the
+//! string-parsing-metadata anti-pattern to avoid.
 //!
-//! The design that avoids both problems without touching 125.7 at all:
+//! The design that avoids both problems without touching the ring at all:
 //! **one [`PaneGpuTimingProfile`] per pane**, owned by that pane's own
 //! `TerminalRenderer` (mirroring `gui::renderer::profiling::LiveRenderProfile`,
 //! which is likewise one instance per pane's `RenderState`). Pane identity
@@ -39,8 +37,7 @@
 //! by profiling every pane uniformly (not only the active one) under the
 //! same [`GpuProfilePhase`] pair and the same [`LOG_TARGET`], so a
 //! multi-pane session's log can be aggregated post-hoc by pane id -- not by
-//! a single ring shared across panes, which the 125.7 types cannot express
-//! without reopening that subtask.
+//! a single ring shared across panes, which the ring's types cannot express.
 //!
 //! # Timestamp pairs, never `TIME_ELAPSED`
 //!
@@ -85,11 +82,11 @@ const RING_CAPACITY: usize = 32;
 /// Explicit `tracing` target for [`PaneGpuTimingProfile`]'s periodic flush
 /// summary.
 ///
-/// Distinct from every other Task 121/125 profiling target
+/// Distinct from every other profiling target
 /// (`"freminal::frame_profiling"`, `"freminal_windowing::frame_profiling"`,
-/// `"freminal::task_125::live_render_profile"`) so a live session can
+/// `"freminal::live_render_profile"`) so a live session can
 /// filter terminal GPU timing independently of any of them.
-pub const LOG_TARGET: &str = "freminal::task_125::gpu_timing";
+pub const LOG_TARGET: &str = "freminal::gpu_timing";
 
 /// Adapts the [`Gl`] facade to
 /// [`freminal_windowing::gpu_profiling::GpuQuerySource`], so
@@ -149,7 +146,7 @@ pub struct GpuTimingReport {
     /// Cumulative completed upload-phase samples.
     pub upload_sample_count: u64,
     /// Cumulative measured draw-phase GPU duration, nanoseconds --
-    /// terminal draw commands only, excluding upload (Task 125.8's
+    /// terminal draw commands only, excluding upload (the
     /// timestamp-pair boundary makes this hold by construction, not by
     /// subtracting the upload figure from a combined one).
     pub draw_ns_total: u64,
@@ -157,7 +154,7 @@ pub struct GpuTimingReport {
     pub draw_sample_count: u64,
     /// How many frames elapsed between issue and availability for the
     /// most recently completed sample (either phase) -- the "query
-    /// latency in frames" the plan calls for reporting.
+    /// latency in frames".
     ///
     /// Unit: pane-local drawn frames, i.e. `PaneGpuTimingProfile::frame`
     /// ticks -- incremented once per [`PaneGpuTimingProfile::begin_frame`]
@@ -181,7 +178,7 @@ pub struct GpuTimingReport {
     pub unavailable_sample_count: usize,
 }
 
-/// Per-pane asynchronous GPU timing adapter (Task 125.8).
+/// Per-pane asynchronous GPU timing adapter.
 ///
 /// Owns exactly one [`GpuQueryRing<glow::Query>`], detected capability, the
 /// cached renderer string, and cumulative upload/draw totals -- the same
@@ -281,7 +278,7 @@ impl PaneGpuTimingProfile {
     /// extension set, and cache the active `GL_RENDERER` string.
     ///
     /// Reads `GL_VERSION` via `Gl::get_parameter_string`, parses it with
-    /// `freminal_windowing::gpu_profiling::parse_gl_version_string` (125.7's
+    /// `freminal_windowing::gpu_profiling::parse_gl_version_string` (a
     /// pure parser, written explicitly for this real-caller path -- see its
     /// doc), and reads the extension set via `Gl::supported_extensions`
     /// only when the version parses; if it does not, capability is
@@ -551,7 +548,7 @@ mod tests {
     /// doc), so every one of *this module's own* tests that needs
     /// `Available` capability must opt in explicitly through this helper.
     /// Tests elsewhere in the crate that drive `TerminalRenderer` through
-    /// the recording facade (Task 123's headless workload assertions in
+    /// the recording facade (the headless workload assertions in
     /// particular) never call this, so their existing call counts are
     /// unaffected by gpu-profiling's capability defaulting to
     /// `Unavailable`.
@@ -566,7 +563,7 @@ mod tests {
     /// desktop `GL_VERSION` string -- proves the real
     /// read-`GL_VERSION`-then-parse-then-check-extensions pipeline resolves
     /// to `Available` end to end through the actual [`Gl`] facade, not
-    /// just via 125.7's own pure-function tests.
+    /// just via the parser's own pure-function tests.
     #[test]
     fn capability_detection_resolves_available_via_the_facade_round_trip() {
         let gl = Gl::recording();
@@ -672,8 +669,8 @@ mod tests {
     /// Results are never read before availability succeeds, and arrive
     /// only on a later `begin_frame` call -- never the frame that issued
     /// them. Exercises the full round trip through the real facade
-    /// (`GlQuerySource` wired to `Gl`), not just 125.7's own
-    /// `FakeQuerySource`-driven ring tests.
+    /// (`GlQuerySource` wired to `Gl`), not just the
+    /// `FakeQuerySource`-driven ring tests in `freminal-windowing`.
     #[test]
     fn results_are_never_read_before_availability_and_arrive_on_a_later_frame() {
         let gl = Gl::recording();
@@ -757,7 +754,7 @@ mod tests {
         );
     }
 
-    /// Task 125.C16: `shutdown` runs from both a failed-init release and a
+    /// `shutdown` runs from both a failed-init release and a
     /// later `destroy`, so it must be idempotent -- the second call finds no
     /// handle left to destroy and issues no GL call.
     #[test]

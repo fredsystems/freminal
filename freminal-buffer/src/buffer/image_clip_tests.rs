@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 125.C15 regression tests: clipping rows to a narrower width on the
+//! Regression tests: clipping rows to a narrower width on the
 //! alternate screen must account for the image cells it drops.
 //!
 //! `Row::truncate_cells_to_width` removes image cells without any bookkeeping,

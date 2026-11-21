@@ -37,7 +37,7 @@ use freminal_windowing::{RepaintProxy, WindowId};
 
 /// Ask the system allocator to release free heap pages back to the OS.
 ///
-/// After idle scrollback compaction (Task 118) frees a large number of small
+/// After idle scrollback compaction frees a large number of small
 /// allocations (`Vec<Cell>` / `RowCacheEntry`), the glibc allocator keeps
 /// those pages in its per-arena free lists rather than `munmap`-ing them, so
 /// process RSS stays high even though the freed memory is no longer live. A
@@ -69,12 +69,12 @@ fn release_freed_heap() {
 
 /// A finished-command event delivered from a PTY consumer thread to the GUI.
 ///
-/// Produced by Task 72.3 when the terminal handler sees an `OSC 133 D` marker,
+/// Produced when the terminal handler sees an `OSC 133 D` marker,
 /// queued onto the handler's `pending_command_events` vector, and drained by
-/// the PTY consumer thread after each batch (Task 72.9). One event per
+/// the PTY consumer thread after each batch. One event per
 /// completed shell command. The GUI uses these to populate per-pane recent
 /// command history and to set the unfocused-tab pending-event indicator
-/// (visual indicator is rendered in Task 72.10).
+/// (the tab bar renders the indicator).
 ///
 /// `pane_id` is the `recording_pane_id` (`PaneId.raw() as u32`) of the
 /// originating pane, which the GUI maps back to its [`super::panes::PaneId`]
@@ -90,7 +90,7 @@ pub struct CommandFinishedEvent {
 /// Wrap each `CommandBlock` in a [`CommandFinishedEvent`] tagged with
 /// `pane_id` and forward it on `tx`.
 ///
-/// Extracted from the PTY consumer thread's `post_event` closure (Task 72.9)
+/// Extracted from the PTY consumer thread's `post_event` closure
 /// so the transport contract — "drained blocks become events tagged with the
 /// originating pane" — is unit-testable without spinning up a real shell.
 ///
@@ -124,15 +124,15 @@ pub(crate) fn forward_command_events(
 /// while bounding worst-case input-handling latency to one batch of parses.
 const MAX_PTY_READ_BATCH: usize = 64;
 
-/// Outcome of processing one [`InputEvent`] on the PTY consumer thread (issue
-/// #459). Distinguishes "this input changed something the GUI must render"
+/// Outcome of processing one [`InputEvent`] on the PTY consumer thread.
+/// Distinguishes "this input changed something the GUI must render"
 /// ([`InputOutcome::Repaint`]) from "this input changed nothing visible"
 /// ([`InputOutcome::NoRepaint`] — a pure child-fd write, or a read-only request
 /// whose response the GUI consumes synchronously on a side channel), so the
 /// trailing `post_event` can skip the wasteful GUI wake-up for the latter.
 /// [`InputOutcome::Closed`] means the input channel dropped (pane teardown).
 ///
-/// Classification (verified in the #459 design review):
+/// Classification (verified by review):
 ///
 /// - `NoRepaint`: `Key`, `FocusChange` (child-fd writes only, no emulator state
 ///   change — the echo arrives later via `pty_read_rx`, which requests its own
@@ -154,7 +154,7 @@ enum InputOutcome {
 
 /// Whether processing this [`InputEvent`] changes something the GUI must
 /// render, and therefore whether the PTY consumer thread should request a GUI
-/// wake-up after handling it (issue #459).
+/// wake-up after handling it.
 ///
 /// Pure and total (no wildcard arm) so a future `InputEvent` variant forces an
 /// explicit classification decision at compile time, and so the classification
@@ -203,7 +203,7 @@ const fn input_event_needs_repaint(event: &InputEvent) -> bool {
 
 /// Feed a just-received `PtyRead` and every `PtyRead` already queued behind it
 /// (up to [`MAX_PTY_READ_BATCH`]) into `sink`, in arrival order, in a single
-/// batch (issue #439).
+/// batch.
 ///
 /// The PTY consumer thread's `select!` loop calls `post_event`
 /// (`build_snapshot` then `arc_swap.store` then a repaint request) exactly once
@@ -266,8 +266,7 @@ struct CoalescedInput {
     next: Option<Result<InputEvent, RecvError>>,
 }
 
-/// Collapse a run of queued `InputEvent::Resize`s into its last member
-/// (Task 120.2).
+/// Collapse a run of queued `InputEvent::Resize`s into its last member.
 ///
 /// The GUI sends one `Resize` per frame in which a pane's cell grid changes,
 /// so a drag queues one per frame. A width change reflows the whole
@@ -337,7 +336,7 @@ pub struct TabChannels {
     ///
     /// Unbounded on purpose: it carries keystrokes, which must never be
     /// dropped.  The replies the GUI sends on it are bounded at the source
-    /// instead, by the per-pane `window_cmd_budget` report cap (148.C9).
+    /// instead, by the per-pane `window_cmd_budget` report cap.
     pub input_tx: Sender<InputEvent>,
 
     /// Receiver for window commands from the PTY thread.
@@ -367,8 +366,8 @@ pub struct TabChannels {
     /// The PTY consumer thread drains `TerminalHandler::drain_command_events`
     /// after each batch and forwards every finished `CommandBlock` here,
     /// tagged with this pane's `recording_pane_id`. The GUI uses this to
-    /// populate per-pane recent-command history (Task 72.9) and ultimately
-    /// to drive Task 76 notifications and Task 72.10 visual indicators.
+    /// populate per-pane recent-command history and ultimately
+    /// to drive notifications and visual indicators.
     pub command_event_rx: Receiver<CommandFinishedEvent>,
 
     /// Shared atomic flag reflecting whether the PTY slave currently has
@@ -381,7 +380,7 @@ pub struct TabChannels {
     pub echo_off: Arc<AtomicBool>,
 
     /// Per-pane budget for [`WindowCommand`]s the PTY thread has sent on
-    /// `window_cmd_rx` that the GUI has not drained yet (148.C9, 148.RC2).
+    /// `window_cmd_rx` that the GUI has not drained yet.
     ///
     /// The PTY thread admits a command only while its class is below its cap
     /// (see `WindowCommandBudget::admit`); the GUI releases one per command
@@ -404,7 +403,7 @@ pub struct TabChannels {
     /// `OnceLock` is empty until the loader thread reads and parses the
     /// shell's history file; thereafter it holds at most
     /// [`crate::gui::shell_history::HISTORY_SEED_CAP`] entries.  Consumed
-    /// by the Quick Command History Palette (Task 72.15) to surface
+    /// by the Quick Command History Palette to surface
     /// historical commands alongside the live `recent_commands` ring.
     /// Empty for non-shell programs and for shells freminal does not
     /// recognise.
@@ -418,7 +417,7 @@ pub struct TabChannels {
 }
 
 /// Most Report-class window commands that may be outstanding (sent by the PTY
-/// thread, not yet drained by the GUI) for one pane (148.C9).
+/// thread, not yet drained by the GUI) for one pane.
 ///
 /// A report request (`CSI 14 t`, an OSC 52 query, an OSC 99 display, ...) is
 /// answered by the GUI, so each one costs a queue entry now and a reply later.
@@ -431,8 +430,7 @@ pub struct TabChannels {
 /// dropped.  Its reply traffic is bounded by this cap instead.
 pub(crate) const MAX_OUTSTANDING_REPORTS: usize = 256;
 
-/// Most Viewport-class window commands that may be outstanding for one pane
-/// (148.RC2).
+/// Most Viewport-class window commands that may be outstanding for one pane.
 ///
 /// Viewport commands produce no reply, but they are not small: they include
 /// OSC 52 clipboard writes (`SetClipboard`, up to the parser's payload limit),
@@ -668,13 +666,11 @@ pub struct PtyTabInitialState {
     pub auto_detect_urls: bool,
     /// Cursor shape/blink style, resolved from `config.cursor` via
     /// [`CursorVisualStyle::from_config`](freminal_common::cursor::CursorVisualStyle::from_config)
-    /// (`InputEvent::CursorConfigChange` is the live-apply equivalent;
-    /// issue #406).
+    /// (`InputEvent::CursorConfigChange` is the live-apply equivalent).
     pub cursor_style: freminal_common::cursor::CursorVisualStyle,
     /// Host-dependent capability facts, resolved from the config via
     /// `host_capabilities::host_capabilities`
-    /// (`InputEvent::HostCapabilitiesChange` is the live-apply equivalent;
-    /// Task 130.4).
+    /// (`InputEvent::HostCapabilitiesChange` is the live-apply equivalent).
     pub host_capabilities: freminal_common::host_capabilities::HostCapabilities,
 }
 
@@ -693,8 +689,7 @@ fn apply_initial_state(handler: &mut TerminalHandler, initial_state: PtyTabIniti
         .buffer_mut()
         .set_auto_detect_urls(initial_state.auto_detect_urls);
 
-    // Seed the cursor's initial shape/blink from `config.cursor` (issue
-    // #406). Like `theme`, this is only the *starting* state: a running
+    // Seed the cursor's initial shape/blink from `config.cursor`. Like `theme`, this is only the *starting* state: a running
     // program's own DECSCUSR / XTCBlink request still overrides it
     // normally, exactly as on a real terminal. It is also the baseline RIS
     // and DECSTR restore the cursor style to.
@@ -724,12 +719,10 @@ pub struct PtyTabConfig<'a> {
     /// Pane ID used in FREC v2 recording event payloads.
     pub recording_pane_id: u32,
     /// Whether the child is told it runs inside freminal (`TERM_PROGRAM`, shell
-    /// integration).  Converted from `config.shell_integration.set_term_program`
-    /// (Task 72.6).
+    /// integration).  Converted from `config.shell_integration.set_term_program`.
     pub term_program: TermProgramEnv,
     /// Whether the shell-integration `sudo` wrapper that preserves `TERMINFO`
-    /// is on.  Converted from `config.shell_integration.sudo_preserve_terminfo`
-    /// (Task 151.12).
+    /// is on.  Converted from `config.shell_integration.sudo_preserve_terminfo`.
     pub sudo_terminfo: SudoTerminfo,
     /// The pane's effective `TERM`, computed once at spawn with
     /// [`TermName::resolve`] (a `TERM` in `extra_env` wins over `[shell] term`).
@@ -828,7 +821,7 @@ pub fn spawn_pty_tab(
     let repaint_handle_pty = Arc::clone(repaint_handle);
 
     // Resolve the shell program (if any) and kick off the asynchronous
-    // shell-history loader for Task 72.15.  Mirrors the resolution logic
+    // shell-history loader for the command-history palette.  Mirrors the resolution logic
     // in `freminal_terminal_emulator::io::pty::resolve_command`:
     // explicit `--command` wins (no shell -> no history), else
     // shell_override, else --shell, else `$SHELL`.  The loader thread
@@ -936,8 +929,8 @@ fn spawn_pty_consumer_thread(
     if let Err(e) = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            // Idle-driven scrollback compaction (Task 118.9b) and compression
-            // (Task 119.5): the only place `compact_idle_scrollback` and
+            // Idle-driven scrollback compaction and compression:
+            // the only place `compact_idle_scrollback` and
             // `compress_idle_scrollback` are ever called from. Fires ~100ms
             // after the last PTY read or GUI input event, compacts a bounded
             // budget of not-yet-compacted scrollback rows, then — once
@@ -958,7 +951,7 @@ fn spawn_pty_consumer_thread(
             // between the original 512-row (~40s) trickle and an aggressive
             // 4096-row budget (~2.5s but a much larger per-tick burst).
             //
-            // TODO(Task 118 follow-up): compaction pacing could be made DYNAMIC
+            // TODO: compaction pacing could be made DYNAMIC
             // (larger budget / shorter interval while a large backlog exists,
             // decaying to a gentle cadence once caught up). That is the right
             // way to get fast catch-up without a large fixed per-tick burst on
@@ -974,7 +967,7 @@ fn spawn_pty_consumer_thread(
             // burst; even on a CPU ~5x slower (~8ms) it stays far under the
             // 100ms interval and leaves the core idle most of the time, so a
             // full-scrollback catch-up never stalls the PTY tick loop or pegs a
-            // core. Kept modest (1024, up from Task 118's 512)
+            // core. Kept modest (1024, up from an initial 512)
             // rather than aggressive (4096) precisely so the per-tick burst
             // stays small on weak hardware; the price is a slower background
             // catch-up on a pathological all-at-once dump, invisible in normal
@@ -995,7 +988,7 @@ fn spawn_pty_consumer_thread(
             // compress backlog without a large burst.
             const IDLE_COMPRESSION_BUDGET: usize = 4096;
 
-            // OSC 9;4 progress staleness cadence (issue #507, phase B2).
+            // OSC 9;4 progress staleness cadence.
             // `TerminalHandler::expire_stale_progress` enforces a 15s
             // timeout, but before this arm existed it was only ever invoked
             // from `build_snapshot()` — i.e. only in response to PTY or GUI
@@ -1010,10 +1003,10 @@ fn spawn_pty_consumer_thread(
             // 9;4 updates) rather than O(duration / poll interval).
             //
             // A fixed-interval poll (originally 1s) was considered and
-            // rejected: this repo treats idle wakes as regressions (Tasks
-            // 68, 121, 123), and a progress-reporting program that updates
-            // less often than the compaction cadence — a large download or
-            // build running for minutes to hours — would otherwise keep the
+            // rejected: this repo treats idle wakes as regressions, and a
+            // progress-reporting program that updates less often than the
+            // compaction cadence — a large download or build running for
+            // minutes to hours — would otherwise keep the
             // PTY thread waking once per second for the entire operation
             // just to re-check a timeout that, absent a new update, cannot
             // trip any sooner than the exact deadline already known.
@@ -1022,14 +1015,14 @@ fn spawn_pty_consumer_thread(
 
             let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
 
-            // Window commands dropped at their class cap (148.C9, 148.RC2); only
+            // Window commands dropped at their class cap; only
             // used to rate-limit the warning, one total per class.
             let dropped_reports = AtomicU64::new(0);
             let dropped_viewport = AtomicU64::new(0);
 
             // Helper closure: drain window commands and command-finished
             // events, publish snapshot, request repaint.
-            // `request_repaint` gates ONLY the GUI wake-up request (issue #459):
+            // `request_repaint` gates ONLY the GUI wake-up request:
             // the window-command / command-event drains and the snapshot store
             // ALWAYS run (they are cheap and must never be stranded), but the
             // `request_repaint_after` call is skipped when the caller knows the
@@ -1058,8 +1051,7 @@ fn spawn_pty_consumer_thread(
                             | WindowManipulation::ReportTitle
                             | WindowManipulation::QueryClipboard(_)
                             // OSC 99 display and control requests drive reverse replies
-                            // back to the originating pane's input_tx (Tasks
-                            // 99.5c/99.6/99.7), so they are classified as Report like
+                            // back to the originating pane's input_tx, so they are classified as Report like
                             // the other PTY-response-producing variants above. Icon
                             // priming (`g=`) is not answered, but it is OSC 99 state
                             // for the notifications it serves, not a viewport change,
@@ -1071,9 +1063,9 @@ fn spawn_pty_consumer_thread(
                             }
                             _ => WindowCommand::Viewport(cmd),
                         };
-                    // Both classes are capped.  Reports (148.C9) because each one
+                    // Both classes are capped.  Reports because each one
                     // makes the GUI answer through `input_tx`; Viewport commands
-                    // (148.RC2) because they can carry large payloads (clipboard
+                    // because they can carry large payloads (clipboard
                     // writes, notifications) and a GUI that is not draining must
                     // not let them pile up.  Admission counts the command; if the
                     // send then fails the pane is gone and the count no longer
@@ -1093,8 +1085,8 @@ fn spawn_pty_consumer_thread(
                 }
 
                 // Drain finished-command events queued by the FTCS OSC 133 D
-                // handler (Task 72.3) and forward them to the GUI tagged with
-                // this pane's recording_pane_id (Task 72.9).
+                // handler and forward them to the GUI tagged with
+                // this pane's recording_pane_id.
                 let events = emulator.internal.handler.drain_command_events();
                 forward_command_events(events, recording_pane_id, &command_event_tx);
 
@@ -1103,7 +1095,7 @@ fn spawn_pty_consumer_thread(
 
                 if request_repaint && let Some((proxy, wid)) = repaint_handle.get() {
                     // 16ms == the 60fps frame budget and the same floor
-                    // enforced everywhere else (issue #439). The previous
+                    // enforced everywhere else. The previous
                     // 8ms value bypassed that floor via the unclamped
                     // `RequestRepaintAfter` proxy path, letting a bursty
                     // PTY stream drive the GUI toward ~120fps. The event
@@ -1138,7 +1130,7 @@ fn spawn_pty_consumer_thread(
                     match event {
                         InputEvent::Resize(w, h, pw, ph) => {
                             // Only ever the last of a run of queued resizes
-                            // (`coalesce_queued_resizes`, Task 120.2), so the
+                            // (`coalesce_queued_resizes`), so the
                             // recording holds the size the emulator applied.
                             if let Some(rec) = recording_swap.load_full() {
                                 rec.emit(EventPayload::PaneResize {
@@ -1154,13 +1146,13 @@ fn spawn_pty_consumer_thread(
                             // a `PtyWrite::Write` to the writer thread and mutates
                             // no emulator state. The visible change (the echo)
                             // arrives later via `pty_read_rx`, which requests its
-                            // own repaint (classified NoRepaint here, #459).
+                            // own repaint (classified NoRepaint here).
                             if let Err(e) = emulator.write_raw_bytes(&bytes) {
                                 error!("Failed to forward key bytes to PTY: {e}");
                             }
                             if let Some(rec) = recording_swap.load_full() {
                                 // Redacted while the pane's echo is off: these
-                                // bytes are a typed password (issue #563).
+                                // bytes are a typed password.
                                 rec.emit(redact_input_for_echo(
                                     EventPayload::PtyInput {
                                         pane_id: recording_pane_id,
@@ -1237,11 +1229,11 @@ fn spawn_pty_consumer_thread(
                             // LATER frame (not a blocking recv), so a repaint MUST
                             // be requested or the search result can stall while the
                             // terminal is otherwise idle and the cursor-blink wake
-                            // is suppressed (classified Repaint, #459 review finding).
+                            // is suppressed (classified Repaint).
                             // The reply carries the buffer extent it was cut
                             // from (row base + row count), so the GUI can store
                             // matches as stable row numbers and detect a stale
-                            // corpus even at scrollback capacity (Task 125.17).
+                            // corpus even at scrollback capacity.
                             let corpus = emulator.internal.handler.search_corpus(0);
                             let _ = search_buffer_tx.send(corpus);
                         }
@@ -1276,7 +1268,7 @@ fn spawn_pty_consumer_thread(
             // trivial re-arm that did nothing.
             let mut work_since_trim = false;
 
-            // An input event the resize-coalescing drain (Task 120.2) had to
+            // An input event the resize-coalescing drain had to
             // take off `input_rx` to find the end of a run of queued
             // resizes. It is processed at the top of the next iteration,
             // before `select!` is consulted again, so it keeps its place in
@@ -1293,7 +1285,7 @@ fn spawn_pty_consumer_thread(
                     crossbeam_channel::select! {
                         recv(pty_read_rx) -> msg => {
                             if let Ok(read) = msg {
-                                // Batch-drain (issue #439): a single visual redraw
+                                // Batch-drain: a single visual redraw
                                 // from a full-screen TUI (btop, htop, vim, less)
                                 // exceeds the 4096-byte reader buffer, so one
                                 // redraw arrives as N `PtyRead` chunks. Feed the
@@ -1367,7 +1359,7 @@ fn spawn_pty_consumer_thread(
                             // idle/battery goal. `continue` at the bottom still
                             // skips the trailing unconditional `post_event` call.
                             //
-                            // Issue #507 phase B2 added a second, independent
+                            // A second, independent
                             // reason for this arm to fire: OSC 9;4 progress
                             // staleness expiry (below), which — unlike
                             // compaction/compression — CAN change what the GUI
@@ -1377,7 +1369,7 @@ fn spawn_pty_consumer_thread(
                             // so a tick that finds nothing stale stays silent.
                             //
                             // Compact first, compress second: a row must be
-                            // Task-118-compacted before it is a Task-119
+                            // compacted before it is a
                             // compression candidate, so only spend the
                             // compression budget once this tick's compaction
                             // pass reports nothing left to compact — otherwise
@@ -1391,7 +1383,7 @@ fn spawn_pty_consumer_thread(
                                 0
                             };
 
-                            // OSC 9;4 staleness (issue #507): `expire_stale_progress`
+                            // OSC 9;4 staleness: `expire_stale_progress`
                             // (15s timeout) previously only ran from
                             // `build_snapshot()`, i.e. only in response to real
                             // PTY/GUI activity — so a program that died mid-progress
@@ -1451,7 +1443,7 @@ fn spawn_pty_consumer_thread(
                                 // re-checked, let alone expire. Once progress is
                                 // inactive (here or already, e.g. a normal
                                 // `s=0` clear), fall back to `never()` exactly
-                                // as before phase B2.
+                                // as before.
                                 idle_deadline = progress_deadline.map_or_else(
                                     crossbeam_channel::never,
                                     crossbeam_channel::after,
@@ -1478,7 +1470,7 @@ fn spawn_pty_consumer_thread(
                 };
 
                 if let Some(msg) = input_msg {
-                    // Task 120.2: a resize superseded by a LATER queued resize
+                    // A resize superseded by a LATER queued resize
                     // is never applied — only the last of a run reaches the
                     // emulator, the child (`TIOCSWINSZ`) and the recording.
                     // A non-resize event that ends the run is carried to the
@@ -1502,7 +1494,7 @@ fn spawn_pty_consumer_thread(
                             // byte written to the child fd). Still fall through
                             // to `post_event` so any window-command/command-event
                             // drains and the snapshot store run — but tell it NOT
-                            // to request a GUI wake (#459). `request_repaint =
+                            // to request a GUI wake. `request_repaint =
                             // false` below.
                             idle_deadline =
                                 crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
@@ -1559,7 +1551,7 @@ mod tests {
 
     #[test]
     fn drain_pty_reads_processes_first_then_queue_in_order_exactly_once() {
-        // Issue #439: the consumer must fold the blocking-recv'd chunk plus
+        // The consumer must fold the blocking-recv'd chunk plus
         // every already-queued chunk into ONE batch, in FIFO order, each
         // exactly once, before the single trailing `post_event`. Collect the
         // read_amounts to prove order + exactly-once without touching a parser.
@@ -1725,7 +1717,7 @@ mod tests {
 
     #[test]
     fn apply_initial_state_seeds_theme_auto_detect_urls_cursor_style_and_host_capabilities() {
-        // Regression test for issue #406 (and the pre-existing theme /
+        // Regression test for cursor-style seeding (and the pre-existing theme /
         // auto_detect_urls seeding this PR's cursor_style change follows the
         // shape of): `spawn_pty_tab` cannot be unit-tested directly (it
         // spawns a real child process), but the seeding logic it delegates
@@ -1805,7 +1797,7 @@ mod tests {
         assert_eq!(handler.host_capabilities(), seeded_host_capabilities);
     }
 
-    /// Table test locking the #459 repaint classification for EVERY
+    /// Table test locking the repaint classification for EVERY
     /// `InputEvent` variant. `input_event_needs_repaint` is the single source
     /// of truth the PTY consumer thread uses to decide whether to wake the GUI
     /// after handling an input; a regression here (e.g. reclassifying
@@ -1868,7 +1860,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Task 120.2: resize coalescing.
+    // Resize coalescing.
     // ---------------------------------------------------------------
 
     /// `(cols, rows)` of a `Resize`, or `None` for any other message.
@@ -2147,7 +2139,7 @@ mod tests {
         assert_eq!(resizes, vec![(7, 72, 22)]);
     }
 
-    /// Issue #563: `PtyInput` is recorded verbatim while echoing and with its
+    /// `PtyInput` is recorded verbatim while echoing and with its
     /// content blanked while the pane's echo is off; the child still receives
     /// the real bytes in both cases.
     #[test]
@@ -2501,7 +2493,7 @@ mod tests {
     }
 
     /// With no GUI draining `window_cmd_rx`, a flood of report requests leaves
-    /// exactly `MAX_OUTSTANDING_REPORTS` Report commands queued (148.C9).
+    /// exactly `MAX_OUTSTANDING_REPORTS` Report commands queued.
     /// A few Viewport commands in the same stream are all admitted.
     #[test]
     fn consumer_thread_caps_outstanding_reports_while_the_gui_is_not_draining() {
@@ -2524,7 +2516,7 @@ mod tests {
 
     /// With no GUI draining `window_cmd_rx`, a flood of OSC 52 clipboard writes
     /// (Viewport class, large payloads) leaves exactly
-    /// `MAX_OUTSTANDING_VIEWPORT_COMMANDS` Viewport commands queued (148.RC2).
+    /// `MAX_OUTSTANDING_VIEWPORT_COMMANDS` Viewport commands queued.
     #[test]
     fn consumer_thread_caps_outstanding_viewport_commands_while_the_gui_is_not_draining() {
         const FLOOD: usize = 5000;

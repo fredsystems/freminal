@@ -3,8 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! A glyph wider than the line must not make the wrap loop spin (Task 148.5,
-//! issue #558).
+//! A glyph wider than the line must not make the wrap loop spin.
 //!
 //! `Buffer::insert_text` wraps when a glyph does not fit on the current row.
 //! A double-width glyph that is wider than the span a *fresh* row offers can
@@ -260,7 +259,7 @@ fn wide_glyph_fitting_exactly_in_a_two_column_terminal_is_written() {
     assert_eq!(glyph_at(&buf, 1, 0), wide());
 }
 
-// ── Shape 4: a discard must not leave a wrap behind (review R7) ─────────
+// ── Shape 4: a discard must not leave a wrap behind ─────────
 //
 // Placeable text fills the row, then only unplaceable glyphs remain. The wrap
 // between them used to happen anyway -- pushing or scrolling a row -- before
@@ -349,7 +348,7 @@ fn double_width_span_one_bottom_row_discard_after_full_row_does_not_wrap() {
     assert_discard_after_full_row_leaves_no_wrap(make(), make());
 }
 
-// ── Shape 5: the landing row decides the span (148.C8) ──────────────────
+// ── Shape 5: the landing row decides the span ──────────────────
 //
 // A wide glyph that is a leftover on a full row. A normal row would hold it,
 // but the row the wrap lands on is DECDWL (span `3 / 2 == 1` on a 3-column
@@ -481,7 +480,7 @@ fn wrap_pushing_a_new_row_lands_on_a_single_width_row() {
     assert_eq!(glyph_at(&buf, last, 0), wide());
 }
 
-// ── Shape 6: PRE-WRAP checks the landing row too (148.C8 follow-up) ─────
+// ── Shape 6: PRE-WRAP checks the landing row too ─────
 //
 // The cursor is already in pending-wrap when the text arrives, so the wrap
 // happens before anything is written, not after a row filled. The same rule

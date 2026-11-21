@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic tests for summarize.py.
 
-Run with: python3 -m unittest assets/profiling/task125/test_summarize.py
+Run with: python3 -m unittest assets/profiling/parity/test_summarize.py
 (or `python3 test_summarize.py` from this directory).
 """
 

@@ -3,11 +3,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! GUI-side notification router (Task 76).
+//! GUI-side notification router.
 //!
 //! Consumes notification requests originating from OSC 9 / OSC 777
-//! sequences (forwarded via `WindowManipulation::Notification`, Task 76.3)
-//! and from OSC 133 `D` command-finished events (Task 72.9), then applies
+//! sequences (forwarded via `WindowManipulation::Notification`)
+//! and from OSC 133 `D` command-finished events, then applies
 //! the per-category routing policy from the `[notifications]` config:
 //!
 //! - **Toast leg:** push an entry onto the in-app [`ToastStack`].
@@ -101,7 +101,7 @@ impl NotificationRequest {
     ///
     /// The text is raw because what to do about markup depends on the
     /// platform: the Linux/BSD service escapes it as the daemon's capabilities
-    /// call for (issue #560), while macOS and Windows interpret none, so
+    /// call for, while macOS and Windows interpret none, so
     /// escaping there would only show a stray zero-width character.
     ///
     /// Error-category notifications use `Critical` so they persist and pop as
@@ -156,7 +156,7 @@ pub(super) fn command_finished_request(
         return None;
     }
 
-    // 106.3: a block that finished without ever executing a command (no
+    // A block that finished without ever executing a command (no
     // `OSC 133 C` — e.g. Ctrl-C on an idle prompt) must not notify.  No
     // command ran, so there is nothing to report.  This is explicit rather
     // than relying on `duration()` returning `None` for the same case, so a
@@ -417,11 +417,11 @@ pub(super) fn send_reply_weak(reply_tx: &Weak<Sender<InputEvent>>, reply: GuiRep
 }
 
 /// An OSC 99 app→terminal control sequence collected from
-/// `WindowManipulation::Osc99Control` during `handle_window_manipulation`
-/// (Task 99.5c). Paired with a `Weak` handle to the pane's reply sender in
+/// `WindowManipulation::Osc99Control` during `handle_window_manipulation`.
+/// Paired with a `Weak` handle to the pane's reply sender in
 /// `app_impl::update()`'s post-loop routing, where it is answered
-/// (Task 99.6: close/alive). `p=?` never reaches the GUI: the PTY thread
-/// answers it itself (Task 130.5).
+/// (close/alive). `p=?` never reaches the GUI: the PTY thread
+/// answers it itself.
 #[derive(Debug, Clone)]
 pub(super) struct Osc99Control {
     /// Notification id (`i=`) the control refers to. Always present: id-less
@@ -531,15 +531,15 @@ impl NotificationRouter {
     ///
     /// Does nothing when the notification system is disabled
     /// ([`NotificationsConfig::enabled`] is `false`), when the OSC 99
-    /// kill-switch is off ([`NotificationsConfig::osc_99`] is `false`,
-    /// Task 99.8), or when the occasion gate says the notification should
+    /// kill-switch is off ([`NotificationsConfig::osc_99`] is `false`),
+    /// or when the occasion gate says the notification should
     /// not be displayed right now (in which case it is also not recorded in
     /// `registry` — an occasion-suppressed notification never happened as
     /// far as later update/close tracking is concerned), or when the user's
     /// `osc99_filters` (held by `registry`) drop it (likewise not recorded,
     /// and no reply is sent). The toast and
     /// system legs are additionally gated per-leg by
-    /// [`NotificationsConfig::routing_osc99`] (3.3/3.4), mirroring
+    /// [`NotificationsConfig::routing_osc99`], mirroring
     /// [`Self::route`]; a request routed [`NotificationRouting::Disabled`]
     /// is not recorded either, since neither leg displayed it.
     ///
@@ -575,7 +575,7 @@ impl NotificationRouter {
             return Vec::new();
         }
 
-        // OSC 99 kill-switch (Task 99.8): even with the master switch on, users can
+        // OSC 99 kill-switch: even with the master switch on, users can
         // disable the kitty stateful protocol specifically.
         if !config.osc_99 {
             return Vec::new();
@@ -613,7 +613,7 @@ impl NotificationRouter {
             return Vec::new();
         }
 
-        // Toast/system legs honour `routing_osc99` (3.3/3.4), mirroring
+        // Toast/system legs honour `routing_osc99`, mirroring
         // `route`'s focus-aware gating. One decision picks the legs, so the
         // toast leg, the system leg, and the registry below all agree. The
         // legs are shown by the effects `register` returns below. Only
@@ -1165,7 +1165,7 @@ mod tests {
         assert_eq!(toasts.len(), 0);
     }
 
-    // ── Per-source enable-toggle gate (issue #433, subtask 3.2) ──────────
+    // ── Per-source enable-toggle gate ──────────
 
     /// Build an OSC-777-sourced request (used to test the `osc_777` toggle
     /// independently of `osc_req`'s OSC 9 source).
@@ -1301,7 +1301,7 @@ mod tests {
         assert_eq!(toasts.len(), 1);
     }
 
-    // ── Freminal-derived toast gate (issue #433, subtask C) ──────────────
+    // ── Freminal-derived toast gate ──────────────
 
     #[test]
     fn freminal_toast_routes_when_enabled() {
@@ -1453,7 +1453,7 @@ mod tests {
 
     #[test]
     fn command_finished_request_unexecuted_ctrl_c_block_is_none() {
-        // Regression for 106.3: Ctrl-C on an idle prompt produces a finished
+        // Regression: Ctrl-C on an idle prompt produces a finished
         // block (A -> D) that never executed a command (no `OSC 133 C`, so
         // executed_at / output_start_row are None).  Even at a zero threshold
         // — which would let `duration()` of an executed instant command
@@ -1625,7 +1625,7 @@ mod tests {
         assert_eq!(req.kind, NotificationKind::Error);
     }
 
-    // ── OSC 99 (Task 99.5a) ──────────────────────────────────────────
+    // ── OSC 99 ──────────────────────────────────────────
 
     fn default_n99() -> Notification99Data {
         Notification99Data {
@@ -1706,7 +1706,7 @@ mod tests {
 
     #[test]
     fn route_osc99_osc99_kill_switch_disabled_does_nothing() {
-        // Task 99.8: `enabled = true` but `osc_99 = false` must still
+        // `enabled = true` but `osc_99 = false` must still
         // suppress OSC 99 notifications specifically.
         let config = NotificationsConfig {
             enabled: true,
@@ -2297,7 +2297,7 @@ mod tests {
 
     #[test]
     fn route_osc99_routing_disabled_pushes_no_toast_and_registers_nothing() {
-        // 3.3/3.4: `routing_osc99 = Disabled` must suppress both legs, and
+        // `routing_osc99 = Disabled` must suppress both legs, and
         // since nothing was displayed, the notification must not be tracked
         // in the registry either.
         let config = NotificationsConfig {
@@ -2457,7 +2457,7 @@ mod tests {
 
     #[test]
     fn unfocused_system_when_unfocused_falls_back_to_the_toast_with_the_bus_down() {
-        // G8: the system leg was the only one chosen, and nothing can show it.
+        // The system leg was the only one chosen, and nothing can show it.
         assert_eq!(
             resolve_osc99_legs(
                 NotificationRouting::SystemWhenUnfocused,
@@ -2614,7 +2614,7 @@ mod tests {
 
     #[test]
     fn a_close_then_a_new_display_of_the_same_id_in_one_frame_leaves_the_new_one_live() {
-        // G1: the close must act on the instance that existed when it was
+        // The close must act on the instance that existed when it was
         // sent, not on the one displayed after it.
         let config = enabled_config(0.0);
         let mut icon_cache = Osc99IconCache::default();
@@ -2893,7 +2893,7 @@ mod tests {
         assert_eq!(toasts.len(), 1);
     }
 
-    // ── Weak reply handle (Task 130.8) ───────────────────────────────
+    // ── Weak reply handle ───────────────────────────────
 
     fn reply_channel() -> (
         std::sync::Arc<Sender<InputEvent>>,

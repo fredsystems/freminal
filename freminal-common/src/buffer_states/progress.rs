@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! OSC 9;4 (ConEmu-style) progress-state types (issue #507).
+//! OSC 9;4 (ConEmu-style) progress-state types.
 //!
 //! `OSC 9 ; 4 ; s [ ; v ] ST` reports a program's progress (e.g. a build or
 //! copy) so the terminal can surface it outside the scrollback — typically

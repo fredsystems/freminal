@@ -1,5 +1,5 @@
 #version 330 core
-// Toast pass fragment shader (issue #433).
+// Toast pass fragment shader.
 //
 // Draws one rounded-rect "pill" per primitive using a signed-distance-field
 // (SDF), layered bottom-to-top as: drop shadow -> gradient fill (+ optional
@@ -9,9 +9,9 @@
 // this renderer (freminal never touches GL blend state — it inherits
 // egui_glow's ONE / ONE_MINUS_SRC_ALPHA blend func).
 //
-// Issue #433 visual redesign: the outer glow was removed (the maintainer
-// found it too strong and visually disconnecting). Separation from the
-// terminal behind the pill now comes from a crisp neutral border ring
+// There is deliberately no outer glow (it was too strong and visually
+// disconnecting). Separation from the
+// terminal behind the pill comes from a crisp neutral border ring
 // (theme window_stroke) plus a softened drop shadow, over a solid, opaque,
 // neutral fill.
 in vec2 v_pos;
@@ -108,6 +108,6 @@ void main() {
     // emits premultiplied color), so the fade scales BOTH channels by the
     // same `v_opacity` — scaling `out_rgb` by the faded alpha instead would
     // double-multiply and darken every translucent pixel (shadow, AA edges)
-    // and muddy the fade. See issue #433 adversarial-review finding 1.
+    // and muddy the fade.
     frag_color = vec4(out_rgb * v_opacity, out_a * v_opacity);
 }

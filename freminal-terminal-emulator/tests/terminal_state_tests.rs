@@ -125,7 +125,7 @@ fn test_send_focus_event_disabled() {
     );
 }
 
-/// Task 147.4: the focus reports follow S8C1T, and S7C1T restores `ESC [`.
+/// The focus reports follow S8C1T, and S7C1T restores `ESC [`.
 #[test]
 fn test_send_focus_event_follows_s8c1t() {
     let (mut state, rx) = make_state();
@@ -150,7 +150,7 @@ fn test_send_focus_event_follows_s8c1t() {
     }
 }
 
-/// Task 147.4: a key written after `ESC SP G` uses the 8-bit introducer, and
+/// A key written after `ESC SP G` uses the 8-bit introducer, and
 /// DECCKM selects SS3 (`0x8F`) over CSI (`0x9B`).
 #[test]
 fn test_write_cursor_keys_follow_s8c1t() {
@@ -708,7 +708,7 @@ fn test_alternate_scroll_decrqm_after_set_is_enabled() {
 // ─── Hilite Mouse Tracking (?1001) — recognised, not implemented ────────────
 
 /// `CSI ? 1001 h` (DECSET) is a typed no-op: it must not become a mouse
-/// tracking level (Task 147.21).
+/// tracking level.
 #[test]
 fn test_hilite_mouse_tracking_set_does_not_change_tracking() {
     use freminal_common::buffer_states::modes::mouse::MouseTrack;
@@ -777,7 +777,7 @@ fn test_hilite_mouse_tracking_decrqm_after_set_is_not_recognised() {
     );
 }
 
-// ─── event-order output processing (Task 130.1) ─────────────────────────────
+// ─── event-order output processing ─────────────────────────────────────────
 
 /// Collect every `PtyWrite::Write` payload currently queued on `rx`.
 fn collect_writes(rx: &crossbeam_channel::Receiver<PtyWrite>) -> Vec<Vec<u8>> {
@@ -858,10 +858,10 @@ fn s8c1t_after_ris_in_one_buffer_leaves_parser_eight_bit() {
     assert_eq!(writes[0][0], 0x9B, "DA1 reply must use 8-bit CSI");
 }
 
-// ─── parser mode changes within one read (Task 147.2) ────────────────────────
+// ─── parser mode changes within one read ─────────────────────────────────────
 
 /// `ESC SP G` then `0x9B 6 n` in one read: the 0x9B is an 8-bit CSI, so the
-/// CPR request is answered (with an 8-bit CSI reply).  Before 147.2 the parser
+/// CPR request is answered (with an 8-bit CSI reply).  Previously the parser
 /// switched mode only after the whole read was parsed, so the 0x9B was text and
 /// no reply was sent.
 #[test]
@@ -878,7 +878,7 @@ fn s8c1t_and_eight_bit_csi_in_one_read_get_a_reply() {
 }
 
 /// `ESC SP F` within one read: a following `0x9B` is text, so no reply.
-/// Before 147.2 the parser stayed 8-bit for the rest of the read and answered.
+/// Previously the parser stayed 8-bit for the rest of the read and answered.
 #[test]
 fn s7c1t_then_c1_csi_in_one_read_is_not_a_csi() {
     let (mut state, rx) = make_state();
@@ -894,7 +894,7 @@ fn s7c1t_then_c1_csi_in_one_read_is_not_a_csi() {
 
 /// With the terminal already in 8-bit mode, RIS then `0x9B 6 n` in one read:
 /// RIS returns the parser to 7-bit at its position, so the 0x9B is text and
-/// nothing is replied.  Before 147.2 the parser stayed 8-bit for the whole read
+/// nothing is replied.  Previously the parser stayed 8-bit for the whole read
 /// and the CSI was executed.
 #[test]
 fn ris_then_c1_csi_in_one_read_is_not_a_csi() {
@@ -909,8 +909,8 @@ fn ris_then_c1_csi_in_one_read_is_not_a_csi() {
     assert!(writes.is_empty(), "0x9B must be text, got {writes:?}");
 }
 
-/// `CSI ? 2 l` then VT52 `ESC A` in one read: the cursor moves up.  Before
-/// 147.2 the `ESC A` was parsed under ANSI rules and ignored.
+/// `CSI ? 2 l` then VT52 `ESC A` in one read: the cursor moves up.  Previously
+/// the `ESC A` was parsed under ANSI rules and ignored.
 #[test]
 fn decanm_reset_then_vt52_cursor_up_in_one_read_moves_the_cursor() {
     let (mut state, _rx) = make_state();
@@ -924,7 +924,7 @@ fn decanm_reset_then_vt52_cursor_up_in_one_read_moves_the_cursor() {
     assert_eq!(after.x, before.x);
 }
 
-// ─── RIS state reset: what survives (Task 131.8b) ───────────────────────────
+// ─── RIS state reset: what survives ───────────────────────────────────
 
 /// The foreground colour of the first visible cell holding `needle`.
 fn foreground_of(state: &mut TerminalState, needle: TChar) -> TerminalColor {

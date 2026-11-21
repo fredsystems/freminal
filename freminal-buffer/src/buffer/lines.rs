@@ -261,7 +261,7 @@ impl Buffer {
                     // and `CursorDown` clamps to `max_row` when below the
                     // margin (`max = (cur_row > bot_marg ? max_row :
                     // bot_marg)`). Pushing a row here scrolled the whole
-                    // screen, region included, into scrollback (148.C3).
+                    // screen, region included, into scrollback.
                 } else {
                     // Outside DECSTBM, above the last row -> move down one
                     // row (`CursorDown`) with no scrolling.

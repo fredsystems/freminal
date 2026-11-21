@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Task 123, subtask 123.6b — verify the `Gl` facade adds no per-call branch.
+# Verify the `Gl` facade adds no per-call branch.
 #
 # Builds `freminal` with the `gl-codegen-probe` feature, which exposes four
 # `#[inline(never)] #[no_mangle]` wrappers that differ only in whether they
@@ -19,8 +19,9 @@
 # the definition of a flaky test.
 #
 # So this is a reproducible manual/CI-dispatch check whose result is
-# recorded in `PLAN_123_GL_MEASUREMENT_HARNESS.md` alongside the toolchain
-# that produced it, rather than a gate that would be fragile by nature.
+# recorded in `Documents/DESIGN_DECISIONS.md` ("GL Call Boundary and
+# Measurement Harnesses" / "Zero cost is verified by reading
+# assembly, not by benchmarking") alongside the toolchain that produced it, rather than a gate that would be fragile by nature.
 
 set -euo pipefail
 

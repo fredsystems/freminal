@@ -182,7 +182,7 @@ fn lf_outside_region_below_on_last_row_in_primary_does_not_scroll() {
 
     // LF below the bottom margin on the last row is cursor down, which
     // clamps at the last row: xterm `xtermIndex` / `CursorDown` (cursor.c).
-    // Nothing scrolls and no row is pushed into scrollback (Task 148.C3).
+    // Nothing scrolls and no row is pushed into scrollback.
     buf.handle_lf();
 
     assert_eq!(buf.rows().len(), rows_before);
@@ -290,7 +290,7 @@ fn scroll_region_operations_blocked_when_scrolled_back() {
     // Scroll back to view history
     let _scroll_offset = buf.scroll_back(0, 3);
     // We're now scrolled back (viewing history)
-    // NOTE: Since Task 4, insert_lines/delete_lines no longer check the
+    // NOTE: insert_lines/delete_lines no longer check the
     // scroll_offset — that guard was removed because scroll_offset now lives
     // in ViewState, not in Buffer.  The test is updated to just verify the
     // operations don't panic.

@@ -105,8 +105,8 @@ pub fn split_params_into_semicolon_delimited_usize(
 
 /// Split a parameter string on `:` and parse each piece as a `usize`.
 ///
-/// Not yet called from production code: its intended consumer is Task 103
-/// (kitty multiple cursors), whose `CSI > ... SP q` sequence carries colon
+/// Not yet called from production code: its intended consumer is kitty
+/// multiple cursors, whose `CSI > ... SP q` sequence carries colon
 /// sub-parameters.
 ///
 /// # Errors
@@ -1723,7 +1723,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // VT52 mode parser tests (subtask 20.8)
+    // VT52 mode parser tests
     // -------------------------------------------------------------------------
 
     /// Helper: create a parser already in VT52 mode.
@@ -2434,11 +2434,11 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Parser mode changes take effect within the same push() (Task 147.2)
+    // Parser mode changes take effect within the same push()
     // -------------------------------------------------------------------------
 
     /// `ESC SP G` then `0x9B 6 n` in one `push()`: the 0x9B is an 8-bit CSI.
-    /// Before 147.2 the parser switched mode only when `TerminalState` applied
+    /// Previously the parser switched mode only when `TerminalState` applied
     /// the output, so the 0x9B was parsed as text.
     #[test]
     fn s8c1t_applies_to_the_rest_of_the_same_push() {
@@ -2473,7 +2473,7 @@ mod tests {
 
     /// With the parser already in 8-bit mode, RIS then `0x9B 6 n` in one
     /// `push()`: RIS returns the parser to 7-bit at its position, so the 0x9B
-    /// is text.  Before 147.2 the parser stayed 8-bit for the whole read and
+    /// is text.  Previously the parser stayed 8-bit for the whole read and
     /// executed the CSI.
     #[test]
     fn ris_resets_parser_modes_within_the_same_push() {
@@ -3177,7 +3177,7 @@ mod tests {
         assert!(std::mem::size_of::<ApcParser>() < MAX_BYTES);
     }
 
-    // ── CSI buffer reuse (147.15) ───────────────────────────────────────────
+    // ── CSI buffer reuse ────────────────────────────────────────────────────
 
     /// Assert the parser holds no stale CSI bytes and a bounded spare capacity.
     fn assert_csi_buffers_clean(p: &FreminalAnsiParser) {
@@ -3349,7 +3349,7 @@ mod tests {
         assert_eq!(p.csi_buffers.max_capacity(), grown);
     }
 
-    // ── CSI byte cap (147 PR review R21) ────────────────────────────────────
+    // ── CSI byte cap ────────────────────────────────────────────────────────
 
     use crate::ansi_components::csi::MAX_CSI_BYTES;
 
@@ -3460,7 +3460,7 @@ mod tests {
     #[test]
     fn c1_st_after_an_ill_formed_utf8_prefix_ends_the_string() {
         // `E0` allows only `A0`-`BF` next, so this `9C` cannot continue it: it
-        // is ST, and the text after it is ground-state data (review R26).
+        // is ST, and the text after it is ground-state data.
         let mut p = FreminalAnsiParser::new();
         p.s8c1t_mode = S8c1t::EightBit;
         let out = p.push(b"\x9d0;\xe0\x9cX");
@@ -3471,7 +3471,7 @@ mod tests {
     #[test]
     fn a_new_string_does_not_inherit_a_character_from_a_byte_it_never_took() {
         // A bare ESC ends the DCS; `C5` is then rejected by the escape parser.
-        // The next OSC must still end at a standalone `9C` (review R27).
+        // The next OSC must still end at a standalone `9C`.
         let mut p = FreminalAnsiParser::new();
         p.s8c1t_mode = S8c1t::EightBit;
         p.push(b"\x90abc\x1b\xc5");
@@ -3482,7 +3482,7 @@ mod tests {
 
     #[test]
     fn under_s8c1t_a_utf8_continuation_in_text_is_not_a_c1_control() {
-        // `Ŏ` is `C5 8E`: the `8E` is text, not SS2 (review R32).
+        // `Ŏ` is `C5 8E`: the `8E` is text, not SS2.
         for split in [None, Some(1)] {
             let mut p = FreminalAnsiParser::new();
             p.s8c1t_mode = S8c1t::EightBit;
@@ -3543,7 +3543,6 @@ mod tests {
 
     // -------------------------------------------------------------------------
     // C1 ST, CAN/SUB and ESC inside strings and escape intermediates
-    // (Task 147 adversarial review A1-A4)
     // -------------------------------------------------------------------------
 
     fn eight_bit_parser() -> FreminalAnsiParser {

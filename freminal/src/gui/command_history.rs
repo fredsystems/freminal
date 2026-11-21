@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Quick Command History Palette (Task 72.15).
+//! Quick Command History Palette.
 //!
 //! A modal overlay anchored inside the focused pane that presents a
 //! filter-and-select list over the union of:
@@ -12,7 +12,7 @@
 //! - The **shell-history seed** (bash / zsh / fish) loaded once per pane
 //!   spawn by [`crate::gui::shell_history`].  Capped at
 //!   [`crate::gui::shell_history::HISTORY_SEED_CAP`] entries.
-//! - The **live recent commands** captured via OSC 133 in Task 72.9
+//! - The **live recent commands** captured via OSC 133
 //!   (`Pane::recent_commands`), together with the GUI-side text cache
 //!   (`Pane::command_texts`) populated at finish time.
 //!
@@ -25,9 +25,9 @@
 //!
 //! Case-insensitive substring (`str::contains` after ASCII-lowercase
 //! folding).  A previous design discussed using `nucleo-matcher` but
-//! that crate is not in `Cargo.lock` and the handoff specifically
-//! forbids adding a new dependency for this commit.  Polish (and any
-//! upgrade to fuzzy matching) lands in 72.15 commit 3.
+//! that crate is not in `Cargo.lock` and adding a new dependency
+//! was ruled out.  Any upgrade to fuzzy matching is
+//! future work.
 //!
 //! ## Live-entry text extraction
 //!
@@ -36,7 +36,7 @@
 //! rows that may have scrolled into scrollback, so the GUI cannot
 //! synchronously read arbitrary command text on demand.
 //!
-//! The chosen approach (Option A in the handoff): at command-finish
+//! The chosen approach: at command-finish
 //! time the GUI extracts the command text from the **then-current
 //! snapshot** -- the block just finished, so its rows are still in the
 //! visible window with overwhelming probability -- and caches the
@@ -235,7 +235,7 @@ fn append_row_text(row: &[TChar], out: &mut String) {
 /// Merge the live recent commands with the shell-history seed into a
 /// single de-duplicated, **most-recent-first** entry list.
 ///
-/// **Ordering (106.5):** the most recently run command appears first.
+/// **Ordering:** the most recently run command appears first.
 /// Live OSC 133 entries are emitted newest-first (this session's
 /// commands), followed by the shell-history seed newest-first.  This
 /// matters for more than aesthetics: the rendered list is capped at
@@ -342,7 +342,7 @@ pub fn filter_entries(entries: &[PaletteEntry], query: &str) -> Vec<PaletteEntry
 ///
 /// **No trailing newline:** the user reviews the line and presses Enter
 /// themselves.  Matches the wezterm / iTerm2 Recall convention and is a
-/// hard locked-in design decision (see the handoff).
+/// hard locked-in design decision.
 ///
 /// Returns `true` when the send succeeded.  Logs on failure; the caller
 /// closes the modal regardless of outcome so the user is never trapped
@@ -734,7 +734,7 @@ mod tests {
     #[test]
     fn merge_entries_seed_only_is_newest_first() {
         // Seed is stored oldest-first; the palette presents it
-        // newest-first (106.5).
+        // newest-first.
         let seed = vec!["ls".to_owned(), "pwd".to_owned(), "echo hi".to_owned()];
         let recent = VecDeque::new();
         let texts = HashMap::new();
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn merge_entries_dedups_non_consecutive_duplicates_in_seed() {
         // Old behaviour only collapsed *consecutive* duplicates; the
-        // 106.5 global dedup also collapses an entry repeated later in
+        // The global dedup also collapses an entry repeated later in
         // history, keeping the most-recent (first-seen, newest-first)
         // occurrence.
         let seed = vec!["ls".to_owned(), "pwd".to_owned(), "ls".to_owned()];
@@ -819,7 +819,7 @@ mod tests {
 
     #[test]
     fn merge_entries_live_newest_first_then_seed_newest_first() {
-        // 106.5: live commands (this session) come first, newest-first;
+        // Live commands (this session) come first, newest-first;
         // then the seed, newest-first.
         let seed = vec!["ls".to_owned()];
         let mut recent = VecDeque::new();
@@ -868,7 +868,7 @@ mod tests {
 
     #[test]
     fn merge_entries_recent_command_is_visible_within_cap_regression() {
-        // 106.5 regression guard: a command typed this session must be
+        // Regression guard: a command typed this session must be
         // visible in the *unfiltered* list even when the seed is larger
         // than MAX_VISIBLE_ENTRIES. Previously the oldest-first ordering
         // pushed live entries past the cap so they only surfaced when

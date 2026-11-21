@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! The alternate screen keeps exactly `height` rows when text auto-wraps below
-//! the bottom margin on its last row (Task 148.7, issue #568).
+//! the bottom margin on its last row.
 //!
 //! A DECSTBM region that stops above the last screen row leaves the rows under
 //! it outside the region. Wrapping on the last of them used to append a row to

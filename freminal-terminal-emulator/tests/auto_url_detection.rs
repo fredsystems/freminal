@@ -5,9 +5,9 @@
 
 //! Integration tests for auto URL detection in terminal output.
 //!
-//! Covers Task 71.7b: plain URLs emitted by programs that do not use OSC 8
-//! hyperlinks (cat, git log, lazygit, etc.) must be surfaced in the
-//! `FormatTag.url` field so the renderer can make them clickable.
+//! Plain URLs emitted by programs that do not use OSC 8 hyperlinks (cat, git
+//! log, lazygit, etc.) must be surfaced in the `FormatTag.url` field so the
+//! renderer can make them clickable.
 //!
 //! Detection runs inside the per-row flatten cache pass in
 //! `freminal-buffer::buffer::flatten`.  Detected URLs are spliced into the

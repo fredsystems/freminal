@@ -5,17 +5,16 @@
 
 //! The behavioural half of the `gl_facade` verification.
 //!
-//! `facade.rs`'s `tests::every_surface_method_exists_on_the_facade` (subtask
-//! 123.2) proves the facade is *complete* with respect to
+//! `facade.rs`'s `tests::every_surface_method_exists_on_the_facade` proves the facade is *complete* with respect to
 //! [`super::surface::GL_CALL_SURFACE`] — every entry has a method — but
 //! deliberately stops short of proving that each method's `Recording` arm
 //! behaves correctly: records itself under the right name, fabricates
 //! usable handles, and derives the right metrics. That is this module's
-//! job (subtask 123.3): drive the facade end to end against
+//! job: drive the facade end to end against
 //! [`super::recording::RecordingState`] and assert on what actually came
 //! out the other side, so the `Recording` arm is a trustworthy stand-in
-//! for a real driver for the rest of Task 123 (123.7's headless driver and
-//! 123.8's workload assertions both depend on it).
+//! for a real driver: the headless driver and the workload assertions both
+//! depend on it.
 
 // Clippy's allow-*-in-tests only recognises a bare `#[cfg(test)]`, not this module's `cfg(all(test, ...))` gate.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -30,7 +29,7 @@ use super::surface::GL_CALL_SURFACE;
 /// the surface's own order, against a recording [`Gl`], then check the
 /// resulting log against the surface itself.
 ///
-/// This is the behavioural counterpart the 123.2 structural test
+/// This is the behavioural counterpart the structural test
 /// explicitly defers to: it is the one test that catches a method
 /// recording itself under a *neighbour's* name — a copy-paste error in
 /// `facade.rs` that the structural check (which only greps for a method
@@ -87,7 +86,7 @@ struct SetupHandles {
     buffer: glow::Buffer,
     framebuffer: glow::Framebuffer,
     program: glow::Program,
-    /// Task 125.8: a pre-fabricated query handle for the
+    /// A pre-fabricated query handle for the
     /// `get_query_parameter_u32` / `get_query_parameter_u64` /
     /// `query_counter` batches below, which (like `attach_shader` needing
     /// `program`/`shader`) sit earlier in `GL_CALL_SURFACE`'s alphabetical
@@ -140,7 +139,7 @@ unsafe fn call_active_texture_through_compile_shader(gl: &Gl<'_>, handles: &Setu
 }
 
 /// `GL_CALL_SURFACE`, `create_buffer` through `delete_vertex_array` (14
-/// calls, Task 125.8 added `create_query`/`delete_query`) — a
+/// calls, including `create_query`/`delete_query`) — a
 /// self-contained second lifecycle, independent of [`SetupHandles`], so it
 /// needs no handles passed in.
 unsafe fn call_create_and_delete_lifecycle(gl: &Gl<'_>) {
@@ -168,8 +167,8 @@ unsafe fn call_create_and_delete_lifecycle(gl: &Gl<'_>) {
     }
 }
 
-/// `GL_CALL_SURFACE`, `disable` through `link_program` (15 calls, Task
-/// 125.8 added `get_parameter_string`, `get_query_parameter_u32`, and
+/// `GL_CALL_SURFACE`, `disable` through `link_program` (15 calls, including
+/// `get_parameter_string`, `get_query_parameter_u32`, and
 /// `get_query_parameter_u64`).
 ///
 /// Returns the fabricated uniform location so the next batch's
@@ -207,7 +206,7 @@ unsafe fn call_disable_through_link_program(
 }
 
 /// `GL_CALL_SURFACE`, `pixel_store_i32` through `vertex_attrib_pointer_f32`
-/// (14 calls, Task 125.8 added `query_counter` and `supported_extensions`).
+/// (14 calls, including `query_counter` and `supported_extensions`).
 /// `location` is the one fabricated by the previous batch's
 /// `get_uniform_location` call — this batch must not call
 /// `get_uniform_location` again, or the overall total would be 57, not 56.
@@ -510,7 +509,7 @@ fn get_uniform_location_returns_a_usable_location() {
 
 /// The recording arm's query methods must return values a headless driver
 /// run treats as success — `gpu.rs` bails on a failed shader/program link
-/// or an incomplete framebuffer, and 123.7's headless driver depends on
+/// or an incomplete framebuffer, and the headless driver depends on
 /// these values to avoid taking that error path.
 #[test]
 fn queries_return_plausible_success_values() {
@@ -535,7 +534,7 @@ fn queries_return_plausible_success_values() {
 /// Drive a small, explicit synthetic sequence and check the exact derived
 /// metrics it produces.
 ///
-/// If these derivations are wrong, every downstream number 123.8's
+/// If these derivations are wrong, every downstream number the
 /// workload assertions rest on is wrong too, so the expected values are
 /// spelled out here arithmetically rather than copied from a run:
 ///
@@ -592,7 +591,7 @@ fn derived_metrics_match_the_recorded_calls() {
 
     // Every number below is derived by hand from the sequence above rather
     // than copied out of a run, so a wrong derivation in `recording.rs`
-    // fails here instead of silently rescaling every figure 123.14 reports.
+    // fails here instead of silently rescaling every reported figure.
     //
     // state_changes  = bind_vertex_array + bind_buffer + use_program
     //                  + bind_texture                                   = 4
@@ -613,8 +612,7 @@ fn derived_metrics_match_the_recorded_calls() {
 
 /// A `PixelUnpackData::BufferOffset` upload transfers nothing from the CPU
 /// on that call — the pixels come from an already-bound PBO — so it must
-/// record zero bytes. Counting it would inflate the byte volume 123.14's
-/// findings report on.
+/// record zero bytes. Counting it would inflate the reported byte volume.
 #[test]
 fn pixel_unpack_buffer_offset_records_zero_bytes() {
     let buffer_offset_gl = Gl::recording();
@@ -675,8 +673,8 @@ fn pixel_unpack_buffer_offset_records_zero_bytes() {
 /// There is no `glow::Context` to construct in a unit test — it requires
 /// a live GL context from an actual display and driver — so the `Real`
 /// arm's `recorded() == None` half of this asymmetry cannot be exercised
-/// here without fabricating a fake `glow::Context`, which the plan
-/// explicitly forbids (the `Recording` arm must stay fully independent of
+/// here without fabricating a fake `glow::Context`, which is
+/// forbidden (the `Recording` arm must stay fully independent of
 /// a real driver, not the other way around: manufacturing a fake `Real`
 /// context would be its own unsound shortcut). This test therefore pins
 /// only the `Recording` half.
@@ -685,7 +683,7 @@ fn a_recording_gl_exposes_its_recording_state() {
     assert!(Gl::recording().recorded().is_some());
 }
 
-// ── Task 125.8: query lifecycle on the recording facade ─────────────────
+// ── query lifecycle on the recording facade ─────────────────
 
 /// The query create/issue/poll/read/delete lifecycle round-trips against
 /// the recording facade without panicking, and pins the exact call order
@@ -719,8 +717,8 @@ fn query_lifecycle_round_trips_and_pins_call_order() {
 /// [`super::recording::RecordingState::mark_query_available`] is the only
 /// thing that makes `get_query_parameter_u32`/`get_query_parameter_u64`
 /// report a query as available/ready — this is the deterministic
-/// availability control the `gpu_profiling` adapter's own tests (Task
-/// 125.8) depend on to simulate delayed availability without a real GPU.
+/// availability control the `gpu_profiling` adapter's own tests
+/// depend on to simulate delayed availability without a real GPU.
 #[test]
 fn mark_query_available_drives_availability_and_result_deterministically() {
     let gl = Gl::recording();

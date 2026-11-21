@@ -148,11 +148,11 @@ struct FreminalGui {
     config: Config,
 
     /// Active chrome style geometry (Modern/Retro profile + radii/strokes/
-    /// spacing) applied to all egui chrome via the per-frame style hook
-    /// (112.4). Defaults to `GuiTheme::default()` (Modern); the settings
-    /// profile picker (112.7) mutates it for live preview. Config persistence
-    /// of the profile is wired in 112.13 — until then this is the single
-    /// runtime source the style hook reads.
+    /// spacing) applied to all egui chrome via the per-frame style hook.
+    /// Defaults to `GuiTheme::default()` (Modern); the settings
+    /// profile picker mutates it for live preview. The persisted
+    /// `[chrome] profile` seeds it at startup; it is the single runtime
+    /// source the style hook reads.
     gui_theme: freminal_common::gui_theme::GuiTheme,
 
     /// Live theme preview override for chrome styling.
@@ -178,7 +178,7 @@ struct FreminalGui {
     applied_preview: visual_preview::VisualPreview,
 
     /// Time-based debounce holder for the font family/size/line-height
-    /// preview fields (issue #452 phase C).
+    /// preview fields.
     ///
     /// Unlike every other field `apply_visual_preview` handles, these three
     /// are expensive enough (`FontManager::rebuild` reparses font faces and
@@ -191,20 +191,19 @@ struct FreminalGui {
     font_preview_debounce: visual_preview::DebouncedPreview<visual_preview::FontPreview>,
 
     /// Time-based debounce holder for the background-image-path preview
-    /// field (issue #452 phase D). Reuses `visual_preview::DebouncedPreview`
-    /// unchanged (issue #452 phase C's generic design) -- see its module
+    /// field. Reuses `visual_preview::DebouncedPreview`
+    /// unchanged -- see its module
     /// doc and `settings_dispatch::FreminalGui::tick_visual_preview_debounces`
     /// for how a settled value gets applied even when the user has stopped
     /// editing.
     background_image_preview_debounce: visual_preview::DebouncedPreview<Option<std::path::PathBuf>>,
 
-    /// Time-based debounce holder for the shader-path preview field (issue
-    /// #452 phase D). Same generic holder as `background_image_preview_debounce`
+    /// Time-based debounce holder for the shader-path preview field. Same generic holder as `background_image_preview_debounce`
     /// and `font_preview_debounce`, parameterized over a different `T`.
     shader_preview_debounce: visual_preview::DebouncedPreview<Option<std::path::PathBuf>>,
 
     /// Where a drained `renderer::WindowPostRenderer::last_error` should be
-    /// surfaced this frame (issue #452 phase D): a toast on every terminal
+    /// surfaced this frame: a toast on every terminal
     /// window (the existing, default behaviour -- correct for a committed
     /// change) or the Settings window's own status message (a shader path
     /// still being live-edited). Updated every time a shader source is
@@ -222,8 +221,8 @@ struct FreminalGui {
     /// bound key combos are intercepted before PTY dispatch.
     binding_map: freminal_common::keybindings::BindingMap,
 
-    /// Smart paste guard with its compiled dangerous-command pattern cache
-    /// (Task 77). Rebuilt from `config.paste_guard` when the user applies new
+    /// Smart paste guard with its compiled dangerous-command pattern cache.
+    /// Rebuilt from `config.paste_guard` when the user applies new
     /// settings. Consulted on every paste to decide whether to show the
     /// confirm dialog.
     paste_guard: paste_guard::PasteGuard,
@@ -258,7 +257,7 @@ struct FreminalGui {
     pending_focus_settings: bool,
 
     /// Windows whose `on_close_requested` call is still expected as part of
-    /// an in-flight `QuitAll` batch (issue #509), seeded by
+    /// an in-flight `QuitAll` batch, seeded by
     /// `quit_all_windows` in `close_guard.rs` with every window open at the
     /// moment `QuitAll` fired (including the one it was invoked from).
     ///
@@ -275,7 +274,7 @@ struct FreminalGui {
 
     /// GL teardown handles for windows whose `PerWindowState` was already
     /// dropped by an accepted `on_close_requested` but whose GL context has
-    /// not been torn down yet (Task 125.C2).
+    /// not been torn down yet.
     ///
     /// `on_close_requested` runs without the window's GL context current, so
     /// it cannot delete GL objects itself; it leaves the handles here, and
@@ -335,7 +334,7 @@ struct FreminalGui {
     /// one was resolved at startup. `None` when running with no config
     /// file (e.g. fresh first launch before any config exists).
     ///
-    /// Used by "Reload Config" (subtask 71.17) to re-read the file from
+    /// Used by "Reload Config" to re-read the file from
     /// disk and diff it against `self.config`. Keep in sync with
     /// `settings_modal.config_path` — both should point to the same file.
     config_path: Option<std::path::PathBuf>,
@@ -418,12 +417,12 @@ struct FreminalGui {
 
     /// OSC 99 requests a frame could not route because a cell they need was
     /// busy, oldest first. The next frame routes them before its own, so
-    /// nothing is dropped and the order is kept (Task 138.C10, G14).
+    /// nothing is dropped and the order is kept.
     /// Single-threaded GUI, so `RefCell` suffices.
     deferred_osc99_requests: std::cell::RefCell<Vec<osc99::Osc99Request>>,
 
     /// An `osc99_filters` change the registry could not take because its cell
-    /// was busy, applied at the next opportunity (Task 138.C10, D9). Holds
+    /// was busy, applied at the next opportunity. Holds
     /// only the latest. Single-threaded GUI, so `RefCell` suffices.
     pending_osc99_filter: std::cell::RefCell<Option<osc99::Osc99Filter>>,
 
@@ -456,7 +455,7 @@ struct FreminalGui {
     notify_wake: notify_wake::NotifyWake,
 
     /// Windows for which the user has already confirmed a force-close in the
-    /// close-guard dialog (Task 98).  When `on_close_requested` fires for a
+    /// close-guard dialog.  When `on_close_requested` fires for a
     /// window in this set it skips the running-command guard and lets the
     /// close through, then removes the entry.  Avoids re-prompting on the
     /// `ViewportCommand::Close` round trip a Force Close triggers.
@@ -643,7 +642,7 @@ impl FreminalGui {
         }
 
         // Initialize the chrome style profile from the persisted config
-        // ([chrome] profile = "modern"|"retro", Task 112.13). Captured before
+        // ([chrome] profile = "modern"|"retro"). Captured before
         // `config` is moved into the struct literal below.
         let gui_theme = config.chrome.profile.defaults();
 

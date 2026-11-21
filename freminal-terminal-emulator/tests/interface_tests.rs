@@ -391,21 +391,21 @@ fn test_sync_updates_timer_cleared_on_reset() {
 
 // ─── synchronized updates (?2026): change signals across skipped frames ──────
 //
-// Regression coverage for issue #490. `scroll_changed` is edge-triggered
+// Regression coverage for a permanently stale screen. `scroll_changed` is edge-triggered
 // against the previous snapshot, but the GUI does not render snapshots
 // carrying `skip_draw = true`. Without deferral the edge reported by a
 // skipped frame is lost forever and the screen stays stale.
 //
-// The content half of #490 used to be covered by the same deferral mechanism
-// (a `content_changed` bool accumulated across skipped frames). Task 124.12
-// deleted `content_changed` and its deferral entirely:
-// `TerminalSnapshot::row_epochs` (Task 124.11) is a monotonic per-row stamp
+// The content half of that bug used to be covered by the same deferral mechanism
+// (a `content_changed` bool accumulated across skipped frames). That bool and
+// its deferral are gone entirely:
+// `TerminalSnapshot::row_epochs` is a monotonic per-row stamp
 // compared against a baseline the *consumer* holds, not an edge diffed
 // against the previous snapshot, so a skipped frame cannot lose it — there
 // is nothing left to defer. The content tests below now pin that property
 // directly instead of pinning the deferral that used to be needed for it.
 
-/// The canonical #490 repro: a paint arrives inside a synchronized-output
+/// The canonical repro: a paint arrives inside a synchronized-output
 /// block and the closing `?2026l` lands in a *later* PTY read.
 ///
 /// The frame carrying the new content is skipped, and the content is then
@@ -489,7 +489,7 @@ fn test_sync_updates_content_change_survives_many_skipped_frames() {
 }
 
 /// `scroll_changed` is the one signal `DeferredChangeFlags` still defers
-/// (Task 124.12 removed the `content_changed` half), so it needs its own
+/// (the `content_changed` half no longer exists), so it needs its own
 /// coverage.
 ///
 /// The block is left via the 200 ms auto-resume rather than `?2026l`, because

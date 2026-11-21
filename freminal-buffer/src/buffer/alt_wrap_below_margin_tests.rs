@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 148.7 (issue #568): an auto-wrap on the alternate screen must never
+//! An auto-wrap on the alternate screen must never
 //! change its row count.
 //!
 //! The alternate screen is a fixed `height`-row grid. When the cursor sits
@@ -13,7 +13,7 @@
 //! invariant, left `cursor.y` one past the grid, and was then parked with the
 //! screen on `?1049l` (the "parked alternate store" invariant) and met by
 //! `clear_alternate_screen` on the next `?1049h` (the `cursor.y < rows.len()`
-//! invariant): the four failures the issue lists share this producer.
+//! invariant): all four failures share this producer.
 //!
 //! xterm wraps with `WrapLine` (charproc.c) -> `xtermIndex` (cursor.c), which
 //! for a cursor below `bot_marg` is `CursorDown`; that clamps to `max_row`, so

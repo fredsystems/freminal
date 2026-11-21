@@ -31,10 +31,10 @@ pub struct PaneSpawnEnv<'a> {
     pub shell_override: Option<&'a str>,
     /// Whether to set `TERM_PROGRAM` / `TERM_PROGRAM_VERSION` on the child and
     /// inject the shell-integration scripts.  Driven by
-    /// `config.shell_integration.set_term_program` (Task 72.6).
+    /// `config.shell_integration.set_term_program`.
     pub term_program: TermProgramEnv,
     /// Whether the shell-integration `sudo` wrapper that preserves `TERMINFO` is
-    /// on (Task 151.12); only takes effect when shell integration is injected.
+    /// on; only takes effect when shell integration is injected.
     pub sudo_terminfo: SudoTerminfo,
     /// The pane's resolved `TERM` (see [`TermName::resolve`]): set on the child
     /// and reported by XTGETTCAP `TN`, so the two cannot disagree.

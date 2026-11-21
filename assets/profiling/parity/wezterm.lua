@@ -1,4 +1,4 @@
--- wezterm.lua — Task 125.2 hermetic parity fixture (template).
+-- wezterm.lua — hermetic parity fixture (template).
 --
 -- Rendered by workloads.sh's `render_fixture` into an isolated per-run
 -- directory before every capture, and loaded via `wezterm --config-file
@@ -6,7 +6,7 @@
 -- never the operator's real `~/.wezterm.lua`. Every option below is
 -- documented in the installed WezTerm 0-unstable-2026-09-17 (re-pinned 2026-10-04 from 2026-08-12)'s own config
 -- reference (wezterm/config/src/config.rs); see Documents/PROFILING.md,
--- "Task 125 parity fixtures" for the verification trail.
+-- "Terminal parity fixtures" for the verification trail.
 --
 -- Tokens (`@..@`) are substituted at render time.
 

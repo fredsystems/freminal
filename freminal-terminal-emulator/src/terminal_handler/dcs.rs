@@ -370,7 +370,7 @@ impl TerminalHandler {
             // TN — terminal name: the value of $TERM.  It is the `TERM` the pane's child
             // was actually given (`TermName::resolve`, computed once at spawn), never a
             // constant, so the two cannot desync.  The freminal identity is advertised
-            // separately via `TERM_PROGRAM=freminal` (Task 72.6) and the XTVERSION
+            // separately via `TERM_PROGRAM=freminal` and the XTVERSION
             // `>|XTerm(Freminal ...)` payload.
             "TN" => Some(term),
             // Ms — set selection (clipboard) via OSC 52
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn xtgettcap_known_capability_tn() {
-        // Regression guard (Task 76.6, reworked by Task 151.6): TN is "the value
+        // Regression guard: TN is "the value
         // of $TERM", so it must equal the `TERM` the pane's child was given.  A
         // freshly constructed handler holds the platform default.
         let mut handler = TerminalHandler::new(80, 24);
@@ -1669,7 +1669,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
 
-        // The reproduction from the 130 adversarial review: a "name" carrying
+        // A reproducer: a "name" carrying
         // a DSR request and a BEL, followed by a non-hex tail.
         let dcs = build_dcs_payload(b"+q\x1b[6n\x07zz");
         handler.handle_device_control_string(&dcs);
@@ -1802,7 +1802,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Payload-free warn logging (129.14)
+    // Payload-free warn logging
     // ------------------------------------------------------------------
 
     /// Feed `bytes` through the whole parser + handler pipeline and return
@@ -1883,7 +1883,7 @@ mod tests {
         dcs.extend_from_slice(b"\x1b\\");
         let events = feed_and_capture(&dcs);
         // Every level, TRACE included: the per-output trace in
-        // `state/internal.rs` is bounded too (129.C6).
+        // `state/internal.rs` is bounded too.
         for (_, text) in &events {
             assert!(
                 text.len() < 4096,

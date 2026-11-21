@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! End-to-end alternate-screen lifecycle suite (Task 131.9).
+//! End-to-end alternate-screen lifecycle suite.
 //!
 //! Every test drives a headless [`TerminalEmulator`] exactly as the PTY thread
 //! does -- raw bytes into `handle_incoming_data` -- and asserts only on what
@@ -15,9 +15,8 @@
 //! as a stale per-buffer snapshot cache masking a screen switch in either
 //! direction.
 //!
-//! The reference behaviour is the "131 Decisions" section of
-//! `Documents/PLAN_VERSION_130.md` (the consensus of xterm, Ghostty, `WezTerm`
-//! and kitty).
+//! The reference behaviour is the consensus of xterm, Ghostty, `WezTerm` and
+//! kitty.
 
 use crossbeam_channel::Receiver;
 use freminal_common::buffer_states::tchar::TChar;

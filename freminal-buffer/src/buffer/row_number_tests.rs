@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 125.14 regression tests: logical row numbers.
+//! Regression tests: logical row numbers.
 //!
 //! Every stored row reference that used to be a retained *index* (and so
 //! either had to be rewritten on eviction or silently drifted onto another
@@ -162,11 +162,11 @@ fn rows_keep_their_number_while_eviction_shifts_their_index() {
 
 // ── DECSC saved cursor ───────────────────────────────────────────────────
 //
-// Task 125.C6: DECSC saves a *screen* position (xterm `CursorSave` stores
+// DECSC saves a *screen* position (xterm `CursorSave` stores
 // `screen->cur_row`; the VT510 manual defines it as "cursor position" on a
 // terminal without scrollback), so a restore never depends on which content
 // currently occupies the saved row, nor on eviction or scrolling. A resize is
-// the exception (Task 147.18): the slot follows its cell through it, see
+// the exception: the slot follows its cell through it, see
 // `saved_cursor_resize_tests.rs`.
 
 /// The first row of the visible (bottom-anchored) window.
@@ -341,7 +341,7 @@ fn decsc_after_reflow_restores_onto_the_saved_text() {
 
 #[test]
 fn decsc_made_on_the_primary_screen_is_not_visible_on_the_alternate_screen() {
-    // The DECSC slot is per screen (Task 131.5): a save on the primary
+    // The DECSC slot is per screen: a save on the primary
     // screen is not restorable from the alternate one.
     let mut buf = Buffer::new(20, 5);
     for i in 0..3 {
@@ -752,7 +752,7 @@ fn reflow_renumbers_rows_and_remaps_every_holder() {
         end_text.ends_with('4'),
         "end_row must name the last output row, got {end_text:?}"
     );
-    // The saved cursor follows its cell through the reflow (Task 147.18): the
+    // The saved cursor follows its cell through the reflow: the
     // live cursor was never moved after the save, so DECRC lands exactly
     // where the reflow carried the live cursor. The screen position changed
     // (the re-wrapped output is taller), which is the point.
@@ -1009,7 +1009,7 @@ fn erase_scrollback_advances_the_base() {
     assert_eq!(buf.row_index_of(old_base), None);
 }
 
-// ── Restoring the cursor to an image origin (Task 125.C7) ────────────────
+// ── Restoring the cursor to an image origin ────────────────
 
 /// The cell under the cursor, which must be the image's top-left cell.
 fn assert_cursor_on_image_origin(buf: &Buffer, x: usize) {
@@ -1099,7 +1099,7 @@ fn restore_cursor_to_image_origin_clamps_an_evicted_origin_to_the_window_top() {
 
 #[test]
 fn restore_cursor_to_image_origin_for_an_image_taller_than_the_screen_stays_on_screen() {
-    // Task 125 review: an image taller than the space below the cursor
+    // An image taller than the space below the cursor
     // scrolls its own origin above the window without evicting it. C=1 must
     // not park the cursor in off-screen scrollback.
     let mut buf = Buffer::new(20, 3);

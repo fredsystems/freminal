@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Pure resolution of how a pane's cursor should be drawn (Task 127.2).
+//! Pure resolution of how a pane's cursor should be drawn.
 //!
 //! The cursor's appearance depends on four independent facts: whether the
 //! terminal application wants it shown (`DECTCEM`), whether the pane is in

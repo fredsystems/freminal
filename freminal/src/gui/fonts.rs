@@ -108,7 +108,7 @@ pub fn setup_font_files(ctx: &egui::Context, cfg: &FontConfig) -> FontDefinition
         emoji_fonts::add_emoji_fallback(&mut defs);
     }
 
-    // NOTE: the bundled Noto Color Emoji (Task #402) is deliberately NOT
+    // NOTE: the bundled Noto Color Emoji is deliberately NOT
     // registered into the egui chrome font stack. It is a CBDT/CBLC *bitmap*
     // color font with no glyph outlines, and egui (0.35, egui_glow) renders
     // from a grayscale outline atlas — it cannot display CBDT/CBLC glyphs, so
@@ -197,7 +197,7 @@ fn load_bundled_primary_fonts(defs: &mut FontDefinitions) {
     info!("Loaded bundled Freminal primary monospace font");
 }
 
-// The bundled Noto Color Emoji floor (Task #402) is applied on the terminal
+// The bundled Noto Color Emoji floor is applied on the terminal
 // (swash) side in `font_manager::discover_emoji_face`, not here — egui's
 // grayscale atlas cannot render its CBDT/CBLC bitmap glyphs. See the note in
 // `setup_font_files`.
@@ -360,7 +360,7 @@ mod emoji_fonts {
     ///
     /// This is the **egui chrome** path (menu bar, settings), NOT the terminal
     /// grid. It deliberately does NOT reuse the terminal-side emoji face (the
-    /// bundled Noto Color Emoji, always used since issue #431): egui's
+    /// bundled Noto Color Emoji, always used): egui's
     /// grayscale atlas cannot render color (COLR/CPAL, CBDT/CBLC, sbix) glyphs
     /// — it locks glyph ownership by cmap and renders a color-only glyph as
     /// blank — so for chrome a monochrome-renderable emoji/symbol face (e.g.

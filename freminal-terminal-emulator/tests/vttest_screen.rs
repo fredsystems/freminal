@@ -540,7 +540,7 @@ fn decsc_sets_saved_cursor_flag() {
     );
 }
 
-/// DECSC saves the SGR rendition; DECRC restores it (131.C1).
+/// DECSC saves the SGR rendition; DECRC restores it.
 ///
 /// xterm's `CursorSave2` / `CursorRestoreFlags` save the SGR attributes and
 /// colours alongside the position, so DECRC brings back both the handler's

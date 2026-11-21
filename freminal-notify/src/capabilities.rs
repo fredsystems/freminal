@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 //! The facts about the host that decide which OSC 99 features the system
-//! (desktop-notification) leg offers (Task 138.17).
+//! (desktop-notification) leg offers.
 //!
 //! These types exist on every platform so the capability tables in
 //! `host_capabilities` can be built, and tested, everywhere: the Linux/BSD

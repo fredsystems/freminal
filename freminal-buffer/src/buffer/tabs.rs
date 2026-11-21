@@ -66,7 +66,7 @@ impl Buffer {
     /// pending-wrap position) and `tab_stops.len() == width`, so for a
     /// consistent buffer this changes nothing; it only stops a stale column
     /// (e.g. one stranded by a resize) from indexing past the table, which
-    /// used to panic (GHSA-8f32-mj37-fw6v). A clamped start behaves as
+    /// used to panic. A clamped start behaves as
     /// "from the right margin": the previous stop is found at or before the
     /// last column.
     ///
@@ -125,7 +125,7 @@ mod tests {
     /// at `stale_x`, past the right edge. No operation should produce this
     /// any more; the tab operations must still tolerate it, because a
     /// producer that leaks one would otherwise turn into a panic (CBT sliced
-    /// the 28-entry table at 99 -- GHSA-8f32-mj37-fw6v).
+    /// the 28-entry table at 99).
     fn stranded(stale_x: usize) -> Buffer {
         let mut buf = Buffer::new(28, 5);
         buf.cursor.pos.x = stale_x;
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn tab_forward_usize_max_lands_on_the_last_column() {
-        // Hangs on the unfixed loop (CHT with a huge Ps, Task 148.C2).
+        // Hangs on the unfixed loop (CHT with a huge Ps).
         assert_eq!(forward_from_origin(usize::MAX), 79);
         assert_eq!(forward_from_origin(usize::MAX), forward_from_origin(100));
     }

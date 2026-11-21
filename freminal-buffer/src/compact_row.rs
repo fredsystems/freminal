@@ -216,7 +216,7 @@ impl CompactRow {
     }
 
     /// Serialize this row to bytes for LZ4 block compression
-    /// ([`crate::compressed_block::CompressedBlock`], Task 119).
+    /// ([`crate::compressed_block::CompressedBlock`]).
     ///
     /// Manual little-endian encoding (matching the convention already used
     /// in `freminal-terminal-emulator/src/recording.rs`) rather than
@@ -1135,7 +1135,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Byte serialization round-trip (`to_bytes`/`from_bytes`, Task 119.3)
+    // Byte serialization round-trip (`to_bytes`/`from_bytes`)
     // -----------------------------------------------------------------------
 
     /// Round-trip `row` through `CompactRow::to_bytes`/`from_bytes` and

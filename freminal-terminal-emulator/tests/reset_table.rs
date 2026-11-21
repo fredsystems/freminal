@@ -3,11 +3,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! One test per behaviour the Task 131 reset table changed, for RIS (`ESC c`)
-//! and DECSTR (`CSI ! p`), driven through raw bytes.
+//! One test per behaviour the reset table changed, for RIS (`ESC c`) and
+//! DECSTR (`CSI ! p`), driven through raw bytes.
 //!
-//! The authoritative row list is the "131 Reset table" in
-//! `Documents/PLAN_VERSION_130.md`.
+//! RIS follows xterm's `ReallyReset` and kitty's `do_screen_reset`; DECSTR
+//! follows xterm's `CASE_DECSTR` and the VT510 Table 5-9 subset.
 
 use freminal_common::buffer_states::{
     mode::Mode, modes::decanm::Decanm, terminal_output::TerminalOutput,

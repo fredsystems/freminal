@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 147.18: the saved cursor (DECSC) follows its text through a resize.
+//! The saved cursor (DECSC) follows its text through a resize.
 //!
 //! The slot is kept in screen coordinates, which a reflow, a height change or
 //! eviction invalidates. `set_size` pins the saved cell to its row number and
@@ -274,7 +274,7 @@ fn height_only_resize_without_scrollback_keeps_the_screen_position() {
     assert_eq!((restored.x, restored.y), (6, 3));
 }
 
-// ── Pending wrap at the DECLRMM right margin (147 PR review R5) ──────────
+// ── Pending wrap at the DECLRMM right margin ──────────
 
 /// A 20-column screen with DECLRMM margins 1-10 and `abcdefghij` printed, so
 /// the cursor is in pending wrap at the margin (column 10).
@@ -359,7 +359,7 @@ fn declrmm_cursor_right_of_the_margin_is_not_saved_as_pending_wrap() {
 #[test]
 fn pending_wrap_on_a_double_width_row_survives_a_narrowing_resize() {
     // A double-width row wraps at half its span: 10 of 20 columns. The save
-    // must see that edge (PR #589 review R24).
+    // must see that edge.
     let mut buf = Buffer::new(20, 5);
     buf.set_cursor_line_width(LineWidth::DoubleWidth);
     buf.insert_text(&text("abcdefghij"));
@@ -384,7 +384,7 @@ fn a_pending_cell_that_reflows_right_of_the_margin_becomes_the_next_column() {
     // Row 1 continues row 0; the save is pending at the 1-10 margin on 'j'.
     // Widening joins the rows, so 'j' lands at column 29, right of the
     // margin edge: the slot becomes column 30, not a pending wrap that a later
-    // DECRC would put back on 'j' (PR #589 review R25).
+    // DECRC would put back on 'j'.
     let mut buf = Buffer::new(20, 5);
     buf.insert_text(&text("ABCDEFGHIJKLMNOPQRSTabcdefghij"));
     buf.set_declrmm(Declrmm::Enabled);
@@ -405,7 +405,7 @@ fn a_pending_cell_that_reflows_right_of_the_margin_becomes_the_next_column() {
 fn a_parked_save_settles_against_the_shared_margins() {
     // The primary screen is parked while the alternate screen is resized; its
     // saved cursor must settle against the shared 1-10 margins, as the live
-    // screen's does (PR #589 review R34).
+    // screen's does.
     let mut buf = pending_wrap_at_the_right_margin();
     buf.save_cursor();
     buf.set_cursor_pos(Some(0), Some(3));

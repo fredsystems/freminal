@@ -62,7 +62,7 @@ pub(super) fn update_egui_theme(
 
 /// Shared body for [`set_egui_options`] / [`update_egui_theme`]: derive the
 /// chrome `Visuals` + spacing from the active palette and the active
-/// [`GuiTheme`] profile (the user's persisted `[chrome] profile`, Task 112.13),
+/// [`GuiTheme`] profile (the user's persisted `[chrome] profile`),
 /// then apply them globally.
 ///
 /// Chrome styling is independent of any pane's display mode; see
@@ -191,7 +191,7 @@ pub(super) struct WindowManipFlags {
 ///
 /// Any program writing to the terminal -- including a remote host over `ssh`
 /// or untrusted `cat` output -- can emit these sequences, so the default is
-/// [`Self::Refused`] (GHSA-67hw-cw29-r66f).
+/// [`Self::Refused`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WindowOpsPolicy {
     /// Mutating window operations are dropped.  Report-only queries and title
@@ -416,7 +416,7 @@ pub(super) fn osc52_toast_text(event: &Osc52ToastEvent) -> (&'static str, Option
 ///    consumer thread since the last frame are processed before rendering.
 ///    Each drained command is also released from the pane's
 ///    `window_cmd_budget` (its Report or Viewport count), the cap on how many
-///    may be queued while the GUI is not draining (148.C9, 148.RC2).
+///    may be queued while the GUI is not draining.
 ///
 /// 2. **Variant routing** — both `Viewport` and `Report` commands carry
 ///    the same inner `WindowManipulation` value; the outer tag is not used
@@ -490,8 +490,7 @@ pub(super) fn handle_window_manipulation(
     while let Ok(wc) = window_cmd_rx.try_recv() {
         // Every command drained from the channel passes this point before any
         // `continue` or arm below, so each one is released exactly once from its
-        // class's count, including ones the policy checks go on to refuse
-        // (148.C9, 148.RC2).
+        // class's count, including ones the policy checks go on to refuse.
         window_cmd_budget.release(&wc);
         let window_event = match wc {
             WindowCommand::Viewport(cmd) | WindowCommand::Report(cmd) => cmd,
@@ -785,7 +784,7 @@ pub(super) fn handle_window_manipulation(
 
             // OSC 52 clipboard set: copy decoded text to the system clipboard.
             // Gated by [security] allow_clipboard_write: a dropped write emits
-            // no toast and leaves the clipboard untouched (GHSA-v2hw-gcg8-2rfr).
+            // no toast and leaves the clipboard untouched.
             WindowManipulation::SetClipboard(_sel, content) => {
                 if clipboard_write_permitted(flags) {
                     osc52_events.push(Osc52ToastEvent::Wrote {
@@ -853,7 +852,7 @@ pub(super) fn handle_window_manipulation(
                 }
             }
 
-            // OSC 9 / OSC 777 desktop notification (Task 76).  Collect into
+            // OSC 9 / OSC 777 desktop notification.  Collect into
             // the out-parameter; the caller in `app_impl::update()` (where
             // `self.config` and the toast stack are in scope) dispatches each
             // request through the `NotificationRouter`.
@@ -870,7 +869,7 @@ pub(super) fn handle_window_manipulation(
                     body,
                 });
             }
-            // OSC 99 stateful notification (Task 99.5a). Collect for
+            // OSC 99 stateful notification. Collect for
             // post-loop routing in `app_impl::update()`, where `self.config`,
             // the toast stack, and the OSC 99 session maps on `FreminalGui`
             // are all borrowable. A `Weak` handle to the pane's reply sender
@@ -887,7 +886,7 @@ pub(super) fn handle_window_manipulation(
                     pane_state: flags.osc99.pane_state,
                 })));
             }
-            // OSC 99 app→terminal control sequence (Task 99.5c). Collected
+            // OSC 99 app→terminal control sequence. Collected
             // alongside a `Weak` reply handle for the originating pane and
             // answered after the drain loop, in order with the frame's other
             // OSC 99 requests.
@@ -1242,7 +1241,7 @@ mod window_manipulation_reply_tests {
     }
 
     /// Each drained command releases exactly one slot from its own class's
-    /// outstanding count (148.C9, 148.RC2), whatever becomes of it afterwards
+    /// outstanding count, whatever becomes of it afterwards
     /// (answered, refused by the window-ops policy, or ignored).
     ///
     /// The commands carry the classification production gives them:
@@ -1694,7 +1693,7 @@ mod window_manipulation_reply_tests {
         );
     }
 
-    // ── XTWINOPS gating and clamping (GHSA-67hw-cw29-r66f) ──────────────
+    // ── XTWINOPS gating and clamping ──────────────
 
     /// Every [`WindowManipulation`] variant with whether it is a mutating
     /// window operation.  Kept in step with the exhaustive match in

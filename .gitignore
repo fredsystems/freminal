@@ -568,7 +568,7 @@ profile_export*.xml
 # with speed_tests/random_crap.py; too large to track in git.
 speed_tests/100000_lines.txt
 
-# cargo-fuzz (issue 553): build output, working corpora, crash artifacts and
+# cargo-fuzz: build output, working corpora, crash artifacts and
 # coverage output are local. The curated `fuzz/seeds/` and `fuzz/regressions/`
 # trees are tracked. `fuzz/Cargo.lock` is deliberately tracked (the fuzz crate
 # is its own workspace root), so it is re-included against the `*/Cargo.lock`

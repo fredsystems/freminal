@@ -675,7 +675,7 @@ mod tests {
         assert_eq!(data.name, None);
     }
 
-    // ── File= argument cap (Task 129.8) ─────────────────────────────────────
+    // ── File= argument cap ──────────────────────────────────────────────────
     #[test]
     fn parse_iterm2_file_args_cap_ignores_the_65th_arg() {
         // 64 bare items fill the cap exactly; `name=` is the 65th item.

@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 140.2: erased cells take only the current background colour.
+//! Erased cells take only the current background colour.
 //!
 //! Every erase operation (ED, EL, ECH, ICH, DCH and the DECLRMM column-confined
 //! scroll fills) blanks cells with a tag that carries the stored background

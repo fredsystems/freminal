@@ -32,7 +32,7 @@
 #       The modified-key families match the encoder in input.rs
 #       (1 + shift + 2*alt + 4*ctrl, so 3..7 are Alt .. Ctrl+Alt).
 #
-#       Notification support (Task 76): Freminal handles OSC 9 (iTerm2/WezTerm)
+#       Notification support: Freminal handles OSC 9 (iTerm2/WezTerm)
 #       and OSC 777 (urxvt "notify;TITLE;BODY") desktop notifications.  These
 #       are one-way, fire-and-forget sequences with no capability-query
 #       handshake, and terminfo defines no capability code for them, so there

@@ -6,19 +6,19 @@
 //! Terminal rendering pipeline split into focused sub-modules.
 //!
 //! - [`gl_facade`] — the GL call boundary: the frozen `glow::HasContext` call
-//!   surface and (from 123.2) the `Gl` recording facade.
+//!   surface and the `Gl` recording facade.
 //! - [`gl_init_state`] — [`GlInitState`], the init/ready/failed latch every
 //!   renderer carries so a failing `init` is not retried per frame.
 //! - [`gpu`] — [`TerminalRenderer`] struct, GL init/draw/destroy, shader compilation,
 //!   VAO/VBO setup, and GL upload helpers.
-//! - [`retire`] — deferred GL teardown (Task 125.C2): [`GlRetireQueue`] (a
+//! - [`retire`] — deferred GL teardown: [`GlRetireQueue`] (a
 //!   window-scoped queue a dropped pane retires its [`TerminalRenderer`] into,
 //!   drained where the window's GL context is current) and
 //!   [`WindowGlTeardown`] (window-close destruction of the shared
 //!   post-processing renderer, the queue, and the toast passes).
 //! - `headless` (feature `gl-recording`) — drives [`TerminalRenderer`] and the
 //!   toast passes without a GUI event loop, for use with the GL recording
-//!   facade (Task 123); see its module docs for what it does and does not
+//!   facade; see its module docs for what it does and does not
 //!   represent.
 //! - `shaders` — GLSL source string constants for the four shader passes
 //!   (decoration, background, foreground, image).
@@ -27,22 +27,21 @@
 //! - `decorations` — underline and strikethrough quad geometry, called from
 //!   [`vertex`]'s background builder.
 //! - [`toast_pass`] — [`ToastRenderer`], a self-contained SDF rounded-rect
-//!   pill pass for the toast-notification overlay (issue #433). Driven each
+//!   pill pass for the toast-notification overlay. Driven each
 //!   frame from the owned `ToastStack::show` `PaintCallback`; see
 //!   `toast_pass` module docs.
 //! - [`toast_text_pass`] — [`ToastTextRenderer`], a self-contained pass that
 //!   draws toast label/icon text through the shared instanced foreground
-//!   shader (issue #433). Companion to `toast_pass`; see `toast_text_pass`
+//!   shader. Companion to `toast_pass`; see `toast_text_pass`
 //!   module docs.
-//! - `profiling` (feature `frame-profiling`, Task 125.4) — the live
+//! - `profiling` (feature `frame-profiling`) — the live
 //!   render-work profiling foundation: `profiling::RenderWorkClass`,
 //!   `profiling::ChangedRowBucket`, `profiling::UploadByteCounts`, and
 //!   `profiling::LiveRenderProfile`'s pane-frame-token state machine.
-//!   Not yet wired to any renderer/widget call site — see that module's
-//!   docs.
-//! - `gpu_profiling` (feature `gpu-profiling`, Task 125.8) — the per-pane
+//!   Wired into the pane render path in `terminal::widget`.
+//! - `gpu_profiling` (feature `gpu-profiling`) — the per-pane
 //!   asynchronous GPU timestamp-query adapter,
-//!   `gpu_profiling::PaneGpuTimingProfile`, built over 125.7's
+//!   `gpu_profiling::PaneGpuTimingProfile`, built over
 //!   `freminal_windowing::gpu_profiling::GpuQueryRing`. Wired into
 //!   [`gpu::TerminalRenderer`]'s init/draw/destroy lifecycle; see that
 //!   module's docs for the exact upload/draw timestamp boundaries.
@@ -91,7 +90,7 @@ pub use vertex::{
     build_cursor_verts_only, build_foreground_instances, build_image_verts,
 };
 
-/// Per-window GL state for the fully-owned toast overlay (issue #433).
+/// Per-window GL state for the fully-owned toast overlay.
 ///
 /// The pill pass and the text pass share one window (one GL context).
 /// Created lazily; both sub-renderers `init()` on first draw inside the
@@ -119,7 +118,7 @@ impl ToastRenderState {
 
 use conv2::{ConvUtil, RoundToNearest};
 
-/// What a single pane contributed to the frame just rendered (#435).
+/// What a single pane contributed to the frame just rendered.
 ///
 /// Only the **active pane** ever draws a cursor, so a cursor blink/move — or
 /// a switch of which pane is active — only touches the active pane (and, on a
@@ -133,8 +132,8 @@ use conv2::{ConvUtil, RoundToNearest};
 ///   path; the rect (if any) is the changed cursor region. `None` means the
 ///   pane's cursor region did not resolve to a valid rect (degenerate size);
 ///   the aggregator treats that as a full frame out of caution.
-/// - [`PaneFrameDamage::Region`] — the pane took a full rebuild (Task
-///   124.14: `VertexRebuild::Bounded`), but the content change is provably
+/// - [`PaneFrameDamage::Region`] — the pane took a full rebuild
+///   (`VertexRebuild::Bounded`), but the content change is provably
 ///   bounded to these rects. Never empty (an empty rect set is reported as
 ///   [`Self::Full`] instead — see [`PaneDamageRect::from_cursor_cells`]'s
 ///   caller in `widget.rs`).
@@ -142,8 +141,7 @@ use conv2::{ConvUtil, RoundToNearest};
 ///   with no change at all (the common inactive-pane case); it contributes no
 ///   damage and does **not** force a full frame.
 ///
-/// This type deliberately is **not** [`Copy`] (Task 124.14a design
-/// decision): a single bounding box per pane would keep it `Copy` and is
+/// This type deliberately is **not** [`Copy`] by design: a single bounding box per pane would keep it `Copy` and is
 /// equivalent *today* (`windowing::DamageHistory::redraw_region` bboxes
 /// anyway), but it is lossy exactly in the case this variant exists for —
 /// two changed rows far apart would present every row between them. Callers
@@ -156,14 +154,14 @@ pub enum PaneFrameDamage {
     /// The pane took the cursor-only fast path; carries the changed region.
     CursorOnly(Option<PaneDamageRect>),
     /// The pane took a full rebuild whose damage is provably bounded to
-    /// these rects (Task 124.14). Never empty.
+    /// these rects. Never empty.
     Region(Vec<PaneDamageRect>),
     /// The pane rendered no change (reused existing vertices).
     #[default]
     Unchanged,
 }
 
-/// A changed screen region within a pane's framebuffer (#435).
+/// A changed screen region within a pane's framebuffer.
 ///
 /// Coordinates are **physical framebuffer pixels with a bottom-left origin**
 /// (the OpenGL / EGL convention shared by `glScissor` and
@@ -179,7 +177,7 @@ pub enum PaneFrameDamage {
 /// and the rect is the tight bounding box of those cells; presenting only
 /// it — and skipping the full-framebuffer clear — is what turns a blink
 /// from a full-scene redraw into a one-region update. The same rect shape
-/// serves `Region` frames (Task 124.14), where it bounds a provably-changed
+/// serves `Region` frames, where it bounds a provably-changed
 /// area of a full rebuild instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneDamageRect {

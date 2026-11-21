@@ -3,12 +3,12 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! The Linux/BSD desktop-notification service (Task 138.12).
+//! The Linux/BSD desktop-notification service.
 //!
 //! It carries every desktop notification freminal shows on Linux/BSD. OSC 99
 //! notifications are tracked: each has an instance id, actions, and
 //! [`SystemNotifyEvent`]s. OSC 9, OSC 777, OSC 133 `D` command-finished and the
-//! Settings "Test Notification" button (Task 149.2) are untracked "plain"
+//! Settings "Test Notification" button are untracked "plain"
 //! notifications: a summary, a body and an urgency, shown with
 //! [`PlainNotifySender`], with no actions and no events back. See `plain`.
 //!
@@ -68,7 +68,7 @@
 //!
 //! # Owner tracking
 //!
-//! Signals are filtered by sender (Task 138.C2). On a bus connection the
+//! Signals are filtered by sender. On a bus connection the
 //! dispatcher resolves the unique name that owns `org.freedesktop.Notifications`
 //! (`GetNameOwner`) and ignores `ActionInvoked` / `NotificationClosed` from any
 //! other sender, so a session-bus peer cannot forge them. The owner pump
@@ -817,7 +817,7 @@ fn serve(
 /// a notification sent with `expire_timeout` 0), and without it the leg would
 /// stay open forever. Closing it explicitly ends the leg either way: the call
 /// fails harmlessly when the daemon already removed it, and the daemon's own
-/// signal, if it comes, arrives for a forgotten id and is ignored (138.C23).
+/// signal, if it comes, arrives for a forgotten id and is ignored.
 fn handle_signal(
     connection: &Connection,
     state: &mut DispatcherState,
@@ -954,7 +954,7 @@ fn close_replaced(connection: &Connection, state: &mut DispatcherState, dbus_id:
 /// its own tracking, and a later `CloseNotification` then emits nothing.
 /// Waiting would leave the leg open forever: no `c=1` close report, and a
 /// `p=alive` that keeps listing the notification. A successful call is taken
-/// as the close it is specified to be (138.C23).
+/// as the close it is specified to be.
 fn close_instance(
     connection: &Connection,
     state: &mut DispatcherState,
@@ -1149,8 +1149,7 @@ mod tests {
             }
         );
 
-        // The activation itself asked the daemon to close the notification
-        // (138.C23); the daemon's own signal after it was ignored.
+        // The activation itself asked the daemon to close the notification; the daemon's own signal after it was ignored.
         assert_eq!(rig.closes(), [dbus_id]);
         assert_no_queued_events(&mut handle)?;
 
@@ -1744,7 +1743,7 @@ mod tests {
                 action: SystemAction::Button(1),
             }
         );
-        // The activation closes the notification (138.C23).
+        // The activation closes the notification.
         assert_eq!(
             next_event(&handle)?,
             SystemNotifyEvent::Closed {
@@ -1856,7 +1855,7 @@ mod tests {
                 action: SystemAction::Default,
             }
         );
-        // The activation closes the notification (138.C23).
+        // The activation closes the notification.
         assert_eq!(
             next_event(&handle)?,
             SystemNotifyEvent::Closed {

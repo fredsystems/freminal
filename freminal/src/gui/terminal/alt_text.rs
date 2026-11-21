@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Alt as the `ESC` prefix key for typed text (Task 147.24).
+//! Alt as the `ESC` prefix key for typed text.
 //!
 //! Whether `Event::Text` becomes `ESC` followed by the text is decided here,
 //! from pure inputs: the held modifiers, the host platform and `?1036`. The

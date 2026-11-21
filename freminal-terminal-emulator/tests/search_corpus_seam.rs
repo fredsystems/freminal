@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Regression tests for issue #463: the scrollback search corpus must place
+//! Regression tests: the scrollback search corpus must place
 //! exactly one row separator at the scrollback/visible seam.
 //!
 //! `visible_as_tchars_and_tags` and `scrollback_as_tchars_and_tags` each
@@ -114,7 +114,7 @@ fn no_scrollback_means_no_leading_separator() {
     assert_eq!(rows[1], "beta");
 }
 
-/// Task 125.17: the corpus is tagged with the rows it was cut from, and that
+/// The corpus is tagged with the rows it was cut from, and that
 /// tag keeps pace with the buffer at scrollback capacity, where the row
 /// count freezes but the base advances.
 #[test]

@@ -102,7 +102,7 @@ impl TerminalHandler {
             // Sixel has no display-size argument (unlike kitty `c=`/`r=` or
             // iTerm2 explicit width/height): the display grid is always
             // derived from the decoded image's native pixel size, so this is
-            // unconditionally `NativePixels` (Task 100.17).
+            // unconditionally `NativePixels`.
             size_mode: freminal_buffer::image_store::ImageSizeMode::NativePixels,
             frames: Vec::new(),
             root_gap_ms: 0,
@@ -110,9 +110,9 @@ impl TerminalHandler {
         };
 
         // Sixel has no placement-id concept and no `X=`/`Y=` sub-cell
-        // control key — mint a fresh placement-instance id (Task 100.18)
+        // control key — mint a fresh placement-instance id
         // so this placement never merges with an unrelated one, and pass
-        // `None` sub-cell offset (Task 100.19, kitty-only).
+        // `None` sub-cell offset (kitty-only).
         let placement_instance = next_placement_instance_id();
 
         // With sixel scrolling off (DECSDM, ?80 h) the image is drawn at the

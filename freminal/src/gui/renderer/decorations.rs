@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Underline and strikethrough decoration geometry (Task 140).
+//! Underline and strikethrough decoration geometry.
 //!
 //! Pure CPU builders that turn a shaped run's underline style and
 //! strikethrough flag into solid-colour quads in the decoration vertex
@@ -99,7 +99,7 @@ pub(super) fn push_run_decorations(
         // fg/bg inversion and is deliberately NOT routed through
         // `effective_fg` — only the fallback-to-foreground path is,
         // so the underline stays visible against a DECSCNM-swapped
-        // background (Task 115.2).
+        // background.
         let ul_color_raw = run.colors.underline_color();
         let ul_color = if matches!(
             ul_color_raw,
@@ -142,7 +142,7 @@ pub(super) fn push_run_decorations(
     }
 
     if has_strike && box_height > 0.0 {
-        // Task 115.2: strikethrough uses the effective (DECSCNM ×
+        // Strikethrough uses the effective (DECSCNM ×
         // SGR-7 composed) foreground so it stays visible under
         // whole-screen reverse video.
         let fg_color = internal_color_to_gl(
@@ -372,7 +372,7 @@ fn push_dashed_underline(deco: &mut Vec<f32>, p: &UnderlineParams, y: f32, thick
 }
 
 // ---------------------------------------------------------------------------
-//  Underline / strikethrough geometry tests (Task 140.3)
+//  Underline / strikethrough geometry tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -716,7 +716,7 @@ mod decoration_geometry {
     }
 
     /// Metrics whose old dotted pitch (`2 * stroke` = 6) does not divide the
-    /// 8 px cell, so a pattern anchored at the run start (the pre-140.3
+    /// 8 px cell, so a pattern anchored at the run start (the previous
     /// behaviour) drifts relative to the cell grid when a run splits.
     const STROKE_3: Metrics = Metrics {
         underline_offset: -1.0,

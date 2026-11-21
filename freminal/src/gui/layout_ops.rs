@@ -217,7 +217,7 @@ impl FreminalGui {
         }
         // Restore the persisted user rename, if any. Distinct from the OSC
         // seed above: this is the explicit custom name and survives across
-        // save/load (Task 95).
+        // save/load.
         tab.custom_name.clone_from(&resolved_tab.custom_name);
 
         // If there's a rest subtree (Split), insert it.
@@ -452,7 +452,7 @@ impl FreminalGui {
                     // written back when saving a running session.
                     title: None,
                     // Persist the user-pinned custom name so renames survive
-                    // save/load and session restore (Task 95).
+                    // save/load and session restore.
                     custom_name: tab.custom_name.clone(),
                     active: tab_idx == active_tab_idx,
                     panes,

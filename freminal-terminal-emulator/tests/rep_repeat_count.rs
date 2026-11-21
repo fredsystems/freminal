@@ -3,8 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! REP (CSI Ps b) repeat-count bounds and equivalence (Task 148.1,
-//! GHSA-2746-x3cj-58c7).
+//! REP (CSI Ps b) repeat-count bounds and equivalence.
 //!
 //! REP used to materialise `vec![ch; count]` with `count` taken straight from
 //! the CSI parameter, so `a ESC [ 2000000000 b` requested tens of GB. The

@@ -127,7 +127,7 @@ fn feed_back_failed_legs(_registry: &mut Osc99Registry, sink: &mut Osc99EffectSi
     debug_assert!(shows.is_empty() && closes.is_empty());
 }
 
-/// Route `requests` strictly in order (Task 138.C10, G1) and apply each one's
+/// Route `requests` strictly in order and apply each one's
 /// effects before the next is routed, so a later request sees the registry
 /// state an earlier one left.
 ///
@@ -466,7 +466,7 @@ impl Osc99FocusTargets for LiveWindows<'_> {
 
 impl FreminalGui {
     /// Route the OSC 99 requests a frame's drain collected, strictly in
-    /// arrival order (Task 138.C10, G1), preceded by the requests an earlier
+    /// arrival order, preceded by the requests an earlier
     /// frame had to defer.
     ///
     /// The toast stack, the icon cache and the registry are all borrowed

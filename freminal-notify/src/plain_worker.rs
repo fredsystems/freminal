@@ -85,8 +85,8 @@ struct WindowsPlainToastFields {
 /// title and the body as the text, silent, short, attributed to the
 /// PowerShell app id (freminal has no `AppUserModelID` of its own).
 ///
-/// There is no scenario. A "reminder" toast needs buttons (Task 138.C15), and
-/// urgency is not advertised on Windows (138.C17), so an error notification is
+/// There is no scenario. A "reminder" toast needs buttons, and
+/// urgency is not advertised on Windows, so an error notification is
 /// an ordinary toast. An empty body adds no text line.
 ///
 /// Pure and compiled in test builds on every platform; the conversion to the

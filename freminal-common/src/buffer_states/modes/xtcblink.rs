@@ -9,7 +9,7 @@ use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 
 // NOTE: Cursor blink mode (?12) is tracked and reported via DECRPM.
 // Rendering actual cursor blinking is deferred — the blink infrastructure
-// from Task 23 (SGR 5/6) can be reused when this is implemented.
+// used for SGR 5/6 can be reused when this is implemented.
 // Most terminals give the user the option to enable/disable cursor blink.
 
 /// Cursor Blink (`XT_CBLINK`) ?12

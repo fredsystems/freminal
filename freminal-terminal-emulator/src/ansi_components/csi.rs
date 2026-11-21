@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn gt_prefix_with_intermediate_q_emits_nothing() {
         // `>`-prefixed + intermediate is not XTVERSION and not DECSCUSR; it is
-        // recognised (kitty multiple-cursors, Task 103) but unimplemented, so
+        // recognised (kitty multiple-cursors) but unimplemented, so
         // the parser must emit no output at all.
         for seq in [&b">0;4 q"[..], b"> q", b">100 q", b">1;2:3:4 q", b">0;4$q"] {
             let mut parser = AnsiCsiParser::new();
@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(parser.format_raw_csi(), "\\x1b[1;2W");
     }
 
-    // ── Buffer reuse (147.15) ───────────────────────────────────────────────
+    // ── Buffer reuse ────────────────────────────────────────────────────────
 
     #[test]
     fn take_buffers_returns_empty_buffers_and_leaves_parser_empty() {

@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 125.C13 regression tests: the sparse-row trailing-blank trim must
+//! Regression tests: the sparse-row trailing-blank trim must
 //! stop at image cells.
 //!
 //! An image cell is a default-tag space, so every row-level trim loop used to
@@ -287,7 +287,7 @@ fn cells_of(buf: &Buffer, id: u64) -> usize {
         .count()
 }
 
-// ── ECH and trailing image cells (Task 125.C11) ─────────────────────────
+// ── ECH and trailing image cells ─────────────────────────
 
 /// Place a `cols` x 1 image at the start of row 0 and park the cursor at
 /// `(x, 0)`.

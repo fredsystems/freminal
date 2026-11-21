@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! `RenderState`'s drop-time GL retirement (Task 125.C2).
+//! `RenderState`'s drop-time GL retirement.
 //!
 //! These drive the real `new_render_state` / `Drop` path against the
 //! `gl-recording` facade (no GL context needed), proving that discarding a

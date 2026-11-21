@@ -1,4 +1,4 @@
-//! Close-on-running-command guard (Task 98).
+//! Close-on-running-command guard.
 //!
 //! When the user attempts to close a pane, tab, or window — or quit the
 //! application — while a shell in the affected scope has a running foreground
@@ -12,8 +12,8 @@
 //!   latest [`TerminalSnapshot`] via the pane's `ArcSwap` without locking or
 //!   mutating emulator state.
 //! - The [`RunningCommandInfo`] descriptor surfaced to the dialog.
-//! - The [`CloseGuardDialog`] modal (98.4) and the [`PendingClose`] intent
-//!   carried while the dialog is open (98.5–98.7).
+//! - The [`CloseGuardDialog`] modal and the [`PendingClose`] intent
+//!   carried while the dialog is open.
 //!
 //! "Running" means a [`CommandStatus::Running`] block that has additionally
 //! received its `OSC 133 C` (output-start) marker — i.e. a command actually
@@ -149,7 +149,7 @@ pub(in crate::gui) enum CloseScope {
     /// Close this window (and, if it is the last, quit).
     Window,
     /// Close this window, which owns an open Settings modal with unsaved
-    /// edits (issue #401). Distinct from `Window` because it guards on
+    /// edits. Distinct from `Window` because it guards on
     /// unsaved config edits rather than a running foreground command, and
     /// resolving it also tears down the settings OS window.
     WindowUnsavedSettings,
@@ -175,7 +175,7 @@ pub(in crate::gui) enum CloseDialogOutcome {
     ForceClose,
 }
 
-/// The close-guard confirmation modal (Task 98.4).
+/// The close-guard confirmation modal.
 ///
 /// Lives on `PerWindowState`, mirroring the paste-guard / broadcast-guard
 /// dialogs. Registered in `ui_overlay_open` so its keys do not leak to the
@@ -463,7 +463,7 @@ impl super::FreminalGui {
         self.gather_running_for_window(win)
     }
 
-    /// Handle a `QuitAll` request (issue #509): close every open window,
+    /// Handle a `QuitAll` request: close every open window,
     /// having first snapshotted the complete multi-window session topology
     /// exactly once.
     ///

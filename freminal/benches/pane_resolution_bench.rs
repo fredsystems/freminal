@@ -3,14 +3,13 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Pane-resolution benchmarks (Task 122, subtask 122.14).
+//! Pane-resolution benchmarks.
 //!
-//! Two distinct call sites are covered, for one reason: subtask 122.3
-//! re-types **all five** of these functions onto toolkit-neutral geometry
-//! (`freminal_common::geometry::{Rect, Point}`, migrated from `egui::Rect`/
-//! `Pos2` by this subtask), so this file is 122.3's performance gate. Any
-//! post-122.3 run must not regress more than the 15% threshold in
-//! `performance-benchmarks`.
+//! Two distinct call sites are covered, for one reason: **all five** of these
+//! functions work on toolkit-neutral geometry
+//! (`freminal_common::geometry::{Rect, Point}`, not `egui::Rect`/`Pos2`), so
+//! this file is the performance gate for that geometry. A run must not
+//! regress more than the 15% threshold in `performance-benchmarks`.
 //!
 //! **The pointer-motion chain** (`app_impl.rs:905-990`), which runs on every
 //! `CursorMoved` event outside any frame, on the `freminal-windowing` fast
@@ -39,11 +38,10 @@
 //! Deliberately **excluded**: the free functions
 //! `pointer_motion_needs_repaint_decision`, `pane_hover_region_risk`,
 //! `animation_in_flight_composed`, and `pointer_in_gutter_strip`, plus the
-//! pane-resolution chain `resolve_pane_under_pointer` that subtask 122.5
-//! extracted. All live in the private `gui::pointer_motion` module (moved
-//! there from `app_impl.rs` by subtask 122.5a) and are not reachable from an
+//! pane-resolution chain `resolve_pane_under_pointer`. All live in the private `gui::pointer_motion` module (moved
+//! there from `app_impl.rs`) and are not reachable from an
 //! external bench crate without widening that module's visibility — a trade
-//! the 122.14 amendment and 122.5a both declined. The four predicates are
+//! that was deliberately declined. The four predicates are
 //! O(1) boolean compositions over already-resolved flags, so a wall-clock
 //! benchmark of them would measure Criterion's own harness overhead rather
 //! than freminal; they and the chain are covered by unit tests in
@@ -208,8 +206,9 @@ fn build_balanced_tree(pane_count: usize) -> (PaneTree, Vec<PaneId>) {
 /// worse for [`PaneTree::find`] of the last leaf: a full depth-first search
 /// visits the same `n` leaves and `n-1` internal nodes under either shape,
 /// only in a different order. Both shapes are measured for both functions so
-/// that the recorded baseline (see the "122.14 recorded baseline" section of
-/// `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md`) states the difference
+/// that the recorded baseline (see `Documents/DESIGN_DECISIONS.md`,
+/// "Orchestration Extraction" / "Benchmarking pane resolution on
+/// a development laptop") states the difference
 /// rather than leaving it to be assumed.
 fn build_chain_tree(pane_count: usize) -> (PaneTree, Vec<PaneId>) {
     let mut id_gen = PaneIdGenerator::new(0);

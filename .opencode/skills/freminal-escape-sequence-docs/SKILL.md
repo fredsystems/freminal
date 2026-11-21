@@ -34,6 +34,10 @@ bug in the documentation itself.
    update.
 5. **If the change affects the Specification Coverage Summary table
    in `ESCAPE_SEQUENCE_COVERAGE.md`**, update that row as well.
+6. **If a terminfo capability describes the sequence** (or the key
+   it encodes), the terminfo entry and XTGETTCAP must change with it:
+   follow `freminal-terminfo` (edit `res/freminal.ti`, mirror
+   `lookup_termcap`, run `cargo xtask terminfo`).
 
 ## What counts as "an escape sequence change"
 

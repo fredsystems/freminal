@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! First-run onboarding overlay (subtask 71.20).
+//! First-run onboarding overlay.
 //!
 //! A three-panel modal dialog shown on the first launch of Freminal (or
 //! whenever the user invokes `Help -> Show Welcome`).  The panels introduce
