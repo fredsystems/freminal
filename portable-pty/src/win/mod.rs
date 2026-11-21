@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use winapi::shared::minwindef::DWORD;
 use winapi::um::minwinbase::STILL_ACTIVE;
-use winapi::um::processthreadsapi::*;
+use winapi::um::processthreadsapi::{GetExitCodeProcess, GetProcessId, TerminateProcess};
 use winapi::um::synchapi::WaitForSingleObject;
 use winapi::um::winbase::INFINITE;
 
@@ -33,12 +33,12 @@ fn lock_proc(proc: &Mutex<OwnedHandle>) -> IoResult<std::sync::MutexGuard<'_, Ow
 }
 
 impl WinChild {
-    fn is_complete(&mut self) -> IoResult<Option<ExitStatus>> {
+    fn is_complete(&self) -> IoResult<Option<ExitStatus>> {
         let mut status: DWORD = 0;
         let proc = lock_proc(&self.proc)?
             .try_clone()
             .map_err(|e| IoError::other(format!("failed to clone process handle: {e}")))?;
-        let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as _, &mut status) };
+        let res = unsafe { GetExitCodeProcess(proc.as_raw_handle().cast(), &raw mut status) };
         if res != 0 {
             if status == STILL_ACTIVE {
                 Ok(None)
@@ -50,11 +50,11 @@ impl WinChild {
         }
     }
 
-    fn do_kill(&mut self) -> IoResult<()> {
+    fn do_kill(&self) -> IoResult<()> {
         let proc = lock_proc(&self.proc)?
             .try_clone()
             .map_err(|e| IoError::other(format!("failed to clone process handle: {e}")))?;
-        let res = unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
+        let res = unsafe { TerminateProcess(proc.as_raw_handle().cast(), 1) };
         let err = IoError::last_os_error();
         if res == 0 { Err(err) } else { Ok(()) }
     }
@@ -71,10 +71,7 @@ impl ChildKiller for WinChild {
         let proc_handle = lock_proc(&self.proc)
             .ok()
             .and_then(|guard| guard.try_clone().ok());
-        match proc_handle {
-            Some(handle) => Box::new(WinChildKiller { proc: Some(handle) }),
-            None => Box::new(WinChildKiller { proc: None }),
-        }
+        Box::new(WinChildKiller { proc: proc_handle })
     }
 }
 
@@ -88,14 +85,14 @@ impl ChildKiller for WinChildKiller {
         let Some(proc) = &self.proc else {
             return Err(IoError::other("no process handle available to kill"));
         };
-        let res = unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
+        let res = unsafe { TerminateProcess(proc.as_raw_handle().cast(), 1) };
         let err = IoError::last_os_error();
         if res == 0 { Err(err) } else { Ok(()) }
     }
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
         let handle = self.proc.as_ref().and_then(|h| h.try_clone().ok());
-        Box::new(WinChildKiller { proc: handle })
+        Box::new(Self { proc: handle })
     }
 }
 
@@ -112,10 +109,10 @@ impl Child for WinChild {
             .try_clone()
             .map_err(|e| IoError::other(format!("failed to clone process handle: {e}")))?;
         unsafe {
-            WaitForSingleObject(proc.as_raw_handle() as _, INFINITE);
+            WaitForSingleObject(proc.as_raw_handle().cast(), INFINITE);
         }
         let mut status: DWORD = 0;
-        let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as _, &mut status) };
+        let res = unsafe { GetExitCodeProcess(proc.as_raw_handle().cast(), &raw mut status) };
         if res != 0 {
             Ok(ExitStatus::with_exit_code(status))
         } else {
@@ -125,7 +122,7 @@ impl Child for WinChild {
 
     fn process_id(&self) -> Option<u32> {
         let guard = lock_proc(&self.proc).ok()?;
-        let res = unsafe { GetProcessId(guard.as_raw_handle() as _) };
+        let res = unsafe { GetProcessId(guard.as_raw_handle().cast()) };
         if res == 0 { None } else { Some(res) }
     }
 
@@ -138,7 +135,7 @@ impl Child for WinChild {
 impl std::future::Future for WinChild {
     type Output = anyhow::Result<ExitStatus>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<anyhow::Result<ExitStatus>> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<anyhow::Result<ExitStatus>> {
         match self.is_complete() {
             Ok(Some(status)) => Poll::Ready(Ok(status)),
             Err(err) => Poll::Ready(Err(err).context("Failed to retrieve process exit status")),
@@ -181,7 +178,7 @@ impl std::future::Future for WinChild {
                             // `unsafe impl Send`.
                             let handle = handle;
                             unsafe {
-                                WaitForSingleObject(handle.0 as _, INFINITE);
+                                WaitForSingleObject(handle.0.cast(), INFINITE);
                             }
                             waker.wake();
                         }) {

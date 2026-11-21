@@ -6,9 +6,9 @@ use filedescriptor::{FileDescriptor, Pipe};
 use std::sync::{Arc, Mutex};
 use winapi::um::wincon::COORD;
 
-/// A readable ConPTY handle that also satisfies [`crate::PtyReader`].
+/// A readable `ConPTY` handle that also satisfies [`crate::PtyReader`].
 ///
-/// Windows ConPTY exposes no termios, so `PtyReader` on this platform is just
+/// Windows `ConPTY` exposes no termios, so `PtyReader` on this platform is just
 /// `Read + Send` with no extra methods — this wrapper merely forwards reads.
 struct WinPtyReader {
     inner: FileDescriptor,
@@ -31,10 +31,7 @@ impl PtySystem for ConPtySystem {
         let stdout = Pipe::new()?;
 
         let con = PseudoCon::new(
-            COORD {
-                X: size.cols as i16,
-                Y: size.rows as i16,
-            },
+            console_coord(size.cols, size.rows)?,
             stdin.read,
             stdout.write,
         )?;
@@ -74,10 +71,7 @@ impl Inner {
         pixel_width: u16,
         pixel_height: u16,
     ) -> Result<(), Error> {
-        self.con.resize(COORD {
-            X: num_cols as i16,
-            Y: num_rows as i16,
-        })?;
+        self.con.resize(console_coord(num_cols, num_rows)?)?;
         self.size = PtySize {
             rows: num_rows,
             cols: num_cols,
@@ -86,6 +80,15 @@ impl Inner {
         };
         Ok(())
     }
+}
+
+/// Convert a pty size to a console `COORD`, rejecting sizes beyond `i16::MAX`
+/// rather than wrapping them into a negative size.
+fn console_coord(cols: u16, rows: u16) -> anyhow::Result<COORD> {
+    Ok(COORD {
+        X: i16::try_from(cols).map_err(|e| anyhow::anyhow!("pty width {cols} too large: {e}"))?,
+        Y: i16::try_from(rows).map_err(|e| anyhow::anyhow!("pty height {rows} too large: {e}"))?,
+    })
 }
 
 /// Helper to lock the inner mutex, mapping a poisoned mutex to an anyhow error.
@@ -140,8 +143,7 @@ impl MasterPty for ConPtyMasterPty {
 
 impl SlavePty for ConPtySlavePty {
     fn spawn_command(&self, cmd: CommandBuilder) -> anyhow::Result<Box<dyn Child + Send + Sync>> {
-        let inner = lock_inner(&self.inner)?;
-        let child = inner.con.spawn_command(cmd)?;
+        let child = lock_inner(&self.inner)?.con.spawn_command(&cmd)?;
         Ok(Box::new(child))
     }
 }

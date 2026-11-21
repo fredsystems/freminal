@@ -1529,12 +1529,20 @@ privileges; inside a pane it does not, which is why the local forms above use `-
 The clippy lint set is declared once, in `[workspace.lints.clippy]` in the root
 `Cargo.toml`, and inherited with `[lints] workspace = true` by every first-party
 crate: `freminal`, `freminal-buffer`, `freminal-common`, `freminal-notify`,
-`freminal-terminal-emulator`, `freminal-windowing` and `xtask`. The crate-root
+`freminal-terminal-emulator`, `freminal-windowing`, `xtask` and the vendored
+`portable-pty`. The crate-root
 `#![deny(...)]` blocks that used to repeat the set in every `lib.rs` / `main.rs`
 are gone. `xtask` previously lacked the `cargo`, `unwrap_used` and `expect_used`
-lints and now gets the full set. The vendored `portable-pty` crate stays opted
-out (it does not inherit workspace lints), because it is third-party code that
-we do not hold to our bar.
+lints and now gets the full set.
+
+The vendored `portable-pty` crate was originally left out, as third-party code
+that could then track upstream without lint churn. It opted in on 2026-11-21
+(maintainer decision): it runs in every pane, and the lint pass found real
+Windows defects -- an unaligned `[u16]` view of registry bytes (undefined
+behaviour), an under-aligned buffer handed to Win32 as a
+`PROC_THREAD_ATTRIBUTE_LIST`, and a console size cast that wrapped silently. Freminal's copy has diverged from upstream
+(`portable-pty/vendored.md` lists the changes), so a re-sync is a manual merge
+in any case.
 
 ### Why `[workspace.lints]` and not crate-root attributes
 

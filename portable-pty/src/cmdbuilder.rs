@@ -29,9 +29,9 @@ impl EnvEntry {
     fn map_key(k: OsString) -> OsString {
         if cfg!(windows) {
             // Best-effort lowercase transformation of an os string
-            match k.to_str() {
-                Some(s) => s.to_lowercase().into(),
-                None => k,
+            match k.into_string() {
+                Ok(s) => s.to_lowercase().into(),
+                Err(k) => k,
             }
         } else {
             k
@@ -102,104 +102,116 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
     }
 
     #[cfg(windows)]
+    add_windows_registry_env(&mut env);
+
+    env
+}
+
+/// Merge the system and user environment from the registry into `env`,
+/// so a spawned shell sees variables set since this process started.
+#[cfg(windows)]
+fn add_windows_registry_env(env: &mut BTreeMap<OsString, EnvEntry>) {
+    use std::os::windows::ffi::OsStringExt;
+    use winapi::um::processenv::ExpandEnvironmentStringsW;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegType};
+    use winreg::types::FromRegValue;
+    use winreg::{RegKey, RegValue};
+
+    fn reg_value_to_string(value: &RegValue) -> anyhow::Result<OsString> {
+        match value.vtype {
+            RegType::REG_EXPAND_SZ => {
+                // Decode rather than reinterpret: `value.bytes` is a `Vec<u8>`
+                // with no 2-byte alignment guarantee, so viewing it as `[u16]`
+                // in place would be undefined behaviour.
+                let (pairs, _) = value.bytes.as_chunks::<2>();
+                let mut src: Vec<u16> =
+                    pairs.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
+                // `ExpandEnvironmentStringsW` reads up to a NUL terminator.
+                if src.last() != Some(&0) {
+                    src.push(0);
+                }
+                let size =
+                    unsafe { ExpandEnvironmentStringsW(src.as_ptr(), std::ptr::null_mut(), 0) };
+                let mut buf = vec![0u16; usize::try_from(size)? + 1];
+                let buf_len = u32::try_from(buf.len())?;
+                unsafe { ExpandEnvironmentStringsW(src.as_ptr(), buf.as_mut_ptr(), buf_len) };
+
+                let mut buf = buf.as_slice();
+                while matches!(buf.last(), Some(0)) {
+                    buf = &buf[0..buf.len() - 1];
+                }
+                Ok(OsString::from_wide(buf))
+            }
+            _ => Ok(OsString::from_reg_value(value)?),
+        }
+    }
+
+    if let Ok(sys_env) = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey("System\\CurrentControlSet\\Control\\Session Manager\\Environment")
     {
-        use std::os::windows::ffi::OsStringExt;
-        use winapi::um::processenv::ExpandEnvironmentStringsW;
-        use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegType};
-        use winreg::types::FromRegValue;
-        use winreg::{RegKey, RegValue};
-
-        fn reg_value_to_string(value: &RegValue) -> anyhow::Result<OsString> {
-            match value.vtype {
-                RegType::REG_EXPAND_SZ => {
-                    let src = unsafe {
-                        std::slice::from_raw_parts(
-                            value.bytes.as_ptr() as *const u16,
-                            value.bytes.len() / 2,
-                        )
-                    };
-                    let size =
-                        unsafe { ExpandEnvironmentStringsW(src.as_ptr(), std::ptr::null_mut(), 0) };
-                    let mut buf = vec![0u16; size as usize + 1];
-                    unsafe {
-                        ExpandEnvironmentStringsW(src.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
-                    };
-
-                    let mut buf = buf.as_slice();
-                    while let Some(0) = buf.last() {
-                        buf = &buf[0..buf.len() - 1];
-                    }
-                    Ok(OsString::from_wide(buf))
+        for (name, value) in sys_env.enum_values().flatten() {
+            {
+                if name.eq_ignore_ascii_case("username") {
+                    continue;
                 }
-                _ => Ok(OsString::from_reg_value(value)?),
-            }
-        }
-
-        if let Ok(sys_env) = RegKey::predef(HKEY_LOCAL_MACHINE)
-            .open_subkey("System\\CurrentControlSet\\Control\\Session Manager\\Environment")
-        {
-            for (name, value) in sys_env.enum_values().flatten() {
-                {
-                    if name.eq_ignore_ascii_case("username") {
-                        continue;
-                    }
-                    if let Ok(value) = reg_value_to_string(&value) {
-                        log::trace!("adding SYS env: {:?} {:?}", name, value);
-                        env.insert(
-                            EnvEntry::map_key(name.clone().into()),
-                            EnvEntry {
-                                is_from_base_env: true,
-                                preferred_key: name.into(),
-                                value,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        if let Ok(sys_env) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment") {
-            for (name, value) in sys_env.enum_values().flatten() {
-                {
-                    if let Ok(value) = reg_value_to_string(&value) {
-                        // Merge the system and user paths together
-                        let value = if name.eq_ignore_ascii_case("path") {
-                            match env.get(&EnvEntry::map_key(name.clone().into())) {
-                                Some(entry) => {
-                                    let mut result = OsString::new();
-                                    result.push(&entry.value);
-                                    result.push(";");
-                                    result.push(&value);
-                                    result
-                                }
-                                None => value,
-                            }
-                        } else {
-                            value
-                        };
-
-                        log::trace!("adding USER env: {:?} {:?}", name, value);
-                        env.insert(
-                            EnvEntry::map_key(name.clone().into()),
-                            EnvEntry {
-                                is_from_base_env: true,
-                                preferred_key: name.into(),
-                                value,
-                            },
-                        );
-                    }
+                if let Ok(value) = reg_value_to_string(&value) {
+                    log::trace!("adding SYS env: {name:?} {}", value.display());
+                    env.insert(
+                        EnvEntry::map_key(name.clone().into()),
+                        EnvEntry {
+                            is_from_base_env: true,
+                            preferred_key: name.into(),
+                            value,
+                        },
+                    );
                 }
             }
         }
     }
 
-    env
+    if let Ok(sys_env) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment") {
+        for (name, value) in sys_env.enum_values().flatten() {
+            {
+                if let Ok(value) = reg_value_to_string(&value) {
+                    // Merge the system and user paths together
+                    let value = if name.eq_ignore_ascii_case("path") {
+                        match env.get(&EnvEntry::map_key(name.clone().into())) {
+                            Some(entry) => {
+                                let mut result = OsString::new();
+                                result.push(&entry.value);
+                                result.push(";");
+                                result.push(&value);
+                                result
+                            }
+                            None => value,
+                        }
+                    } else {
+                        value
+                    };
+
+                    log::trace!("adding USER env: {name:?} {}", value.display());
+                    env.insert(
+                        EnvEntry::map_key(name.clone().into()),
+                        EnvEntry {
+                            is_from_base_env: true,
+                            preferred_key: name.into(),
+                            value,
+                        },
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// `CommandBuilder` is used to prepare a command to be spawned into a pty.
 /// The interface is intentionally similar to that of `std::process::Command`.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+// The `unsafe` in this type's methods is libc / Win32 FFI (`getpwuid`,
+// `ExpandEnvironmentStringsW`) and relies on no invariant of these fields, so a
+// deserialized value cannot make it unsound.
+#[cfg_attr(feature = "serde", allow(clippy::unsafe_derive_deserialize))]
 pub struct CommandBuilder {
     args: Vec<OsString>,
     envs: BTreeMap<OsString, EnvEntry>,
@@ -224,6 +236,7 @@ impl CommandBuilder {
     }
 
     /// Create a new builder instance from a pre-built argument vector
+    #[must_use]
     pub fn from_argv(args: Vec<OsString>) -> Self {
         Self {
             args,
@@ -241,16 +254,18 @@ impl CommandBuilder {
     /// boundaries (eg: flatpak) to workaround issues like:
     /// <https://github.com/flatpak/flatpak/issues/3697>
     /// <https://github.com/flatpak/flatpak/issues/3285>
-    pub fn set_controlling_tty(&mut self, controlling_tty: bool) {
+    pub const fn set_controlling_tty(&mut self, controlling_tty: bool) {
         self.controlling_tty = controlling_tty;
     }
 
-    pub fn get_controlling_tty(&self) -> bool {
+    #[must_use]
+    pub const fn get_controlling_tty(&self) -> bool {
         self.controlling_tty
     }
 
     /// Create a new builder instance that will run some idea of a default
     /// program.  Such a builder will panic if `arg` is called on it.
+    #[must_use]
     pub fn new_default_prog() -> Self {
         Self {
             args: vec![],
@@ -263,11 +278,15 @@ impl CommandBuilder {
     }
 
     /// Returns true if this builder was created via `new_default_prog`
-    pub fn is_default_prog(&self) -> bool {
+    #[must_use]
+    pub const fn is_default_prog(&self) -> bool {
         self.args.is_empty()
     }
 
     /// Append an argument to the current command line.
+    ///
+    /// # Errors
+    ///
     /// Returns an error if called on a builder created via `new_default_prog`.
     pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -278,13 +297,16 @@ impl CommandBuilder {
         Ok(())
     }
 
-    /// If a builder is_default_prog, then this function can be used to
+    /// If a builder `is_default_prog`, then this function can be used to
     /// set the actual prog that should be used.
     /// This is intended to facilitate plumbing through the handling
     /// of the underlying default prog when merging together supplemental
     /// env and cwd information.
     /// You will not typically use this method in your own code.
-    /// Returns an error if called on a non-default_prog builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if called on a non-`default_prog` builder.
     pub fn replace_default_prog(
         &mut self,
         args: impl IntoIterator<Item = impl AsRef<OsStr>>,
@@ -301,6 +323,10 @@ impl CommandBuilder {
     }
 
     /// Append a sequence of arguments to the current command line
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if called on a builder created via `new_default_prog`.
     pub fn args<I, S>(&mut self, args: I) -> anyhow::Result<()>
     where
         I: IntoIterator<Item = S>,
@@ -312,11 +338,12 @@ impl CommandBuilder {
         Ok(())
     }
 
-    pub fn get_argv(&self) -> &Vec<OsString> {
+    #[must_use]
+    pub const fn get_argv(&self) -> &Vec<OsString> {
         &self.args
     }
 
-    pub fn get_argv_mut(&mut self) -> &mut Vec<OsString> {
+    pub const fn get_argv_mut(&mut self) -> &mut Vec<OsString> {
         &mut self.args
     }
 
@@ -375,7 +402,8 @@ impl CommandBuilder {
         self.cwd.take();
     }
 
-    pub fn get_cwd(&self) -> Option<&OsString> {
+    #[must_use]
+    pub const fn get_cwd(&self) -> Option<&OsString> {
         self.cwd.as_ref()
     }
 
@@ -416,6 +444,10 @@ impl CommandBuilder {
 
     /// Return the configured command and arguments as a single string,
     /// quoted per the unix shell conventions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an argument is not valid UTF-8.
     pub fn as_unix_command_line(&self) -> anyhow::Result<String> {
         let mut strs = vec![];
         for arg in &self.args {
@@ -430,7 +462,7 @@ impl CommandBuilder {
 
 #[cfg(unix)]
 impl CommandBuilder {
-    pub fn umask(&mut self, mask: Option<libc::mode_t>) {
+    pub const fn umask(&mut self, mask: Option<libc::mode_t>) {
         self.umask = mask;
     }
 
@@ -486,7 +518,10 @@ impl CommandBuilder {
                         ));
                     }
                 }
-                errors.push(format!("No viable candidates found in PATH {path:?}"));
+                errors.push(format!(
+                    "No viable candidates found in PATH {}",
+                    path.display()
+                ));
             } else {
                 errors.push("Unable to resolve the PATH".to_string());
             }
@@ -500,26 +535,24 @@ impl CommandBuilder {
                 "Unable to spawn {} because it is a directory",
                 exe_path.display()
             );
-        } else {
-            if let Err(err) = access(exe_path, AccessFlags::X_OK) {
-                if access(exe_path, AccessFlags::F_OK).is_ok() {
-                    anyhow::bail!(
-                        "Unable to spawn {} because it is not executable ({err:#})",
-                        exe_path.display()
-                    );
-                } else {
-                    anyhow::bail!(
-                        "Unable to spawn {} because it doesn't exist on the filesystem ({err:#})",
-                        exe_path.display()
-                    );
-                }
-            }
-
-            Ok(exe.to_owned())
         }
+        if let Err(err) = access(exe_path, AccessFlags::X_OK) {
+            if access(exe_path, AccessFlags::F_OK).is_ok() {
+                anyhow::bail!(
+                    "Unable to spawn {} because it is not executable ({err:#})",
+                    exe_path.display()
+                );
+            }
+            anyhow::bail!(
+                "Unable to spawn {} because it doesn't exist on the filesystem ({err:#})",
+                exe_path.display()
+            );
+        }
+
+        Ok(exe.to_owned())
     }
 
-    /// Convert the CommandBuilder to a `std::process::Command` instance.
+    /// Convert the `CommandBuilder` to a `std::process::Command` instance.
     pub(crate) fn as_command(&self) -> anyhow::Result<std::process::Command> {
         use std::os::unix::process::CommandExt;
 
@@ -528,7 +561,7 @@ impl CommandBuilder {
             .cwd
             .as_deref()
             .filter(|dir| std::path::Path::new(dir).is_dir())
-            .unwrap_or(home.as_ref());
+            .unwrap_or_else(|| home.as_ref());
         let shell = self.get_shell();
 
         let mut cmd = if self.is_default_prog() {
@@ -537,7 +570,7 @@ impl CommandBuilder {
             // Run the shell as a login shell by prefixing the shell's
             // basename with `-` and setting that as argv0
             let basename = shell.rsplit('/').next().unwrap_or(&shell);
-            cmd.arg0(format!("-{}", basename));
+            cmd.arg0(format!("-{basename}"));
             cmd
         } else {
             let resolved = self.search_path(&self.args[0], dir)?;
@@ -604,7 +637,9 @@ impl CommandBuilder {
 impl CommandBuilder {
     fn search_path(&self, exe: &OsStr) -> OsString {
         if let Some(path) = self.get_env("PATH") {
-            let extensions = self.get_env("PATHEXT").unwrap_or(OsStr::new(".EXE"));
+            let extensions = self
+                .get_env("PATHEXT")
+                .unwrap_or_else(|| OsStr::new(".EXE"));
             for path in std::env::split_paths(&path) {
                 // Check for exactly the user's string in this path dir
                 let candidate = path.join(exe);
@@ -672,7 +707,7 @@ impl CommandBuilder {
         } in self.envs.values()
         {
             block.extend(preferred_key.encode_wide());
-            block.push(b'=' as u16);
+            block.push(u16::from(b'='));
             block.extend(value.encode_wide());
             block.push(0);
         }
@@ -682,10 +717,11 @@ impl CommandBuilder {
         block
     }
 
+    #[must_use]
     pub fn get_shell(&self) -> String {
         let exe: OsString = self
             .get_env("ComSpec")
-            .unwrap_or(OsStr::new("cmd.exe"))
+            .unwrap_or_else(|| OsStr::new("cmd.exe"))
             .into();
         exe.into_string()
             .unwrap_or_else(|_| "%CompSpec%".to_string())
@@ -696,7 +732,7 @@ impl CommandBuilder {
 
         let exe: OsString = if self.is_default_prog() {
             self.get_env("ComSpec")
-                .unwrap_or(OsStr::new("cmd.exe"))
+                .unwrap_or_else(|| OsStr::new("cmd.exe"))
                 .into()
         } else {
             self.search_path(&self.args[0])
@@ -713,8 +749,8 @@ impl CommandBuilder {
             cmdline.push(' ' as u16);
             anyhow::ensure!(
                 !arg.encode_wide().any(|c| c == 0),
-                "invalid encoding for command line argument {:?}",
-                arg
+                "invalid encoding for command line argument {}",
+                arg.display()
             );
             Self::append_quoted(arg, &mut cmdline);
         }
@@ -754,8 +790,8 @@ impl CommandBuilder {
                     cmdline.push('\\' as u16);
                 }
                 break;
-            } else if arg[i] == b'"' as u16 {
-                for _ in 0..num_backslashes * 2 + 1 {
+            } else if arg[i] == u16::from(b'"') {
+                for _ in 0..=(num_backslashes * 2) {
                     cmdline.push('\\' as u16);
                 }
                 cmdline.push(arg[i]);
@@ -802,16 +838,19 @@ mod tests {
         cmd.env("bar key", "bar value");
 
         let iterated_envs = cmd.iter_extra_env_as_str().collect::<Vec<_>>();
-        println!("iterated_envs: {:?}", iterated_envs);
-        assert!(iterated_envs == vec![("bar key", "bar value"), ("foo key", "foo value")]);
+        println!("iterated_envs: {iterated_envs:?}");
+        assert_eq!(
+            iterated_envs,
+            vec![("bar key", "bar value"), ("foo key", "foo value")]
+        );
 
         {
             let mut cmd = cmd.clone();
             cmd.env_remove("foo key");
 
             let iterated_envs = cmd.iter_extra_env_as_str().collect::<Vec<_>>();
-            println!("iterated_envs: {:?}", iterated_envs);
-            assert!(iterated_envs == vec![("bar key", "bar value")]);
+            println!("iterated_envs: {iterated_envs:?}");
+            assert_eq!(iterated_envs, vec![("bar key", "bar value")]);
         }
 
         {
@@ -819,8 +858,8 @@ mod tests {
             cmd.env_remove("bar key");
 
             let iterated_envs = cmd.iter_extra_env_as_str().collect::<Vec<_>>();
-            println!("iterated_envs: {:?}", iterated_envs);
-            assert!(iterated_envs == vec![("foo key", "foo value")]);
+            println!("iterated_envs: {iterated_envs:?}");
+            assert_eq!(iterated_envs, vec![("foo key", "foo value")]);
         }
 
         {
@@ -828,8 +867,8 @@ mod tests {
             cmd.env_clear();
 
             let iterated_envs = cmd.iter_extra_env_as_str().collect::<Vec<_>>();
-            println!("iterated_envs: {:?}", iterated_envs);
-            assert!(iterated_envs.is_empty());
+            println!("iterated_envs: {iterated_envs:?}");
+            assert_eq!(iterated_envs, Vec::<(&str, &str)>::new());
         }
     }
 
@@ -838,7 +877,10 @@ mod tests {
     fn test_env_case_insensitive_override() {
         let mut cmd = CommandBuilder::new("dummy");
         cmd.env("Cargo_Pkg_Authors", "Not Wez");
-        assert!(cmd.get_env("cargo_pkg_authors") == Some(OsStr::new("Not Wez")));
+        assert_eq!(
+            cmd.get_env("cargo_pkg_authors"),
+            Some(OsStr::new("Not Wez"))
+        );
 
         cmd.env_remove("cARGO_pKG_aUTHORS");
         assert!(cmd.get_env("CARGO_PKG_AUTHORS").is_none());

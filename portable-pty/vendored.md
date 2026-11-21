@@ -22,3 +22,20 @@
 11. `win/mod.rs` — `kill()` now propagates errors instead of swallowing them.
 12. `win/mod.rs` — `Future::poll` on `WinChild` uses `AtomicBool` to prevent spawning
     duplicate waiter threads on repeated polls.
+13. `Cargo.toml` — opts into `[lints] workspace = true` (2026-11-21); the
+    findings were fixed rather than allowed. Behaviour changes:
+    - `cmdbuilder.rs` — the Windows registry `REG_EXPAND_SZ` bytes are decoded
+      as little-endian `u16`s instead of reinterpreted in place (the `Vec<u8>`
+      is not 2-byte aligned, so that was undefined behaviour), and NUL-
+      terminated before `ExpandEnvironmentStringsW`.
+    - `win/procthreadattr.rs` — the attribute list buffer is `Vec<usize>`, so
+      it has the alignment `PROC_THREAD_ATTRIBUTE_LIST` requires.
+    - `win/conpty.rs` — a pty size above `i16::MAX` is an error instead of
+      wrapping into a negative `COORD`.
+    - `lib.rs` — a pid that does not fit `pid_t` is an `InvalidInput` error
+      from `kill()` instead of a wrapped cast.
+    - `win/pseudocon.rs` — `lazy_static!` replaced by `std::sync::LazyLock`
+      (the `lazy_static` dependency is gone).
+    - Public `CommandBuilder` / `ExitStatus` accessors gained `#[must_use]` and
+      `const`; the internal unix and Windows `spawn_command` helpers take
+      `&CommandBuilder`.
