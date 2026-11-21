@@ -56,7 +56,7 @@ enriched stubs again and get re-decomposed at activation.
 | 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
 | 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Complete      | 129, 130, 131                      |
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Complete      | None                               |
-| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Pending merge | 130, 131                           |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Complete      | 130, 131                           |
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
 | 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
 | 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete      | 149                                |
@@ -8306,6 +8306,8 @@ diff). Dispositions:
   designators and HP `ESC F`/`l`/`m` are not planned with reasons. `SGR.md` needed no change.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
+
+**Merged** 2026-11-20 via PR #589 (`7cbaa865`).
 
 ---
 
